@@ -226,19 +226,34 @@ def main():
             except FileNotFoundError:
                 print(f"No notefile found at {NOTEFILE}")
         else:
-            from os import getcwd
-            try:
-                count = 0
-                for inst in Note().match_dir(NOTEFILE, getcwd()):
-                    count += 1
-                    print(Note.REC_TOP)
-                    print(inst, end="")
-                    print(Note.REC_BOT)
-                else:
-                    child_matches = len(list(Note().list(NOTEFILE)))
-                    print(f"{child_matches-count} matches in child directories")
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
+            if len(args.additional_args) == 0:
+                # show pwd notes
+                from os import getcwd
+                try:
+                    count = 0
+                    for inst in Note().match_dir(NOTEFILE, getcwd()):
+                        count += 1
+                        print(Note.REC_TOP)
+                        print(inst, end="")
+                        print(Note.REC_BOT)
+                    else:
+                        child_matches = len(list(Note().list(NOTEFILE)))
+                        print(f"{child_matches-count} matches in child directories")
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+            elif len(args.additional_args) == 1:
+                SHORTCUTS = {
+                    'MOST_RECENT': ['last', 'l'],
+                }
+                if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
+                    # always displays the most recently created note
+                    last_note = "No notes to show.\n"
+                    for note in Note().list(NOTEFILE):
+                        last_note = note
+                    else:
+                        print(Note.REC_TOP)
+                        print(last_note, end="")
+                        print(Note.REC_BOT)
 
 if __name__ == "__main__":
     main()
