@@ -229,7 +229,7 @@ def main():
             flattened = sys.stdin.readline().strip()
 
         try:
-            for inst in Note().search(NOTEFILE, flattened):
+            for inst in Note().search_i(NOTEFILE, flattened):
                 print(Note.REC_TOP)
                 print(inst, end="")
                 print(Note.REC_BOT)
