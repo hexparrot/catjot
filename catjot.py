@@ -188,71 +188,63 @@ def main():
     import sys
     NOTEFILE = Note.NOTEFILE
 
-    if not sys.stdin.isatty(): # is instead pipe input
-        if args.a: # Append arg supplied
-            # for: <somepipe> | jot -a
-            # like -a, only accepts one line
+    if args.a:  # requesting appending
+        # USAGE: jot -a "this is my note"
+        # USAGE: <somepipe> | jot -a
+        # `-a` limits input to a single line--additional lines will be truncated.
+        if sys.stdin.isatty(): # is interactive terminal
+            flattened = ' '.join(args.additional_args[0])
+        else: # is piped input
             flattened = sys.stdin.readline().strip()
-            Note().append(NOTEFILE, flattened)
-        elif args.d: # Delete
-            timestamp = sys.stdin.readline().strip()
-            # for: jot -d <stdin timestamp>
-            try:
-                Note().delete(NOTEFILE, int(timestamp))
-                Note().commit(NOTEFILE)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-                sys.exit(1)
-            except TypeError:
-                print(f"No note to pop for this path in {NOTEFILE}")
-                sys.exit(2)
-            except ValueError:
-                print(f"Timestamp argument not an integer value.")
-                sys.exit(3)
-        elif args.s: # Search
-            searchterm = stdin.readline().strip()
-            # for: jot -s <stdin searchterm>
-            try:
-                Note().delete(NOTEFILE, searchterm)
-                Note().commit(NOTEFILE)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-                sys.exit(1)
-            except TypeError:
-                print(f"No note to pop for this path in {NOTEFILE}")
-                sys.exit(2)
-            except ValueError:
-                print(f"Timestamp argument not an integer value.")
-                sys.exit(3)
-        else:
+
+        Note().append(NOTEFILE, flattened)
+    elif args.d: # requesting deletion
+        # USAGE: jot -d 1234567890
+        # USAGE: <somepipe> | jot -d
+        # `-d` accepts only a single line, an integer representing a timestamp.
+        # *all* notes with matching timestamp will be deleted, in all paths
+        if sys.stdin.isatty(): # is interactive terminal
+            flattened = args.additional_args[0]
+        else: # is piped input
+            flattened = sys.stdin.readline().strip()
+
+        try:
+            Note().delete(NOTEFILE, int(flattened))
+            Note().commit(NOTEFILE)
+        except FileNotFoundError:
+            print(f"No notefile found at {NOTEFILE}")
+            sys.exit(1)
+        except (TypeError,IndexError):
+            print(f"No note to pop for this path in {NOTEFILE}")
+            sys.exit(2)
+    elif args.s: # requesting search
+        # USAGE: jot -s "search term"
+        # USAGE: <somepipe> | jot -s
+        # `-s` accepts only a single line, a string to match
+        # *all* notes with matching string will be displayed, in all paths
+        # search is case-sensitive and does not span multiple lines
+        if sys.stdin.isatty(): # is interactive terminal
+            flattened = args.additional_args[0]
+        else: # is piped input
+            flattened = sys.stdin.readline().strip()
+
+        try:
+            Note().search(NOTEFILE, flattened)
+        except FileNotFoundError:
+            print(f"No notefile found at {NOTEFILE}")
+            sys.exit(1)
+        except TypeError:
+            print(f"No note to pop for this path in {NOTEFILE}")
+            sys.exit(2)
+    else: # no hyphenated args provided
+        if not sys.stdin.isatty(): # is the pipe (negated)
             # default append, will accept lines with no limit
+
             full_input = [line for line in sys.stdin]
             Note().append(NOTEFILE, ''.join(full_input))
-    else:
-        if args.a: # Append
-            # consumes all arguments, but still only creates single line
-            flattened = ' '.join(args.additional_args)
-            Note().append(NOTEFILE, flattened)
-        elif args.d: # Delete
-            # for: jot -d 123456789
-            try:
-                Note().delete(NOTEFILE, int(args.additional_args[0]))
-                Note().commit(NOTEFILE)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-            except TypeError:
-                print(f"No note to pop for this path in {NOTEFILE}")
-        elif args.s: # Search
-            # for: jot -s "searchterm"
-            try:
-                flattened = ' '.join(args.additional_args)
-                for inst in Note().search(NOTEFILE, flattened):
-                    print(Note.REC_TOP)
-                    print(inst, end="")
-                    print(Note.REC_BOT)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-        else:
+        else: # is interactive tty
+            # jot executed with no additional params, interactively
+
             import sys
 
             # Available shortcuts listed below, choose as many words you like
