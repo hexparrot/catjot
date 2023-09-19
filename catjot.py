@@ -180,9 +180,7 @@ def main():
     parser = argparse.ArgumentParser(description="Note Parser")
     parser.add_argument("-a", action="store_true", help="append message to .catjot")
     parser.add_argument("-s", action="store_true", help="search for term within .catjot")
-    parser.add_argument("-l", action="store_true", help="show all notes matching pwd")
     parser.add_argument("-d", action="store_true", help="delete all notes matching timestamp")
-    parser.add_argument("-p", action="store_true", help="delete most recent note in current dir")
     parser.add_argument("additional_args", nargs="*", help="argument values for search, delete, and append")
 
     args = parser.parse_args()
@@ -195,9 +193,11 @@ def main():
         Note().append(NOTEFILE, ''.join(full_input))
     else:
         if args.a: # Append
+            # for: jot -a "some note"
             flattened = ' '.join(args.additional_args)
             Note().append(NOTEFILE, flattened)
         elif args.d: # Delete
+            # for: jot -d 123456789
             try:
                 Note().delete(NOTEFILE, int(args.additional_args[0]))
                 Note().commit(NOTEFILE)
@@ -205,28 +205,11 @@ def main():
                 print(f"No notefile found at {NOTEFILE}")
             except TypeError:
                 print(f"No note to pop for this path in {NOTEFILE}")
-        elif args.p: # Pop
-            from os import getcwd
-            try:
-                Note().pop(NOTEFILE, getcwd())
-                Note().commit(NOTEFILE)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-            except TypeError:
-                print(f"No note to pop for this path in {NOTEFILE}")
         elif args.s: # Search
+            # for: jot -s "searchterm"
             try:
-                for inst in Note().list(NOTEFILE):
-                    flattened = ' '.join(args.additional_args)
-                    for inst in Note().search(NOTEFILE, flattened):
-                        print(Note.REC_TOP)
-                        print(inst, end="")
-                        print(Note.REC_BOT)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-        elif args.l: # List
-            try:
-                for inst in Note().list(NOTEFILE):
+                flattened = ' '.join(args.additional_args)
+                for inst in Note().search(NOTEFILE, flattened):
                     print(Note.REC_TOP)
                     print(inst, end="")
                     print(Note.REC_BOT)
