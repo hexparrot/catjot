@@ -132,11 +132,12 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "nnnnnote2\n")
 
     def test_string_representation(self):
-        Note.append(TMP_CATNOTE, "this is a note-o")
+        thenote = "this is a note-o"
+        Note.append(TMP_CATNOTE, thenote)
         inst = next(Note().list(TMP_CATNOTE))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
@@ -144,7 +145,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note().list(TMP_CATNOTE))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
@@ -152,7 +153,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note().search(TMP_CATNOTE, "take"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string_with_empty_lines(self):
         thenote = "notes can sometimes\n\n\n\ntake many lines"
@@ -160,7 +161,31 @@ class TestTaker(unittest.TestCase):
         inst = next(Note().search(TMP_CATNOTE, "many"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+
+    def test_search_multi_line_string_insensitive(self):
+        thenote = "notes can sometimes\nTAKE two lines"
+        Note.append(TMP_CATNOTE, thenote)
+        inst = next(Note().search_i(TMP_CATNOTE, "take"))
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+
+    def test_search_multi_line_string_with_empty_lines_insensitive(self):
+        thenote = "notes can sometimes\n\n\n\ntake mAny lines"
+        Note.append(TMP_CATNOTE, thenote)
+        inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+
+    def test_search_multi_line_string_with_split_words_insensitive(self):
+        thenote = "notes can sometimes\n\n\n\ntake mAny lines"
+        Note.append(TMP_CATNOTE, thenote)
+        inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_iterate_all_notes(self):
         multi = Note.iterate(FIXED_CATNOTE)

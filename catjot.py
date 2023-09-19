@@ -58,7 +58,7 @@ class Note(object):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         return f"{Note.LABEL_DIR}{self.pwd}\n" + \
                f"{Note.LABEL_DATE}{friendly_date}\n" + \
-               f"{Note.LABEL_DATA}{self.message}\n"
+               f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
     def append(cls, src, term):
@@ -168,6 +168,13 @@ class Note(object):
             if term in inst.message:
                 yield inst
 
+    @classmethod
+    def search_i(cls, src, term):
+        # match any that contain term in message
+        for inst in cls.iterate(src):
+            if term.lower() in inst.message.lower():
+                yield inst
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Note Parser")
@@ -231,7 +238,8 @@ def main():
             # Be mindful to not have any duplicate keys!
             SHORTCUTS = {
                 'MOST_RECENT': ['last', 'l'],
-                'MATCH_NOTE_NAIVE': ['match', 'm', 'search', 's'],
+                'MATCH_NOTE_NAIVE': ['match', 'm'],
+                'MATCH_NOTE_NAIVE_I': ['search', 's'],
             }
             if len(args.additional_args) == 0:
                 # show pwd notes
@@ -261,6 +269,16 @@ def main():
             elif len(args.additional_args) == 2:
                 if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
                     # match if "term [+term2] [..]" exists in any line of the note
+                    try:
+                        flattened = ' '.join(args.additional_args[1:])
+                        for inst in Note().search(NOTEFILE, flattened):
+                            print(Note.REC_TOP)
+                            print(inst, end="")
+                            print(Note.REC_BOT)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
+                    # match if "term [+term2] [..]" exists, case-insensitive!
                     try:
                         flattened = ' '.join(args.additional_args[1:])
                         for inst in Note().search(NOTEFILE, flattened):
