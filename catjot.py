@@ -242,6 +242,7 @@ def main():
                 'MATCH_NOTE_NAIVE_I': ['search', 's'],
                 'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
                 'SHOW_ALL': ['dump', 'display', 'd'],
+                'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
             }
             if len(args.additional_args) == 0:
                 # show pwd notes
@@ -306,6 +307,16 @@ def main():
                             print(Note.REC_BOT)
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
+                elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
+                    try:
+                        Note().delete(NOTEFILE, int(args.additional_args[1]))
+                        Note().commit(NOTEFILE)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                    except TypeError:
+                        print(f"No note to pop for this path in {NOTEFILE}")
+                    except ValueError:
+                        print(f"Timestamp argument not an integer value.")
 
 if __name__ == "__main__":
     main()
