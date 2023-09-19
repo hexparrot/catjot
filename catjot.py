@@ -51,6 +51,9 @@ class Note(object):
         pass
 
     def __str__(self):
+        """ Returns the string representation of a note.
+            This representation does not need to reflect the format
+            on the underlying .catjot file."""
         from datetime import datetime
         dt = datetime.fromtimestamp(self.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -60,6 +63,7 @@ class Note(object):
 
     @classmethod
     def append(cls, src, message):
+        """ Accepts non-falsy text and writes it to the .catjot file. """
         from time import time
 
         if not message: return
@@ -72,6 +76,9 @@ class Note(object):
 
     @classmethod
     def delete(cls, src, timestamp):
+        """ Deletes a single note from the .catjot file.
+            It first creates .catjot.new which should have the full contents
+            of the original minus any timestamps (likely one) that is omitted """
         newpath = src + ".new"
         with open(newpath, 'wt') as trunc_file:
             for inst in cls.iterate(src):
@@ -83,6 +90,7 @@ class Note(object):
 
     @classmethod
     def pop(cls, src, path):
+        """ Deletes the most recent note from the PWD """
         last_record = None
         for inst in cls.match_dir(src, path):
             last_record = inst.now
@@ -91,6 +99,9 @@ class Note(object):
 
     @classmethod
     def commit(cls, src):
+        """ Finally commits to the filesystem changes implemented by delete().
+            It is a separate function, but should be expected to be paired,
+            100% of the time, alongside pop/deletes """
         import shutil
 
         shutil.move(src, src + ".old")
@@ -98,7 +109,12 @@ class Note(object):
 
     @classmethod
     def iterate(cls, src):
+        """ Iterate all notes, across all paths.
+            Other functions should expect to start with this, pruning down unwanted
+            notes via a matching mechanism such as search() """
+
         def export_note(basic_struct):
+            """ Constructs a note based on collected information from the iteration below """
             retval = Note()
             retval.pwd = basic_struct['dir']
             retval.now = int(basic_struct['now'])
@@ -107,8 +123,12 @@ class Note(object):
 
         current_read = {'msg': []}
         with open(src, 'r') as file:
+            # open the file, read-only
             line = file.readline()
             while line:
+                # cleaned exists for line identification only.
+                # once the purpose of a line is determined, the content is sanitized more
+                # surgically starting from the original line contents.
                 cleaned = line.strip()
                 if cleaned == Note.LABEL_SEP:
                     if len(current_read['msg']) > 0:
@@ -133,7 +153,8 @@ class Note(object):
 
     @classmethod
     def list(cls, src):
-        # list all notes from NOTEFILE provided at src
+        """ Convenience function to iterate all notes corresponding to PWD
+            *as well* as all notes held by sub-directories. """
         from os import getcwd
 
         pwd = getcwd()
@@ -143,21 +164,23 @@ class Note(object):
 
     @classmethod
     def match_dir(cls, src, path_match):
-        # only list notes matching perfectly the path_match var
+        """ Convenience function to iterate all notes corresponding to PWD ONLY """
         for inst in cls.iterate(src):
             if path_match == inst.pwd:
                 yield inst
 
     @classmethod
     def search(cls, src, term):
-        # match any that contain term in message
+        """ Match any notes that contain term in message, single-line comparison.
+            case SENSITIVE """
         for inst in cls.iterate(src):
             if term in inst.message:
                 yield inst
 
     @classmethod
     def search_i(cls, src, term):
-        # match any that contain term in message
+        """ Match any notes that contain term in message, single-line comparison.
+            case INSENSITIVE """
         for inst in cls.iterate(src):
             if term.lower() in inst.message.lower():
                 yield inst
@@ -165,9 +188,9 @@ class Note(object):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Note Parser")
-    parser.add_argument("-a", action="store_true", help="append message to .catjot")
-    parser.add_argument("-s", action="store_true", help="search for term within .catjot")
-    parser.add_argument("-d", action="store_true", help="delete all notes matching timestamp")
+    parser.add_argument("-a", action="store_true", help="append single-line message")
+    parser.add_argument("-s", action="store_true", help="case-insensitive search for term")
+    parser.add_argument("-d", action="store_true", help="delete any notes matching timestamp")
     parser.add_argument("additional_args", nargs="*", help="argument values for search, delete, and append")
 
     args = parser.parse_args()
@@ -257,7 +280,7 @@ def main():
             }
 
             if len(args.additional_args) == 0:
-                # show pwd notes
+                # show notes originating from this PWD
                 from os import getcwd
                 try:
                     count = 0
@@ -274,7 +297,7 @@ def main():
                     sys.exit(1)
             elif len(args.additional_args) == 1:
                 if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
-                    # always displays the most recently created note
+                    # always displays the most recently created note in this PWD
                     last_note = "No notes to show.\n"
                     for note in Note().list(NOTEFILE):
                         last_note = note
@@ -283,6 +306,7 @@ def main():
                         print(last_note, end="")
                         print(Note.REC_BOT)
                 elif args.additional_args[0] in SHORTCUTS['DELETE_MOST_RECENT_PWD']:
+                    # always deletes the most recently created note in this PWD
                     from os import getcwd
                     try:
                         Note().pop(NOTEFILE, getcwd())
@@ -294,8 +318,9 @@ def main():
                         print(f"No note to pop for this path in {NOTEFILE}")
                         sys.exit(2)
                 elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
+                    # show all notes, from everywhere, everywhen
                     try:
-                        for inst in Note().list(NOTEFILE):
+                        for inst in Note().iterate(NOTEFILE):
                             print(Note.REC_TOP)
                             print(inst, end="")
                             print(Note.REC_BOT)
@@ -326,6 +351,7 @@ def main():
                         print(f"No notefile found at {NOTEFILE}")
                         sys.exit(1)
                 elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
+                    # delete any notes matching a precise timestamp
                     try:
                         Note().delete(NOTEFILE, int(args.additional_args[1]))
                         Note().commit(NOTEFILE)
@@ -341,3 +367,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
