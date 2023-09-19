@@ -117,9 +117,15 @@ class Note(object):
             """ Constructs a note based on collected information from the iteration below """
             retval = Note()
             retval.pwd = basic_struct['dir']
+            assert retval.pwd.startswith("/")
             retval.now = int(basic_struct['now'])
             retval.message = ''.join(basic_struct['msg'])
             return retval
+
+        def clean_extra_newlines(msg_lst):
+            """ Accepts a list and removes any newline-only lines """
+            while len(msg_lst) > 1 and msg_lst[-1] == '\n':
+                msg_lst.pop()
 
         current_read = {'msg': []}
         with open(src, 'r') as file:
@@ -132,8 +138,7 @@ class Note(object):
                 cleaned = line.strip()
                 if cleaned == Note.LABEL_SEP:
                     if len(current_read['msg']) > 0:
-                        while len(current_read['msg']) > 1 and current_read['msg'][-1] == '\n':
-                            current_read['msg'].pop()
+                        clean_extra_newlines(current_read['msg'])
                         yield export_note(current_read)
 
                     current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
@@ -145,10 +150,8 @@ class Note(object):
 
                 line = file.readline()
 
-            while len(current_read['msg']) > 1 and current_read['msg'][-1] == '\n':
-                current_read['msg'].pop()
-
             if 'dir' in current_read and 'now' in current_read:
+                clean_extra_newlines(current_read['msg'])
                 yield export_note(current_read)
 
     @classmethod
