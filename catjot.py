@@ -193,7 +193,10 @@ def main():
         # USAGE: <somepipe> | jot -a
         # `-a` limits input to a single line--additional lines will be truncated.
         if sys.stdin.isatty(): # is interactive terminal
-            flattened = ' '.join(args.additional_args[0])
+            try:
+                flattened = args.additional_args[0]
+            except IndexError:
+                sys.exit(3)
         else: # is piped input
             flattened = sys.stdin.readline().strip()
 
@@ -204,7 +207,10 @@ def main():
         # `-d` accepts only a single line, an integer representing a timestamp.
         # *all* notes with matching timestamp will be deleted, in all paths
         if sys.stdin.isatty(): # is interactive terminal
-            flattened = args.additional_args[0]
+            try:
+                flattened = args.additional_args[0]
+            except IndexError:
+                sys.exit(3)
         else: # is piped input
             flattened = sys.stdin.readline().strip()
 
@@ -214,7 +220,7 @@ def main():
         except FileNotFoundError:
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
-        except (TypeError,IndexError):
+        except TypeError:
             print(f"No note to pop for this path in {NOTEFILE}")
             sys.exit(2)
     elif args.s: # requesting search
@@ -224,7 +230,10 @@ def main():
         # *all* notes with matching string will be displayed, in all paths
         # search is case-insensitive and does not span multiple lines
         if sys.stdin.isatty(): # is interactive terminal
-            flattened = args.additional_args[0]
+            try:
+                flattened = args.additional_args[0]
+            except IndexError:
+                sys.exit(3)
         else: # is piped input
             flattened = sys.stdin.readline().strip()
 
