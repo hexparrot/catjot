@@ -226,6 +226,13 @@ def main():
             except FileNotFoundError:
                 print(f"No notefile found at {NOTEFILE}")
         else:
+            # Available shortcuts listed below, choose as many words you like
+            # for how to match, including abbreviations.
+            # Be mindful to not have any duplicate keys!
+            SHORTCUTS = {
+                'MOST_RECENT': ['last', 'l'],
+                'MATCH_NOTE_NAIVE': ['match', 'm', 'search', 's'],
+            }
             if len(args.additional_args) == 0:
                 # show pwd notes
                 from os import getcwd
@@ -242,9 +249,6 @@ def main():
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
             elif len(args.additional_args) == 1:
-                SHORTCUTS = {
-                    'MOST_RECENT': ['last', 'l'],
-                }
                 if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
                     # always displays the most recently created note
                     last_note = "No notes to show.\n"
@@ -254,6 +258,17 @@ def main():
                         print(Note.REC_TOP)
                         print(last_note, end="")
                         print(Note.REC_BOT)
+            elif len(args.additional_args) == 2:
+                if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
+                    # match if "term [+term2] [..]" exists in any line of the note
+                    try:
+                        flattened = ' '.join(args.additional_args[1:])
+                        for inst in Note().search(NOTEFILE, flattened):
+                            print(Note.REC_TOP)
+                            print(inst, end="")
+                            print(Note.REC_BOT)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
 
 if __name__ == "__main__":
     main()
