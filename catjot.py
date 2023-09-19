@@ -62,22 +62,19 @@ class Note(object):
                f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
-    def append(cls, src, term):
+    def append(cls, src, message):
         from time import time
 
-        if not term:
-            return
+        if not message: return
 
         with open(src, 'at') as file:
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{getcwd()}\n")
             file.write(f"{Note.LABEL_NOW}{int(time())}\n")
-            file.write(f"{Note.LABEL_ARG}{term}\n\n")
+            file.write(f"{Note.LABEL_ARG}{message}\n\n")
 
     @classmethod
     def delete(cls, src, timestamp):
-        import os
-
         newpath = src + ".new"
         with open(newpath, 'wt') as trunc_file:
             for inst in cls.iterate(src):
@@ -89,8 +86,6 @@ class Note(object):
 
     @classmethod
     def pop(cls, src, path):
-        import os
-
         last_record = None
         for inst in cls.match_dir(src, path):
             last_record = inst.now
@@ -115,8 +110,6 @@ class Note(object):
 
         current_read = {'msg': []}
         with open(src, 'r') as file:
-            # open example note and find all matched lines
-
             line = file.readline()
             while line:
                 cleaned = line.strip()
