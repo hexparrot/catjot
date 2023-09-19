@@ -53,8 +53,8 @@ $ jot
 ### Cat-acceptble Method for Note Creation
 
 ```
-$ jot -a "foo"                     # provide a string argument
 $ echo -e "mew\nmew\nmew" | jot    # also permssible
+$ jot -a "foo"                     # save a single string argument
 ```
 
 ### Additional, Frivolous cat-permissible method:
@@ -97,9 +97,9 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot` : display all notes created in the present working directory (pwd)
 
-`jot -s` : search *all* notes against simple string match (note field only)
+`jot -s "<search term>"` : search *all* notes against simple string match (note field only)
 
-`jot -a "<note to take>"` : append a new note
+`jot -a "<new note content>"` : append a new single-line note
 
 `jot -d <timestamp>` : delete any notes matching (unix timestamp)
 

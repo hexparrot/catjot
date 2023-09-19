@@ -191,10 +191,11 @@ def main():
     if args.a:  # requesting appending
         # USAGE: jot -a "this is my note"
         # USAGE: <somepipe> | jot -a
-        # `-a` limits input to a single line--additional lines will be truncated.
+        # `-a` limits input to a single line as demonstrated above.
+        # in-line (not at end) escaped chars will be captured as-is, e.g., "\n"
         if sys.stdin.isatty(): # is interactive terminal
             try:
-                flattened = args.additional_args[0]
+                flattened = ' '.join(args.additional_args).rstrip()
             except IndexError:
                 sys.exit(3)
         else: # is piped input
