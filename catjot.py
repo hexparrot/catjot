@@ -39,6 +39,7 @@ class Note(object):
     REC_BOT = "***************"
 
     # .catjot file formatting
+    LABEL_SEP = "^-^" # record separator
     LABEL_PWD = "Directory:"
     LABEL_NOW = "Date:"
     LABEL_ARG = "" # additional prefixing label for first line of note data
@@ -65,6 +66,7 @@ class Note(object):
         from time import time
 
         with open(src, 'at') as file:
+            file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{getcwd()}\n")
             file.write(f"{Note.LABEL_NOW}{int(time())}\n")
             file.write(f"{Note.LABEL_ARG}{term}\n\n")
@@ -77,6 +79,7 @@ class Note(object):
         with open(newpath, 'wt') as trunc_file:
             for inst in cls.iterate(src):
                 if int(inst.now) != int(timestamp):
+                    trunc_file.write(f"{Note.LABEL_SEP}\n")
                     trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
                     trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
                     trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
@@ -100,49 +103,40 @@ class Note(object):
 
     @classmethod
     def iterate(cls, src):
-        from collections import defaultdict
-
         def export_note(basic_struct):
             retval = Note()
-            retval.now = basic_struct['now']
             retval.pwd = basic_struct['dir']
+            retval.now = int(basic_struct['now'])
             retval.message = ''.join(basic_struct['msg'])
             return retval
 
-        current_read = defaultdict(str)
-        current_read['msg'] = []
+        current_read = {'msg': []}
         with open(src, 'r') as file:
             # open example note and find all matched lines
-            for line in file:
+
+            line = file.readline()
+            while line:
                 cleaned = line.strip()
-                if cleaned.startswith(f"{Note.LABEL_PWD}/"):
-                    # this forces the / as part of the directory/first line match
+                if cleaned == Note.LABEL_SEP:
                     if len(current_read['msg']) > 0:
                         while len(current_read['msg']) > 1 and current_read['msg'][-1] == '\n':
                             current_read['msg'].pop()
                         yield export_note(current_read)
 
-                    current_read = defaultdict(str)
+                    current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
+                    current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
                     current_read['msg'] = []
-                    current_read['dir'] = cleaned.split(Note.LABEL_PWD)[1]
-                elif cleaned.startswith(Note.LABEL_NOW):
-                    current_read['now'] = int(cleaned.split(Note.LABEL_NOW)[1])
                 else:
-                    if Note.LABEL_ARG:
-                        if cleaned.startswith(Note.LABEL_ARG):
-                            current_read['msg'].append(line.split(Note.LABEL_ARG)[1])
-                            continue
-
-                    if len(cleaned) > 0:
+                    if 'dir' in current_read and 'now' in current_read:
                         current_read['msg'].append(line.rstrip() + '\n')
-                    elif line == '\n':
-                        current_read['msg'].append('\n')
-                        
-            else:
-                if len(current_read['msg']) > 0:
-                    while len(current_read['msg']) > 1 and current_read['msg'][-1] == '\n':
-                        current_read['msg'].pop()
-                    yield export_note(current_read)
+
+                line = file.readline()
+
+            while len(current_read['msg']) > 1 and current_read['msg'][-1] == '\n':
+                current_read['msg'].pop()
+
+            if 'dir' in current_read and 'now' in current_read:
+                yield export_note(current_read)
 
     @classmethod
     def list(cls, src):
