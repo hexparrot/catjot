@@ -48,10 +48,7 @@ class Note(object):
     NOTEFILE = f"{environ['HOME']}/.catjot"
 
     def __init__(self):
-        from time import time
-
-        self.now = time()
-        self.pwd = getcwd()
+        pass
 
     def __str__(self):
         from datetime import datetime

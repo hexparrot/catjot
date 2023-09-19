@@ -33,11 +33,6 @@ class TestTaker(unittest.TestCase):
         import shutil, os
         shutil.move(f"{FIXED_CATNOTE}.old", FIXED_CATNOTE) if os.path.exists(f"{FIXED_CATNOTE}.old") else None
 
-    def test_creating_note(self):
-        inst = Note()
-        self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
-        self.assertEqual(getcwd(), inst.pwd)
-
     def test_find_path_match(self):
         # searches through an example file for a matching string argument
         # using the default parameter "search"
