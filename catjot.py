@@ -240,6 +240,7 @@ def main():
                 'MOST_RECENT': ['last', 'l'],
                 'MATCH_NOTE_NAIVE': ['match', 'm'],
                 'MATCH_NOTE_NAIVE_I': ['search', 's'],
+                'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
             }
             if len(args.additional_args) == 0:
                 # show pwd notes
@@ -266,6 +267,15 @@ def main():
                         print(Note.REC_TOP)
                         print(last_note, end="")
                         print(Note.REC_BOT)
+                elif args.additional_args[0] in SHORTCUTS['DELETE_MOST_RECENT_PWD']:
+                    from os import getcwd
+                    try:
+                        Note().pop(NOTEFILE, getcwd())
+                        Note().commit(NOTEFILE)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                    except TypeError:
+                        print(f"No note to pop for this path in {NOTEFILE}")
             elif len(args.additional_args) == 2:
                 if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
                     # match if "term [+term2] [..]" exists in any line of the note
