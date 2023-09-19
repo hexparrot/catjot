@@ -222,20 +222,20 @@ def main():
         # USAGE: <somepipe> | jot -s
         # `-s` accepts only a single line, a string to match
         # *all* notes with matching string will be displayed, in all paths
-        # search is case-sensitive and does not span multiple lines
+        # search is case-insensitive and does not span multiple lines
         if sys.stdin.isatty(): # is interactive terminal
             flattened = args.additional_args[0]
         else: # is piped input
             flattened = sys.stdin.readline().strip()
 
         try:
-            Note().search(NOTEFILE, flattened)
+            for inst in Note().search(NOTEFILE, flattened):
+                print(Note.REC_TOP)
+                print(inst, end="")
+                print(Note.REC_BOT)
         except FileNotFoundError:
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
-        except TypeError:
-            print(f"No note to pop for this path in {NOTEFILE}")
-            sys.exit(2)
     else: # no hyphenated args provided
         if not sys.stdin.isatty(): # is the pipe (negated)
             # default append, will accept lines with no limit
