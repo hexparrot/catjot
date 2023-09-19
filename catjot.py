@@ -189,11 +189,48 @@ def main():
     NOTEFILE = Note.NOTEFILE
 
     if not sys.stdin.isatty(): # is instead pipe input
-        full_input = [line for line in sys.stdin]
-        Note().append(NOTEFILE, ''.join(full_input))
+        if args.a: # Append arg supplied
+            # for: <somepipe> | jot -a
+            # like -a, only accepts one line
+            flattened = sys.stdin.readline().strip()
+            Note().append(NOTEFILE, flattened)
+        elif args.d: # Delete
+            timestamp = sys.stdin.readline().strip()
+            # for: jot -d <stdin timestamp>
+            try:
+                Note().delete(NOTEFILE, int(timestamp))
+                Note().commit(NOTEFILE)
+            except FileNotFoundError:
+                print(f"No notefile found at {NOTEFILE}")
+                sys.exit(1)
+            except TypeError:
+                print(f"No note to pop for this path in {NOTEFILE}")
+                sys.exit(2)
+            except ValueError:
+                print(f"Timestamp argument not an integer value.")
+                sys.exit(3)
+        elif args.s: # Search
+            searchterm = stdin.readline().strip()
+            # for: jot -s <stdin searchterm>
+            try:
+                Note().delete(NOTEFILE, searchterm)
+                Note().commit(NOTEFILE)
+            except FileNotFoundError:
+                print(f"No notefile found at {NOTEFILE}")
+                sys.exit(1)
+            except TypeError:
+                print(f"No note to pop for this path in {NOTEFILE}")
+                sys.exit(2)
+            except ValueError:
+                print(f"Timestamp argument not an integer value.")
+                sys.exit(3)
+        else:
+            # default append, will accept lines with no limit
+            full_input = [line for line in sys.stdin]
+            Note().append(NOTEFILE, ''.join(full_input))
     else:
         if args.a: # Append
-            # for: jot -a "some note"
+            # consumes all arguments, but still only creates single line
             flattened = ' '.join(args.additional_args)
             Note().append(NOTEFILE, flattened)
         elif args.d: # Delete

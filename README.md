@@ -99,11 +99,7 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot -s` : search *all* notes against simple string match (note field only)
 
-`jot -l` : list *all* notes, in original creation order
-
 `jot -a "<note to take>"` : append a new note
-
-`jot -p` : pop/delete the most recent note written in this pwd
 
 `jot -d <timestamp>` : delete any notes matching (unix timestamp)
 
