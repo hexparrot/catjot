@@ -22,6 +22,7 @@ class Note(object):
 
     # Label Name | File internally looks like:
     #------------|----------------------------------
+    # LABEL_SEP  | ^-^
     # LABEL_PWD  | Directory:/home/user
     # LABEL_NOW  | Date:1695002470
     # LABEL_ARG  | note_goes_here
