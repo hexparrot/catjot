@@ -271,6 +271,21 @@ class TestTaker(unittest.TestCase):
             iters += 1
         self.assertEqual(iters, 1)
 
+    def test_empty_append_is_aborted(self):
+        Note.append(TMP_CATNOTE, "this is the first note")
+
+        iters = 0
+        for inst in Note.iterate(TMP_CATNOTE):
+            iters += 1
+        self.assertEqual(iters, 1)
+
+        Note.append(TMP_CATNOTE, "")
+
+        iters = 0
+        for inst in Note.iterate(TMP_CATNOTE):
+            iters += 1
+        self.assertEqual(iters, 1)
+
 if __name__ == '__main__':
     unittest.main()
 

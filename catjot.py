@@ -65,6 +65,9 @@ class Note(object):
     def append(cls, src, term):
         from time import time
 
+        if not term:
+            return
+
         with open(src, 'at') as file:
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{getcwd()}\n")
