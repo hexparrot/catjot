@@ -225,8 +225,23 @@ class TestTaker(unittest.TestCase):
         inst = next(multi)
         self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
 
+        inst = next(multi)
+        self.assertEqual(inst.message, "^-^\n")
+
         with self.assertRaises(StopIteration):
             inst = next(multi)
+
+    def test_handle_separator_in_data(self):
+        multi = Note.iterate(FIXED_CATNOTE)
+        for _ in range(0,6):
+            inst = next(multi)
+
+        self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
+
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694955555)
+        self.assertEqual(inst.pwd, "/home/user/alice")
+        self.assertEqual(inst.message, "^-^\n")
 
     def test_only_perfect_path_match(self):
         iters = 0

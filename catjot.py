@@ -147,6 +147,7 @@ class Note(object):
                     current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
                     current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
                     current_read['msg'] = []
+                    current_read['msg'].append(file.readline().rstrip() + '\n')
                 else:
                     if 'dir' in current_read and 'now' in current_read:
                         current_read['msg'].append(line.rstrip() + '\n')
