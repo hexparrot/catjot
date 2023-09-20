@@ -104,6 +104,14 @@ class TestTaker(unittest.TestCase):
             iters += 1
         self.assertEqual(iters, 1)
 
+    def test_write_note_to_diff_timestamp(self):
+        Note.append(TMP_CATNOTE, "this is a note", pwd="/home/user/git/git/git", now=1694744444)
+
+        inst = next(Note.search(TMP_CATNOTE, "note"))
+        self.assertEqual(inst.now, 1694744444)
+        self.assertEqual(inst.pwd, "/home/user/git/git/git")
+        self.assertEqual(inst.message, "this is a note\n")
+
     def test_list_herenote(self):
         Note.append(TMP_CATNOTE, "this is a note")
         inst = next(Note.list(TMP_CATNOTE))

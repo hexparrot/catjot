@@ -63,13 +63,13 @@ class Note(object):
                f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
-    def append(cls, src, message, pwd=None):
+    def append(cls, src, message, pwd=None, now=None):
         """ Accepts non-falsy text and writes it to the .catjot file. """
         if not message: return
         if not pwd: pwd = getcwd()
-
-        from time import time
-        now = int(time())
+        if not now:
+            from time import time
+            now = int(time())
 
         with open(src, 'at') as file:
             file.write(f"{Note.LABEL_SEP}\n")
@@ -268,28 +268,33 @@ def main():
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
     else: # no hyphenated args provided
-        if not sys.stdin.isatty(): # is the pipe (negated)
-            # default append, will accept lines with no limit
+        # Available shortcuts listed below, choose as many words you like
+        # for how to match, including abbreviations.
+        # Be mindful to not have any duplicate keys!
+        SHORTCUTS = {
+            'MOST_RECENT': ['last', 'l'],
+            'MATCH_NOTE_NAIVE': ['match', 'm'],
+            'MATCH_NOTE_NAIVE_I': ['search', 's'],
+            'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
+            'SHOW_ALL': ['dump', 'display', 'd'],
+            'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
+            'HOMENOTES': ['home', 'h'],
+        }
 
+        if not sys.stdin.isatty(): # is not a tty, but is a the pipe
+            # default append, will accept lines with no limit
             full_input = [line for line in sys.stdin]
-            Note().append(NOTEFILE, ''.join(full_input))
+            pwd = None
+            if args.additional_args[0] in SHORTCUTS['HOMENOTES']:
+                # if simply typed, show home notes
+                # if piped to, save as home note
+                from os import environ
+                Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'])
+            else:
+                Note().append(NOTEFILE, ''.join(full_input))
         else: # is interactive tty
             # jot executed with no additional params, interactively
-
             import sys
-
-            # Available shortcuts listed below, choose as many words you like
-            # for how to match, including abbreviations.
-            # Be mindful to not have any duplicate keys!
-            SHORTCUTS = {
-                'MOST_RECENT': ['last', 'l'],
-                'MATCH_NOTE_NAIVE': ['match', 'm'],
-                'MATCH_NOTE_NAIVE_I': ['search', 's'],
-                'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
-                'SHOW_ALL': ['dump', 'display', 'd'],
-                'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
-                'HOMENOTES': ['home', 'h'],
-            }
 
             if len(args.additional_args) == 0:
                 # show notes originating from this PWD
