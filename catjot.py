@@ -11,7 +11,7 @@ from os import environ, getcwd
 class Note(object):
     # Label Name | Default pattern shown at runtime:
     #------------|----------------------------------
-    # REC_TOP    |
+    # REC_TOP    | ^-^
     # LABEL_DIR  | > cd /home/user
     # LABEL_DATE | # date 2023-09-17 19:01:10 (1695002470)
     # LABEL_DATA | note_goes_here

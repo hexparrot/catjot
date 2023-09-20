@@ -93,7 +93,9 @@ $ cp catjot.py $HOME/.local/bin/jot
 
 In all cases, individual users' notes will appear in `~/.catjot`.
 
-## Note Manipulation
+## Command Line Modifications
+
+### Note Manipulation
 
 `jot` : display all notes created in the present working directory (pwd)
 
@@ -103,9 +105,26 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot -d <timestamp>` : delete any notes matching (unix timestamp)
 
-## Alternate .catjot locations
+### Homenotes
+
+Some notes have very little connection to the path they are written in, and this is where
+homenotes acts as a catch-all. Catjot uses a shortcut for homenotes to help facilitate
+easy saving and recalling for path-agnostic notes:
+
+```
+$ cat|jot h
+うち
+$ jot h
+^-^
+> cd /home/user
+# date 2023-09-20 07:36:31 (1695220591)
+うち
+```
+
+### Alternate .catjot locations
 
 Setting the environment variable `CATJOT_FILE` will allow you to choose a different location
 other than `$HOME/.catjot`. The file directory and name can be set freely:
 
-`export CATJOT_FILE=/var/www`
+`export CATJOT_FILE=/home/user/mycatjot`
+
