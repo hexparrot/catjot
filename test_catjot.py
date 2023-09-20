@@ -90,6 +90,20 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
 
+    def test_write_note_to_diff_pwd(self):
+        Note.append(TMP_CATNOTE, "this is a note", pwd="/home/user/git/git/git")
+
+        inst = next(Note.search(TMP_CATNOTE, "note"))
+        self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
+        self.assertEqual(inst.pwd, "/home/user/git/git/git")
+        self.assertEqual(inst.message, "this is a note\n")
+
+        iters = 0
+        for inst in Note.match_dir(TMP_CATNOTE, "/home/user/git/git/git"):
+            self.assertEqual(inst.pwd, "/home/user/git/git/git")
+            iters += 1
+        self.assertEqual(iters, 1)
+
     def test_list_herenote(self):
         Note.append(TMP_CATNOTE, "this is a note")
         inst = next(Note.list(TMP_CATNOTE))

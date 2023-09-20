@@ -63,16 +63,18 @@ class Note(object):
                f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
-    def append(cls, src, message):
+    def append(cls, src, message, pwd=None):
         """ Accepts non-falsy text and writes it to the .catjot file. """
-        from time import time
-
         if not message: return
+        if not pwd: pwd = getcwd()
+
+        from time import time
+        now = int(time())
 
         with open(src, 'at') as file:
             file.write(f"{Note.LABEL_SEP}\n")
-            file.write(f"{Note.LABEL_PWD}{getcwd()}\n")
-            file.write(f"{Note.LABEL_NOW}{int(time())}\n")
+            file.write(f"{Note.LABEL_PWD}{pwd}\n")
+            file.write(f"{Note.LABEL_NOW}{now}\n")
             file.write(f"{Note.LABEL_ARG}{message}\n\n")
 
     @classmethod
