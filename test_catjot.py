@@ -80,6 +80,8 @@ class TestTaker(unittest.TestCase):
             # but not three
             inst = next(multi)
 
+    ### Start note creation tests
+
     def test_write_note(self):
         Note.append(TMP_CATNOTE, "this is a note")
 
@@ -182,6 +184,8 @@ class TestTaker(unittest.TestCase):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
+    #### end note creation
+
     def test_iterate_all_notes(self):
         multi = Note.iterate(FIXED_CATNOTE)
         inst = next(multi)
@@ -196,6 +200,9 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, "/home/user/child")
         self.assertEqual(inst.message, "hierarchical\n")
 
+        inst = next(multi)
+        self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
+
         with self.assertRaises(StopIteration):
             inst = next(multi)
 
@@ -209,6 +216,13 @@ class TestTaker(unittest.TestCase):
         iters = 0
         for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/child"):
             self.assertEqual(inst.pwd, "/home/user/child")
+            iters += 1
+        self.assertEqual(iters, 1)
+
+    def test_match_unicode(self):
+        iters = 0
+        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/git/catjot"):
+            self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
             iters += 1
         self.assertEqual(iters, 1)
 

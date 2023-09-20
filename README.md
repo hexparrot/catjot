@@ -103,3 +103,9 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot -d <timestamp>` : delete any notes matching (unix timestamp)
 
+## Alternate .catjot locations
+
+Setting the environment variable `CATJOT_FILE` will allow you to choose a different location
+other than `$HOME/.catjot`. The file directory and name can be set freely:
+
+`export CATJOT_FILE=/var/www`

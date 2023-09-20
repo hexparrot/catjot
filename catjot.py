@@ -36,8 +36,8 @@ class Note(object):
     LABEL_DATA = "" # line has no add'l prefix as default
 
     # Top and bottom record separators
-    REC_TOP = ""
-    REC_BOT = "***************"
+    REC_TOP = "^-^"
+    REC_BOT = ""
 
     # .catjot file formatting
     LABEL_SEP = "^-^" # record separator
@@ -199,8 +199,13 @@ def main():
 
     args = parser.parse_args()
 
-    import sys
     NOTEFILE = Note.NOTEFILE
+    import sys
+    from os import environ
+    if 'CATJOT_FILE' in environ:
+        # the environment variable will always supercede $HOME default when set
+        if environ['CATJOT_FILE']: # truthy test for env that exists but unset
+            NOTEFILE = environ['CATJOT_FILE']
 
     if args.a:  # requesting appending
         # USAGE: jot -a "this is my note"
