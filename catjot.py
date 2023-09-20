@@ -286,6 +286,7 @@ def main():
                 'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
                 'SHOW_ALL': ['dump', 'display', 'd'],
                 'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
+                'HOMENOTES': ['home', 'h'],
             }
 
             if len(args.additional_args) == 0:
@@ -326,6 +327,23 @@ def main():
                     except TypeError:
                         print(f"No note to pop for this path in {NOTEFILE}")
                         sys.exit(2)
+                elif args.additional_args[0] in SHORTCUTS['HOMENOTES']:
+                    # if simply typed, show home notes
+                    # if piped to, save as home note
+                    from os import environ
+                    try:
+                        count = 0
+                        for inst in Note().match_dir(NOTEFILE, environ['HOME']):
+                            count += 1
+                            print(Note.REC_TOP)
+                            print(inst, end="")
+                            print(Note.REC_BOT)
+                        else:
+                            child_matches = len(list(Note().list(NOTEFILE)))
+                            print(f"{child_matches-count} matches in child directories")
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                        sys.exit(1)
                 elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                     # show all notes, from everywhere, everywhen
                     try:
