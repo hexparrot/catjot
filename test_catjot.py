@@ -219,12 +219,22 @@ class TestTaker(unittest.TestCase):
             iters += 1
         self.assertEqual(iters, 1)
 
-    def test_match_unicode(self):
+    def test_readin_unicode(self):
         iters = 0
         for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/git/catjot"):
             self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
             iters += 1
         self.assertEqual(iters, 1)
+
+    def test_match_unicode(self):
+        iters = 0
+        for inst in Note().search(FIXED_CATNOTE, "なんでこんなにふわふわなの?"):
+            iters += 1
+        for inst in Note().search_i(FIXED_CATNOTE, "なんでこんなにふわふわなの?"):
+            iters += 1
+        self.assertEqual(iters, 2)
+
+        self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
 
     def test_delete_record(self):
         iters = 0
