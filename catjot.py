@@ -134,25 +134,39 @@ class Note(object):
         with open(src, 'r') as file:
             # open the file, read-only
             line = file.readline()
+            unexpected_failures = 0
             lastline_lost = False
             while line:
                 # cleaned exists for line identification only.
                 # once the purpose of a line is determined, the content is sanitized more
                 # surgically starting from the original line contents.
                 cleaned = line.strip()
+                if unexpected_failures > 120:
+                    # some cases, like the interspersed Directory inbetween rec seps
+                    # make some iterations infinite; this caps it at n consecutive
+                    # inabilities to detect a label sep that doesnt result in a record.
+                    # tests absorb failures in up to 12 lines, but extending that beyond 12
+                    # so that this doesnt just fail outright on beginners editing
+                    lastline_lost = False
+                    line = file.readline()
+                    continue
+
                 if cleaned == Note.LABEL_SEP:
-                    if len(current_read['msg']) > 0:
+                    if 'dir' in current_read and 'now' in current_read \
+                        and len(current_read['msg']) > 0:
                         clean_extra_newlines(current_read['msg'])
                         yield export_note(current_read)
 
-                    lastline_lost = line
                     try:
                         current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
                         current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
                         current_read['msg'] = []
                         current_read['msg'].append(file.readline().rstrip() + '\n')
                         lastline_lost = False
+                        unexpected_failures = 0
                     except IndexError:
+                        lastline_lost = line
+                        unexpected_failures += 1
                         current_read.pop('dir', None)
                         current_read.pop('now', None)
                         current_read['msg'] = []

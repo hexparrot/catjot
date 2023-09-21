@@ -261,6 +261,16 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "really really important notice\n")
 
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747616)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "and back to working\n")
+
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747619)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "^-^\nand back to working\n")
+
         with self.assertRaises(StopIteration):
             inst = next(multi)
 

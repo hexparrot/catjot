@@ -23,3 +23,34 @@ Directory:/home/user
 Date:1694747614
 really really important notice
 
+^-^
+Directory:/home/user
+^-^
+Date:1694747615
+broken and unsalvagable
+
+^-^
+Directory:/home/user
+Date:1694747616
+and back to working
+
+^-^
+Directory:/home/user
+^-^
+Date:1694747617
+count all these lines with Directory:/home/user being 1
+
+^-^
+Directory:/home/user
+^-^
+Date:1694747618
+down to here, and that number
+needs to be the unexpected_failure count
+so this makes 12
+
+^-^
+Directory:/home/user
+Date:1694747619
+^-^
+and back to working
+
