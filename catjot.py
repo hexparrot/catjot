@@ -239,6 +239,17 @@ class Note(object):
             if term.lower() in inst.message.lower():
                 yield inst
 
+    @classmethod
+    def tagged(cls, src, tag):
+        """ Match any notes that contain match of tag
+            case INSENSITIVE """
+        for inst in cls.iterate(src):
+            try:
+                if tag.lower() == inst.tag.lower():
+                    yield inst
+            except AttributeError: # it's Nonetype from having nothing set
+                pass
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Note Parser")
@@ -327,6 +338,7 @@ def main():
             'SHOW_ALL': ['dump', 'display', 'd'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
             'HOMENOTES': ['home', 'h'],
+            'SHOW_TAG': ['tagged', 'tag', 't'],
         }
 
         if not sys.stdin.isatty(): # is not a tty, but is a the pipe
@@ -448,6 +460,17 @@ def main():
                     except ValueError:
                         print(f"Timestamp argument not an integer value.")
                         sys.exit(3)
+                elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
+                    # show all notes with tag
+                    try:
+                        flattened = args.additional_args[1]
+                        for inst in Note().tagged(NOTEFILE, flattened):
+                            print(Note.REC_TOP)
+                            print(inst, end="")
+                            print(Note.REC_BOT)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                        sys.exit(1)
 
 if __name__ == "__main__":
     main()

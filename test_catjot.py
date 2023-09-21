@@ -293,6 +293,14 @@ class TestTaker(unittest.TestCase):
         inst.tag = "blamo"
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\nhello\n")
 
+    def test_show_only_tagged_by(self):
+        iters = 0
+        for inst in Note.tagged(FIXED_CATNOTE, "project1"):
+            self.assertEqual(inst.now, 1694747662)
+            self.assertEqual(inst.tag, "project1")
+            iters += 1
+        self.assertEqual(iters, 1)
+
     def test_only_perfect_path_match(self):
         iters = 0
         for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
