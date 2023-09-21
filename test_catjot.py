@@ -243,6 +243,27 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, "/home/user/alice")
         self.assertEqual(inst.message, "^-^\n")
 
+    def test_handle_record_separator_note_invalidation(self):
+        multi = Note.iterate("broken.jot")
+        inst = next(multi) # ^-^ data case
+        inst = next(multi) # ^-^ extras "home warranty"
+        self.assertEqual(inst.now, 1694747612)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "important notice about your home warranty\n")
+
+        inst = next(multi) # ^-^ extras "home warranty"
+        self.assertEqual(inst.now, 1694747613)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "really important notice about your home warranty\n")
+
+        inst = next(multi) # ^-^ extras "home warranty"
+        self.assertEqual(inst.now, 1694747614)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "really really important notice\n")
+
+        with self.assertRaises(StopIteration):
+            inst = next(multi)
+
     def test_only_perfect_path_match(self):
         iters = 0
         for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):

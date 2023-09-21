@@ -134,6 +134,7 @@ class Note(object):
         with open(src, 'r') as file:
             # open the file, read-only
             line = file.readline()
+            lastline_lost = False
             while line:
                 # cleaned exists for line identification only.
                 # once the purpose of a line is determined, the content is sanitized more
@@ -144,15 +145,24 @@ class Note(object):
                         clean_extra_newlines(current_read['msg'])
                         yield export_note(current_read)
 
-                    current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
-                    current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
-                    current_read['msg'] = []
-                    current_read['msg'].append(file.readline().rstrip() + '\n')
+                    lastline_lost = line
+                    try:
+                        current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
+                        current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
+                        current_read['msg'] = []
+                        current_read['msg'].append(file.readline().rstrip() + '\n')
+                        lastline_lost = False
+                    except IndexError:
+                        current_read.pop('dir', None)
+                        current_read.pop('now', None)
+                        current_read['msg'] = []
                 else:
                     if 'dir' in current_read and 'now' in current_read:
                         current_read['msg'].append(line.rstrip() + '\n')
 
-                line = file.readline()
+                if not lastline_lost:
+                    # in the event of a malformed record, esp multiple LABEL_NOW in a row
+                    line = file.readline()
 
             if 'dir' in current_read and 'now' in current_read:
                 clean_extra_newlines(current_read['msg'])
