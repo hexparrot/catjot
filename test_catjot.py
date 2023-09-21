@@ -274,6 +274,16 @@ class TestTaker(unittest.TestCase):
         with self.assertRaises(StopIteration):
             inst = next(multi)
 
+    def test_label_header(self):
+        inst = next(Note.match_dir(FIXED_CATNOTE, "/home/user"))
+        self.assertEqual(inst.tag, "project1")
+
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\n{inst.message}\n")
+        inst.tag = "blamo"
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\n{inst.message}\n")
+
     def test_only_perfect_path_match(self):
         iters = 0
         for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):

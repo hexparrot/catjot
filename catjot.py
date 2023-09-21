@@ -43,6 +43,7 @@ class Note(object):
     LABEL_SEP = "^-^" # record separator
     LABEL_PWD = "Directory:"
     LABEL_NOW = "Date:"
+    LABEL_TAG = "Tag:"
     LABEL_ARG = "" # additional prefixing label for first line of note data
 
     # Filepath to save to, saves in $HOME
@@ -58,9 +59,16 @@ class Note(object):
         from datetime import datetime
         dt = datetime.fromtimestamp(self.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        return f"{Note.LABEL_DIR}{self.pwd}\n" + \
-               f"{Note.LABEL_DATE}{friendly_date}\n" + \
-               f"{Note.LABEL_DATA}{self.message}"
+
+        if self.tag:
+            return f"{Note.LABEL_DIR}{self.pwd}\n" + \
+                   f"{Note.LABEL_DATE}{friendly_date}\n" + \
+                   f"[{self.tag}]\n" + \
+                   f"{Note.LABEL_DATA}{self.message}\n"
+        else:
+            return f"{Note.LABEL_DIR}{self.pwd}\n" + \
+                   f"{Note.LABEL_DATE}{friendly_date}\n" + \
+                   f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
     def append(cls, src, message, pwd=None, now=None):
@@ -123,6 +131,7 @@ class Note(object):
             assert retval.pwd.startswith("/")
             retval.now = int(basic_struct['now'])
             retval.message = ''.join(basic_struct['msg'])
+            retval.tag = basic_struct.get('tag', None)
             return retval
 
         def clean_extra_newlines(msg_lst):
@@ -170,16 +179,22 @@ class Note(object):
                     try:
                         current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
                         current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
-                        current_read['msg'] = []
-                        current_read['msg'].append(file.readline().rstrip() + '\n')
-                        lastline_lost = False
-                        lines_skipped_counter = 0
                     except IndexError:
                         lastline_lost = line
                         lines_skipped_counter += 1
                         current_read.pop('dir', None)
                         current_read.pop('now', None)
                         current_read['msg'] = []
+                    else:
+                        line = file.readline()
+                        if line.startswith(Note.LABEL_TAG):
+                            current_read['tag'] = line.split(Note.LABEL_TAG)[1].strip()
+                            line = file.readline()
+                            current_read['msg'] = [line.rstrip() + '\n']
+                        else:
+                            current_read['msg'] = [line.rstrip() + '\n']
+                        lastline_lost = False
+                        lines_skipped_counter = 0
                 else:
                     if 'dir' in current_read and 'now' in current_read:
                         current_read['msg'].append(line.rstrip() + '\n')
