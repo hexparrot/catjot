@@ -310,7 +310,9 @@ def main():
             # default append, will accept lines with no limit
             full_input = [line for line in sys.stdin]
             pwd = None
-            if args.additional_args[0] in SHORTCUTS['HOMENOTES']:
+            if 'additional_args' in args and \
+                args.additional_args and \
+                args.additional_args[0] in SHORTCUTS['HOMENOTES']:
                 # if simply typed, show home notes
                 # if piped to, save as home note
                 from os import environ
