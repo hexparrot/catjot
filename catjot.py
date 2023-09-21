@@ -134,19 +134,29 @@ class Note(object):
         with open(src, 'r') as file:
             # open the file, read-only
             line = file.readline()
-            unexpected_failures = 0
+            LINES_BEFORE_GIVEUP = 1000      # Number of lines to read without matching a record header
+                                            # This is a very inexpensive operation, as it is simple
+                                            # line reads, but should not be infinite.
+            lines_skipped_counter = 0
             lastline_lost = False
             while line:
-                # cleaned exists for line identification only.
-                # once the purpose of a line is determined, the content is sanitized more
-                # surgically starting from the original line contents.
                 cleaned = line.strip()
-                if unexpected_failures > 120:
-                    # some cases, like the interspersed Directory inbetween rec seps
-                    # make some iterations infinite; this caps it at n consecutive
-                    # inabilities to detect a label sep that doesnt result in a record.
-                    # tests absorb failures in up to 12 lines, but extending that beyond 12
-                    # so that this doesnt just fail outright on beginners editing
+                # cleaned exists for line identification only.
+                # once the purpose of a line is determined, the content is kept more or less
+                # completely intact, with the exception of rstrip() and then manually
+                # readding the newline \n
+                if lines_skipped_counter > LINES_BEFORE_GIVEUP:
+                    # lines_skipped_counter shows the number of times a readline has been
+                    # executed for a LABEL_SEP match `^-^` was not followed by:
+                    # LABEL_PWD ... LABEL_NOW ...
+                    # This kind of corruption is unexpected to ever experience in the wild,
+                    # but nonetheless not all edge cases assuredly have been accounted for.
+                    # This number, simply put, represents the number of lines the application
+                    # should continue to keep trying to find a valid record header
+                    # if it processes a record separator in a jot: `^-^\n`
+                    # Precisely the record separator, followed by a newline.
+                    # and therefore mistakenly truncates the record right then and there,
+                    # until the start of a valid record header n number down.
                     lastline_lost = False
                     line = file.readline()
                     continue
@@ -163,10 +173,10 @@ class Note(object):
                         current_read['msg'] = []
                         current_read['msg'].append(file.readline().rstrip() + '\n')
                         lastline_lost = False
-                        unexpected_failures = 0
+                        lines_skipped_counter = 0
                     except IndexError:
                         lastline_lost = line
-                        unexpected_failures += 1
+                        lines_skipped_counter += 1
                         current_read.pop('dir', None)
                         current_read.pop('now', None)
                         current_read['msg'] = []
