@@ -105,6 +105,8 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot -d <timestamp>` : delete any notes matching (unix timestamp)
 
+`jot -t <tag>` : assign an additional tag to the note
+
 ### Homenotes
 
 Some notes have very little connection to the path they are written in, and this is where

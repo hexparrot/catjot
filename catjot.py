@@ -60,7 +60,10 @@ class Note(object):
         dt = datetime.fromtimestamp(self.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
 
-        tagline = '' if self.tag == "None" else f"[{self.tag}]\n"
+        tagline = ''
+        if isinstance(self.tag, str):
+            tagline = f"[{self.tag}]\n"
+
         return f"{Note.LABEL_DIR}{self.pwd}\n" + \
                f"{Note.LABEL_DATE}{friendly_date}\n" + \
                tagline + \
@@ -79,7 +82,8 @@ class Note(object):
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{pwd}\n")
             file.write(f"{Note.LABEL_NOW}{now}\n")
-            file.write(f"{Note.LABEL_TAG}{tag}\n")
+            if isinstance(tag, str):
+                file.write(f"{Note.LABEL_TAG}{tag}\n")
             file.write(f"{Note.LABEL_ARG}{message}\n\n")
 
     @classmethod
@@ -94,6 +98,8 @@ class Note(object):
                     trunc_file.write(f"{Note.LABEL_SEP}\n")
                     trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
                     trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
+                    if inst.tag:
+                        trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
                     trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
 
     @classmethod
@@ -256,6 +262,7 @@ def main():
     parser.add_argument("-a", action="store_true", help="append single-line message")
     parser.add_argument("-s", action="store_true", help="case-insensitive search for term")
     parser.add_argument("-d", action="store_true", help="delete any notes matching timestamp")
+    parser.add_argument("-t", action="store", help="tag it with a word")
     parser.add_argument("additional_args", nargs="*", help="argument values for search, delete, and append")
 
     args = parser.parse_args()
@@ -351,9 +358,15 @@ def main():
                 # if simply typed, show home notes
                 # if piped to, save as home note
                 from os import environ
-                Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'])
+                if args.t:
+                    Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'], tag=args.t)
+                else:
+                    Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'])
             else:
-                Note().append(NOTEFILE, ''.join(full_input))
+                if args.t:
+                    Note().append(NOTEFILE, ''.join(full_input), tag=args.t)
+                else:
+                    Note().append(NOTEFILE, ''.join(full_input))
         else: # is interactive tty
             # jot executed with no additional params, interactively
             import sys
