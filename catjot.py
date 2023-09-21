@@ -60,18 +60,14 @@ class Note(object):
         dt = datetime.fromtimestamp(self.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
 
-        if self.tag:
-            return f"{Note.LABEL_DIR}{self.pwd}\n" + \
-                   f"{Note.LABEL_DATE}{friendly_date}\n" + \
-                   f"[{self.tag}]\n" + \
-                   f"{Note.LABEL_DATA}{self.message}\n"
-        else:
-            return f"{Note.LABEL_DIR}{self.pwd}\n" + \
-                   f"{Note.LABEL_DATE}{friendly_date}\n" + \
-                   f"{Note.LABEL_DATA}{self.message}"
+        tagline = '' if self.tag == "None" else f"[{self.tag}]\n"
+        return f"{Note.LABEL_DIR}{self.pwd}\n" + \
+               f"{Note.LABEL_DATE}{friendly_date}\n" + \
+               tagline + \
+               f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
-    def append(cls, src, message, pwd=None, now=None):
+    def append(cls, src, message, pwd=None, now=None, tag=None):
         """ Accepts non-falsy text and writes it to the .catjot file. """
         if not message: return
         if not pwd: pwd = getcwd()
@@ -83,6 +79,7 @@ class Note(object):
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{pwd}\n")
             file.write(f"{Note.LABEL_NOW}{now}\n")
+            file.write(f"{Note.LABEL_TAG}{tag}\n")
             file.write(f"{Note.LABEL_ARG}{message}\n\n")
 
     @classmethod
@@ -131,7 +128,7 @@ class Note(object):
             assert retval.pwd.startswith("/")
             retval.now = int(basic_struct['now'])
             retval.message = ''.join(basic_struct['msg'])
-            retval.tag = basic_struct.get('tag', None)
+            retval.tag = basic_struct['tag']
             return retval
 
         def clean_extra_newlines(msg_lst):
@@ -186,6 +183,7 @@ class Note(object):
                         current_read.pop('now', None)
                         current_read['msg'] = []
                     else:
+                        current_read['tag'] = None
                         line = file.readline()
                         if line.startswith(Note.LABEL_TAG):
                             current_read['tag'] = line.split(Note.LABEL_TAG)[1].strip()

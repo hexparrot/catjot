@@ -206,6 +206,15 @@ class TestTaker(unittest.TestCase):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
+    def test_creating_label(self):
+        thenote = "notes take labels now"
+        Note.append(TMP_CATNOTE, thenote, tag="secret")
+        inst = next(Note().search_i(TMP_CATNOTE, "notes"))
+        self.assertEqual(inst.tag, "secret")
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[secret]\n{thenote}\n")
+
     #### end note creation
 
     def test_iterate_all_notes(self):
@@ -280,9 +289,9 @@ class TestTaker(unittest.TestCase):
 
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\nhello\n")
         inst.tag = "blamo"
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\n{inst.message}\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\nhello\n")
 
     def test_only_perfect_path_match(self):
         iters = 0
