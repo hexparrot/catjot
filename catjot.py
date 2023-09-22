@@ -14,6 +14,8 @@ class Note(object):
     # REC_TOP    | ^-^
     # LABEL_DIR  | > cd /home/user
     # LABEL_DATE | # date 2023-09-17 19:01:10 (1695002470)
+    #            | [project1]
+    #            | % ls /home/user
     # LABEL_DATA | note_goes_here
     #            | note_continued
     #            |
@@ -25,6 +27,8 @@ class Note(object):
     # LABEL_SEP  | ^-^
     # LABEL_PWD  | Directory:/home/user
     # LABEL_NOW  | Date:1695002470
+    # LABEL_TAG  | Tag:project1
+    # LABEL_CTX  | Context:ls /home/user
     # LABEL_ARG  | note_goes_here
     #            | note_continued
     #            |
@@ -44,6 +48,7 @@ class Note(object):
     LABEL_PWD = "Directory:"
     LABEL_NOW = "Date:"
     LABEL_TAG = "Tag:"
+    LABEL_CTX = "Context:"
     LABEL_ARG = "" # additional prefixing label for first line of note data
 
     # Filepath to save to, saves in $HOME
@@ -61,16 +66,21 @@ class Note(object):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
 
         tagline = ''
-        if isinstance(self.tag, str):
+        if self.tag:
             tagline = f"[{self.tag}]\n"
+
+        context = ""
+        if self.context:
+            context = f"% {self.context}\n"
 
         return f"{Note.LABEL_DIR}{self.pwd}\n" + \
                f"{Note.LABEL_DATE}{friendly_date}\n" + \
                tagline + \
+               context + \
                f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
-    def append(cls, src, message, pwd=None, now=None, tag=None):
+    def append(cls, src, message, pwd=None, now=None, tag="", context=""):
         """ Accepts non-falsy text and writes it to the .catjot file. """
         if not message: return
         if not pwd: pwd = getcwd()
@@ -82,8 +92,8 @@ class Note(object):
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{pwd}\n")
             file.write(f"{Note.LABEL_NOW}{now}\n")
-            if isinstance(tag, str):
-                file.write(f"{Note.LABEL_TAG}{tag}\n")
+            file.write(f"{Note.LABEL_TAG}{tag}\n")
+            file.write(f"{Note.LABEL_CTX}{context}\n")
             file.write(f"{Note.LABEL_ARG}{message}\n\n")
 
     @classmethod
@@ -98,8 +108,8 @@ class Note(object):
                     trunc_file.write(f"{Note.LABEL_SEP}\n")
                     trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
                     trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
-                    if inst.tag:
-                        trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
+                    trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
+                    trunc_file.write(f"{Note.LABEL_CTX}{inst.context}\n")
                     trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
 
     @classmethod
@@ -135,6 +145,7 @@ class Note(object):
             retval.now = int(basic_struct['now'])
             retval.message = ''.join(basic_struct['msg'])
             retval.tag = basic_struct['tag']
+            retval.context = basic_struct['context']
             return retval
 
         def clean_extra_newlines(msg_lst):
@@ -182,6 +193,8 @@ class Note(object):
                     try:
                         current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
                         current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
+                        current_read['tag'] = file.readline().split(Note.LABEL_TAG)[1].strip()
+                        current_read['context'] = file.readline().split(Note.LABEL_CTX)[1].strip()
                     except IndexError:
                         lastline_lost = line
                         lines_skipped_counter += 1
@@ -189,14 +202,8 @@ class Note(object):
                         current_read.pop('now', None)
                         current_read['msg'] = []
                     else:
-                        current_read['tag'] = None
                         line = file.readline()
-                        if line.startswith(Note.LABEL_TAG):
-                            current_read['tag'] = line.split(Note.LABEL_TAG)[1].strip()
-                            line = file.readline()
-                            current_read['msg'] = [line.rstrip() + '\n']
-                        else:
-                            current_read['msg'] = [line.rstrip() + '\n']
+                        current_read['msg'] = [line.rstrip() + '\n']
                         lastline_lost = False
                         lines_skipped_counter = 0
                 else:

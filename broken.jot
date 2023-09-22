@@ -1,11 +1,15 @@
 ^-^
 Directory:/home/user
 Date:1394443232
+Tag:
+Context:
 ^-^
 ^-^
 ^-^
 Directory:/home/user
 Date:1694747612
+Tag:
+Context:
 important notice about your home warranty
 
 ^-^
@@ -13,6 +17,8 @@ important notice about your home warranty
 ^-^
 Directory:/home/user
 Date:1694747613
+Tag:
+Context:
 really important notice about your home warranty
 
 ^-^
@@ -21,24 +27,30 @@ really important notice about your home warranty
 ^-^
 Directory:/home/user
 Date:1694747614
+Tag:
+Context:
 really really important notice
 
 ^-^
 Directory:/home/user
 ^-^
 Date:1694747615
+Tag:
+Context:
 broken and unsalvagable
 
 ^-^
 Directory:/home/user
 Date:1694747616
+Tag:
+Context:
 and back to working
 
 ^-^
 Directory:/home/user
 ^-^
 Date:1694747617
-count all these lines with Directory:/home/user being 1
+count all these lines with Date being 1 (first line after ^-^)
 
 ^-^
 Directory:/home/user
@@ -46,11 +58,13 @@ Directory:/home/user
 Date:1694747618
 down to here, and that number
 needs to be the unexpected_failure count
-so this makes 12
+so this makes 12 to get to a working ^-^ recsep
 
 ^-^
 Directory:/home/user
 Date:1694747619
+Tag:
+Context:
 ^-^
 and back to working
 

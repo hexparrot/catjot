@@ -215,6 +215,20 @@ class TestTaker(unittest.TestCase):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[secret]\n{thenote}\n")
 
+    def test_adding_context(self):
+        thenote = ".bash_profile"
+        Note.append(TMP_CATNOTE, thenote, context="ls /home/user")
+        inst = next(Note().search_i(TMP_CATNOTE, "profile"))
+        self.assertEqual(inst.context, "ls /home/user")
+        dt = datetime.fromtimestamp(inst.now)
+        friendly_date = dt.strftime(Note.DATE_FORMAT)
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n% ls /home/user\n{thenote}\n")
+
+        multi = Note.iterate(FIXED_CATNOTE)
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747662)
+        self.assertEqual(inst.context, "adoption")
+
     #### end note creation
 
     def test_iterate_all_notes(self):
@@ -283,15 +297,15 @@ class TestTaker(unittest.TestCase):
         with self.assertRaises(StopIteration):
             inst = next(multi)
 
-    def test_label_header(self):
+    def test_tag_header(self):
         inst = next(Note.match_dir(FIXED_CATNOTE, "/home/user"))
         self.assertEqual(inst.tag, "project1")
 
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\nhello\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\n% adoption\nhello\n")
         inst.tag = "blamo"
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\nhello\n")
+        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\n% adoption\nhello\n")
 
     def test_show_only_tagged_by(self):
         iters = 0
