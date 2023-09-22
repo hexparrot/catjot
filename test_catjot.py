@@ -33,6 +33,22 @@ class TestTaker(unittest.TestCase):
         import shutil, os
         shutil.move(f"{FIXED_CATNOTE}.old", FIXED_CATNOTE) if os.path.exists(f"{FIXED_CATNOTE}.old") else None
 
+    def test_create_note(self):
+        data = {
+            'dir': '/home/user/git',
+            'now': 1694747655,
+            'tag': 'projectx',
+            'context': 'whoami',
+            'msg': 'hello\nthere\n'
+        }
+
+        inst = Note.create(data)
+        self.assertEqual(inst.pwd, "/home/user/git")
+        self.assertEqual(inst.now, 1694747655)
+        self.assertEqual(inst.tag, "projectx")
+        self.assertEqual(inst.context, "whoami")
+        self.assertEqual(inst.message, "hello\nthere\n")
+
     def test_find_path_match(self):
         # searches through an example file for a matching string argument
         # using the default parameter "search"

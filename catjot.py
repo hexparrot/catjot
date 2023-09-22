@@ -80,6 +80,25 @@ class Note(object):
                f"{Note.LABEL_DATA}{self.message}"
 
     @classmethod
+    def create(cls, basic_struct):
+        retval = Note()
+
+        retval.pwd = basic_struct['dir']
+        assert retval.pwd.startswith("/")
+        retval.now = int(basic_struct['now'])
+        retval.tag = basic_struct.get('tag', "")
+        retval.context = basic_struct.get('context', "")
+
+        if isinstance(basic_struct['msg'], str):
+            retval.message = basic_struct['msg'].rstrip() + '\n'
+        elif isinstance(basic_struct['msg'], list):
+            while len(basic_struct['msg']) > 1 and basic_struct['msg'][-1] == '\n':
+                basic_struct['msg'].pop()
+            retval.message = ''.join(basic_struct['msg'])
+
+        return retval
+
+    @classmethod
     def append(cls, src, message, pwd=None, now=None, tag="", context=""):
         """ Accepts non-falsy text and writes it to the .catjot file. """
         if not message: return
@@ -137,22 +156,6 @@ class Note(object):
             Other functions should expect to start with this, pruning down unwanted
             notes via a matching mechanism such as search() """
 
-        def export_note(basic_struct):
-            """ Constructs a note based on collected information from the iteration below """
-            retval = Note()
-            retval.pwd = basic_struct['dir']
-            assert retval.pwd.startswith("/")
-            retval.now = int(basic_struct['now'])
-            retval.message = ''.join(basic_struct['msg'])
-            retval.tag = basic_struct['tag']
-            retval.context = basic_struct['context']
-            return retval
-
-        def clean_extra_newlines(msg_lst):
-            """ Accepts a list and removes any newline-only lines """
-            while len(msg_lst) > 1 and msg_lst[-1] == '\n':
-                msg_lst.pop()
-
         current_read = {'msg': []}
         with open(src, 'r') as file:
             # open the file, read-only
@@ -187,8 +190,7 @@ class Note(object):
                 if cleaned == Note.LABEL_SEP:
                     if 'dir' in current_read and 'now' in current_read \
                         and len(current_read['msg']) > 0:
-                        clean_extra_newlines(current_read['msg'])
-                        yield export_note(current_read)
+                        yield cls.create(current_read)
 
                     try:
                         current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
@@ -215,8 +217,7 @@ class Note(object):
                     line = file.readline()
 
             if 'dir' in current_read and 'now' in current_read:
-                clean_extra_newlines(current_read['msg'])
-                yield export_note(current_read)
+                yield cls.create(current_read)
 
     @classmethod
     def list(cls, src):
