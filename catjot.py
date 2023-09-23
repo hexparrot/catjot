@@ -307,12 +307,12 @@ class Note(object):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Note Parser")
-    parser.add_argument("-a", action="store_true", help="append single-line message")
-    parser.add_argument("-s", action="store_true", help="case-insensitive search for term")
-    parser.add_argument("-d", action="store_true", help="delete any notes matching timestamp")
-    parser.add_argument("-t", action="store", help="tag it with a word")
-    parser.add_argument("additional_args", nargs="*", help="argument values for search, delete, and append")
+    parser = argparse.ArgumentParser(description="cat|jot notetaker")
+    parser.add_argument("-c", action="store_const", const="context", help="set context or amend context of last message")
+    parser.add_argument("-a", action="store_true", help="amend last jot instead")
+    parser.add_argument("-t", action="store_const", const="tag", help="set tag or amend tag of last message")
+    parser.add_argument("-p", action="store_const", const="pwd", help="set pwd or amend pwd of last message")
+    parser.add_argument("additional_args", nargs="*", help="argument values")
 
     args = parser.parse_args()
 
@@ -324,68 +324,28 @@ def main():
         if environ['CATJOT_FILE']: # truthy test for env that exists but unset
             NOTEFILE = environ['CATJOT_FILE']
 
-    if args.a:  # requesting appending
-        # USAGE: jot -a "this is my note"
-        # USAGE: <somepipe> | jot -a
-        # `-a` limits input to a single line as demonstrated above.
-        # in-line (not at end) escaped chars will be captured as-is, e.g., "\n"
-        if sys.stdin.isatty(): # is interactive terminal
-            try:
-                flattened = ' '.join(args.additional_args).rstrip()
-            except IndexError:
-                sys.exit(3)
-        else: # is piped input
-            flattened = sys.stdin.readline().strip()
+    def flatten(arg_lst):
+        return ' '.join(arg_lst).rstrip()
 
-        Note().append(NOTEFILE, flattened)
-    elif args.d: # requesting deletion
-        # USAGE: jot -d 1234567890
-        # USAGE: <somepipe> | jot -d
-        # `-d` accepts only a single line, an integer representing a timestamp.
-        # *all* notes with matching timestamp will be deleted, in all paths
-        if sys.stdin.isatty(): # is interactive terminal
-            try:
-                flattened = args.additional_args[0]
-            except IndexError:
-                sys.exit(3)
-        else: # is piped input
-            flattened = sys.stdin.readline().strip()
+    mode = args.c or args.t or args.p
+    params = { mode: flatten(args.additional_args) }
+    try:
+        params.pop(None)
+    except KeyError:
+        pass
 
-        try:
-            Note().delete(NOTEFILE, int(flattened))
-            Note().commit(NOTEFILE)
-        except FileNotFoundError:
-            print(f"No notefile found at {NOTEFILE}")
-            sys.exit(1)
-        except TypeError:
-            print(f"No note to pop for this path in {NOTEFILE}")
-            sys.exit(2)
-    elif args.s: # requesting search
-        # USAGE: jot -s "search term"
-        # USAGE: <somepipe> | jot -s
-        # `-s` accepts only a single line, a string to match
-        # *all* notes with matching string will be displayed, in all paths
-        # search is case-insensitive and does not span multiple lines
-        if sys.stdin.isatty(): # is interactive terminal
-            try:
-                flattened = args.additional_args[0]
-            except IndexError:
-                sys.exit(3)
-        else: # is piped input
-            flattened = sys.stdin.readline().strip()
-
-        try:
-            for inst in Note().search_i(NOTEFILE, flattened):
-                print(Note.REC_TOP)
-                print(inst, end="")
-                print(Note.REC_BOT)
-        except FileNotFoundError:
-            print(f"No notefile found at {NOTEFILE}")
-            sys.exit(1)
-    else: # no hyphenated args provided
-        # Available shortcuts listed below, choose as many words you like
-        # for how to match, including abbreviations.
-        # Be mindful to not have any duplicate keys!
+    if args.a:  # amend the last written note
+        # USAGE: echo "!!" | jot -ac
+        # USAGE: jot -ac "this adds/replaces the most recently-written note's context"
+        if mode:
+            Note().amend(NOTEFILE, **params)
+            Note.commit(NOTEFILE)
+        else:
+            print("Invalid input, performing no action.")
+    elif mode: # if you're not amending, you're setting one in-line, and piping the data
+        Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+    else:
+        # for all other cases where no argparse argument is provided
         SHORTCUTS = {
             'MOST_RECENT': ['last', 'l'],
             'MATCH_NOTE_NAIVE': ['match', 'm'],
@@ -398,151 +358,121 @@ def main():
             'AMEND': ['amend', 'a'],
         }
 
-        if not sys.stdin.isatty(): # is not a tty, but is a the pipe
-            # default append, will accept lines with no limit
-            full_input = [line for line in sys.stdin]
-            pwd = None
-            if 'additional_args' in args and \
-                args.additional_args and \
-                args.additional_args[0] in SHORTCUTS['HOMENOTES']:
-                # if simply typed, show home notes
-                # if piped to, save as home note
-                from os import environ
-                if args.t:
-                    Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'], tag=args.t)
-                else:
-                    Note().append(NOTEFILE, ''.join(full_input), pwd=environ['HOME'])
-            else:
-                if args.t:
-                    Note().append(NOTEFILE, ''.join(full_input), tag=args.t)
-                else:
-                    Note().append(NOTEFILE, ''.join(full_input))
-        else: # is interactive tty
-            # jot executed with no additional params, interactively
-            import sys
+        def printout(note_obj):
+            print(Note.REC_TOP)
+            print(inst, end="")
+            print(Note.REC_BOT)
 
-            if len(args.additional_args) == 0:
-                # show notes originating from this PWD
-                from os import getcwd
+        # ZERO USER-PROVIDED PARAMETER SHORTCUTS
+        if len(args.additional_args) == 0:
+            # show notes originating from this PWD
+            from os import getcwd
+            if sys.stdin.isatty():
                 try:
                     count = 0
                     for inst in Note().match_dir(NOTEFILE, getcwd()):
                         count += 1
-                        print(Note.REC_TOP)
-                        print(inst, end="")
-                        print(Note.REC_BOT)
+                        printout(inst)
                     else:
                         child_matches = len(list(Note().list(NOTEFILE)))
                         print(f"{child_matches-count} matches in child directories")
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
-            elif len(args.additional_args) == 1:
-                if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
-                    # always displays the most recently created note in this PWD
-                    last_note = "No notes to show.\n"
-                    for note in Note().list(NOTEFILE):
-                        last_note = note
-                    else:
-                        print(Note.REC_TOP)
-                        print(last_note, end="")
-                        print(Note.REC_BOT)
-                elif args.additional_args[0] in SHORTCUTS['DELETE_MOST_RECENT_PWD']:
-                    # always deletes the most recently created note in this PWD
-                    from os import getcwd
-                    try:
-                        Note().pop(NOTEFILE, getcwd())
-                        Note().commit(NOTEFILE)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                    except TypeError:
-                        print(f"No note to pop for this path in {NOTEFILE}")
-                        sys.exit(2)
-                elif args.additional_args[0] in SHORTCUTS['HOMENOTES']:
-                    # if simply typed, show home notes
-                    # if piped to, save as home note
-                    from os import environ
+            else:
+                Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+        # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
+        elif len(args.additional_args) == 1:
+            if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
+                # always displays the most recently created note in this PWD
+                last_note = "No notes to show.\n"
+                for inst in Note().list(NOTEFILE):
+                    last_note = inst
+                else:
+                    printout(last_note)
+            elif args.additional_args[0] in SHORTCUTS['DELETE_MOST_RECENT_PWD']:
+                # always deletes the most recently created note in this PWD
+                from os import getcwd
+                try:
+                    Note().pop(NOTEFILE, getcwd())
+                    Note().commit(NOTEFILE)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+                except TypeError:
+                    print(f"No note to pop for this path in {NOTEFILE}")
+                    sys.exit(2)
+            elif args.additional_args[0] in SHORTCUTS['HOMENOTES']:
+                # if simply typed, show home notes
+                # if piped to, save as home note
+                from os import environ
+
+                if sys.stdin.isatty():
                     try:
                         count = 0
                         for inst in Note().match_dir(NOTEFILE, environ['HOME']):
                             count += 1
-                            print(Note.REC_TOP)
-                            print(inst, end="")
-                            print(Note.REC_BOT)
+                            printout(inst)
                         else:
                             child_matches = len(list(Note().list(NOTEFILE)))
                             print(f"{child_matches-count} matches in child directories")
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
                         sys.exit(1)
-                elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
-                    # show all notes, from everywhere, everywhen
-                    try:
-                        for inst in Note().iterate(NOTEFILE):
-                            print(Note.REC_TOP)
-                            print(inst, end="")
-                            print(Note.REC_BOT)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-            elif len(args.additional_args) == 2:
-                if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
-                    # match if "term [+term2] [..]" exists in any line of the note
-                    try:
-                        flattened = ' '.join(args.additional_args[1:])
-                        for inst in Note().search(NOTEFILE, flattened):
-                            print(Note.REC_TOP)
-                            print(inst, end="")
-                            print(Note.REC_BOT)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
-                    # match if "term [+term2] [..]" exists, case-insensitive!
-                    try:
-                        flattened = ' '.join(args.additional_args[1:])
-                        for inst in Note().search(NOTEFILE, flattened):
-                            print(Note.REC_TOP)
-                            print(inst, end="")
-                            print(Note.REC_BOT)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
-                    # delete any notes matching a precise timestamp
-                    try:
-                        Note().delete(NOTEFILE, int(args.additional_args[1]))
-                        Note().commit(NOTEFILE)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                    except TypeError:
-                        print(f"No note to pop for this path in {NOTEFILE}")
-                        sys.exit(2)
-                    except ValueError:
-                        print(f"Timestamp argument not an integer value.")
-                        sys.exit(3)
-                elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
-                    # show all notes with tag
-                    try:
-                        flattened = args.additional_args[1]
-                        for inst in Note().tagged(NOTEFILE, flattened):
-                            print(Note.REC_TOP)
-                            print(inst, end="")
-                            print(Note.REC_BOT)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                elif args.additional_args[0] in SHORTCUTS['AMEND']:
-                    flattened = args.additional_args[1].strip()
-                    Note.amend(NOTEFILE, flattened)
-                    Note.commit(NOTEFILE)
-            else:
-                if args.additional_args[0] in SHORTCUTS['AMEND']:
-                    flattened = ' '.join(args.additional_args[1:]).strip()
-                    Note.amend(NOTEFILE, flattened)
-                    Note.commit(NOTEFILE)
+                else:
+                    params['pwd'] = environ['HOME']
+                    Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+            elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
+                # show all notes, from everywhere, everywhen
+                try:
+                    for inst in Note().iterate(NOTEFILE):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+        # TWO USER-PROVIDED PARAMETER SHORTCUTS
+        elif len(args.additional_args) == 2:
+            if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
+                # match if "term [+term2] [..]" exists in any line of the note
+                flattened = flatten(args.additional_args[1:])
+                try:
+                    for inst in Note().search(NOTEFILE, flattened):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+            elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
+                # match if "term [+term2] [..]" exists in any line of the note
+                flattened = flatten(args.additional_args[1:])
+                try:
+                    for inst in Note().search_i(NOTEFILE, flattened):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+            elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
+                # delete any notes matching a precise timestamp
+                try:
+                    Note().delete(NOTEFILE, int(args.additional_args[1]))
+                    Note().commit(NOTEFILE)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+                except TypeError:
+                    print(f"No note to pop for this path in {NOTEFILE}")
+                    sys.exit(2)
+                except ValueError:
+                    print(f"Timestamp argument not an integer value.")
+                    sys.exit(3)
+            elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
+                # show all notes with tag
+                flattened = args.additional_args[1]
+                try:
+                    for inst in Note().tagged(NOTEFILE, flattened):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
 
 if __name__ == "__main__":
     main()

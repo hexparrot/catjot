@@ -2,6 +2,7 @@
 
 * Simple CLI note-taker centering around the present working directory.
 * Notes can be easily created and manipulated with a shorthand syntax.
+* Tags and Context for greater organization.
 * Output format is readily customizable.
 
 ## Usage
