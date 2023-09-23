@@ -140,7 +140,7 @@ class Note(object):
                     trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
 
     @classmethod
-    def amend(cls, src, context):
+    def amend(cls, src, context=None, pwd=None):
         last_record = None
         for inst in cls.iterate(src):
             last_record = inst
@@ -148,20 +148,24 @@ class Note(object):
         newpath = src + ".new"
         with open(newpath, 'wt') as trunc_file:
             for inst in cls.iterate(src):
-                if int(inst.now) != int(last_record.now):
-                    trunc_file.write(f"{Note.LABEL_SEP}\n")
-                    trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
-                    trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
-                    trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
-                    trunc_file.write(f"{Note.LABEL_CTX}{inst.context}\n")
-                    trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
+                trunc_file.write(f"{Note.LABEL_SEP}\n")
+
+                if pwd and int(inst.now) == int(last_record.now):
+                    # new pwd provided and this is the matching record time
+                    trunc_file.write(f"{Note.LABEL_PWD}{pwd}\n")
                 else:
-                    trunc_file.write(f"{Note.LABEL_SEP}\n")
-                    trunc_file.write(f"{Note.LABEL_PWD}{last_record.pwd}\n")
-                    trunc_file.write(f"{Note.LABEL_NOW}{last_record.now}\n")
-                    trunc_file.write(f"{Note.LABEL_TAG}{last_record.tag}\n")
+                    trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
+
+                trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
+                trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
+
+                if context and int(inst.now) == int(last_record.now):
+                    # new contxt provided and this is the matching record time
                     trunc_file.write(f"{Note.LABEL_CTX}{context}\n")
-                    trunc_file.write(f"{Note.LABEL_ARG}{last_record.message}\n\n")
+                else:
+                    trunc_file.write(f"{Note.LABEL_CTX}{inst.context}\n")
+
+                trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
 
     @classmethod
     def pop(cls, src, path):

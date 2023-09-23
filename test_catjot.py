@@ -254,16 +254,36 @@ class TestTaker(unittest.TestCase):
         inst.amend(TMP_CATNOTE, context="favorite_files") # context should exist in .new
         self.assertEqual(inst.context, "") # no but no read ever had it present
 
-        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # but not on the original file
-        self.assertEqual(inst.context, "") # no context yet
-
         inst = next(Note().search_i(TMP_CATNOTE + '.new', "bashrc")) # new file should reflect this
         self.assertEqual(inst.context, "favorite_files")
+
+        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # but not on the original file
+        self.assertEqual(inst.context, "") # no context yet
 
         Note.commit(TMP_CATNOTE) # commit the change
 
         inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # new file should reflect this
         self.assertEqual(inst.context, "favorite_files")
+
+    def test_changing_pwd_to_existing_jot(self):
+        pre_pwd = '/home/user/git'
+        post_pwd = '/home/alice/in'
+        Note.append(TMP_CATNOTE, "notey", pwd=pre_pwd)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        self.assertEqual(inst.pwd, pre_pwd)
+        inst.amend(TMP_CATNOTE, pwd=post_pwd) # create .new file
+
+        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
+        self.assertEqual(inst.pwd, post_pwd)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        self.assertEqual(inst.pwd, pre_pwd)
+
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        self.assertEqual(inst.pwd, post_pwd) # no but no read ever had it present
 
     #### end note creation
 
