@@ -386,6 +386,7 @@ def main():
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
             'HOMENOTES': ['home', 'h'],
             'SHOW_TAG': ['tagged', 'tag', 't'],
+            'AMEND': ['amend', 'a'],
         }
 
         if not sys.stdin.isatty(): # is not a tty, but is a the pipe
@@ -524,6 +525,15 @@ def main():
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
                         sys.exit(1)
+                elif args.additional_args[0] in SHORTCUTS['AMEND']:
+                    flattened = args.additional_args[1].strip()
+                    Note.amend(NOTEFILE, flattened)
+                    Note.commit(NOTEFILE)
+            else:
+                if args.additional_args[0] in SHORTCUTS['AMEND']:
+                    flattened = ' '.join(args.additional_args[1:]).strip()
+                    Note.amend(NOTEFILE, flattened)
+                    Note.commit(NOTEFILE)
 
 if __name__ == "__main__":
     main()
