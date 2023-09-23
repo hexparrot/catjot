@@ -283,7 +283,27 @@ class TestTaker(unittest.TestCase):
         Note.commit(TMP_CATNOTE) # commit the change
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
-        self.assertEqual(inst.pwd, post_pwd) # no but no read ever had it present
+        self.assertEqual(inst.pwd, post_pwd)
+
+    def test_changing_tag_to_existing_jot(self):
+        pre_tag = 'stuff'
+        post_tag = 'better_stuff'
+        Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        self.assertEqual(inst.tag, pre_tag)
+        inst.amend(TMP_CATNOTE, tag=post_tag) # create .new file
+
+        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
+        self.assertEqual(inst.tag, post_tag)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        self.assertEqual(inst.tag, pre_tag)
+
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        self.assertEqual(inst.tag, post_tag)
 
     #### end note creation
 

@@ -140,7 +140,7 @@ class Note(object):
                     trunc_file.write(f"{Note.LABEL_ARG}{inst.message}\n\n")
 
     @classmethod
-    def amend(cls, src, context=None, pwd=None):
+    def amend(cls, src, context=None, pwd=None, tag=None):
         last_record = None
         for inst in cls.iterate(src):
             last_record = inst
@@ -157,7 +157,12 @@ class Note(object):
                     trunc_file.write(f"{Note.LABEL_PWD}{inst.pwd}\n")
 
                 trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
-                trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
+
+                if tag and int(inst.now) == int(last_record.now):
+                    # new tag provided and this is the matching record time
+                    trunc_file.write(f"{Note.LABEL_TAG}{tag}\n")
+                else:
+                    trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
 
                 if context and int(inst.now) == int(last_record.now):
                     # new contxt provided and this is the matching record time
