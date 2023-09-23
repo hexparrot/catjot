@@ -17,25 +17,23 @@ $ cat|jot
 ( o.o )    # type each line exactly as you wish.
  > ^ <     # to save/exit note, move to beginning of newline and hit:
            # <CTRL-D>
-$ cowsay -f kitty "meow"|jot
+$ cowsay -f kitty "meow" |jot
 ```
 
 The notes are saved and can be recalled like this:
 
 ```
-$ jot
-
-> cd /home/user
-# date 2023-09-17 19:01:10 (1695002470)
+^-^
+> cd /home/user/git/catjot
+# date 2023-09-23 00:23:15 (1695453795)
  /\_/\     # cat directly to a new note (recommended).
 ( o.o )    # type each line exactly as you wish.
  > ^ <     # to save/exit note, move to beginning of newline and hit:
            # <CTRL-D>
 
-***************
-
-> cd /home/user
-# date 2023-09-17 19:01:25 (1695002485)
+^-^
+> cd /home/user/git/catjot
+# date 2023-09-23 00:23:22 (1695453802)
  ______
 < meow >
  ------
@@ -51,14 +49,62 @@ $ jot
 3 matches in child directories
 ```
 
-### Cat-acceptble Method for Note Creation
+### Other Available Syntax for Note Creation
+
+You can add additional context to a note by providing the `-c` flag:
+
+```
+$ top -b -n 1 | jot -c all open processes before reboot on $(hostname)
+$ jot l | head -n 4
+^-^
+> cd /home/user/git/catjot
+# date 2023-09-23 00:30:48 (1695454248)
+% all open processes before reboot on coding.local
+top - 00:30:48 up 5 days,  3:33,  0 users,  load average: 0.08, 0.03, 0.01
+Tasks: 135 total,   1 running, 134 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  9.7 us,  3.2 sy,  0.0 ni, 87.1 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+
+$
+```
+
+You can add context and tagging after-the-fact, with the -a (Amend) toggle.
+Amending always touches the last-written note, no exception.
+
+```
+$ cat|jot
+oh man, what am i even doing with my life!?
+$ jot l
+^-^
+> cd /home/user
+# date 2023-09-23 00:41:14 (1695454874)
+oh man, what am i even doing with my life!?
+
+$ jot -ac "no more coffee after 8!"
+$ jot l
+^-^
+> cd /home/user
+# date 2023-09-23 00:41:14 (1695454874)
+% no more coffee after 8!
+oh man, what am i even doing with my life!?
+
+$ jot -at "sadnotes"
+$ jot l
+^-^
+> cd /home/user
+# date 2023-09-23 00:41:14 (1695454874)
+[sadnotes]
+% no more coffee after 8!
+oh man, what am i even doing with my life!?
+```
+
+
+
+### Additional, Frivolous cat-permissible method:
 
 ```
 $ echo -e "mew\nmew\nmew" | jot    # also permssible
-$ jot -a "foo"                     # save a single string argument
+$ jot <.bash_profile
 ```
-
-### Additional, Frivolous cat-permissible method:
 
 ```
 $ jot << cat
@@ -100,13 +146,11 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot` : display all notes created in the present working directory (pwd)
 
-`jot -s "<search term>"` : search *all* notes against simple string match (note field only)
+`jot -ac "some info"` : Add context to last-written note
 
-`jot -a "<new note content>"` : append a new single-line note
+`jot -ap "/var/log"` : Change pwd of last-written note
 
-`jot -d <timestamp>` : delete any notes matching (unix timestamp)
-
-`jot -t <tag>` : assign an additional tag to the note
+`jot -at "strays"` : Add a tag to the last-written note
 
 ### Homenotes
 
