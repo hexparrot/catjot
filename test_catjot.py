@@ -245,6 +245,26 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.now, 1694747662)
         self.assertEqual(inst.context, "adoption")
 
+    def test_adding_context_to_existing_jot(self):
+        thenote = ".bashrc"
+        Note.append(TMP_CATNOTE, thenote)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "bashrc"))
+        self.assertEqual(inst.context, "") # no context yet
+        inst.amend(TMP_CATNOTE, context="favorite_files") # context should exist in .new
+        self.assertEqual(inst.context, "") # no but no read ever had it present
+
+        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # but not on the original file
+        self.assertEqual(inst.context, "") # no context yet
+
+        inst = next(Note().search_i(TMP_CATNOTE + '.new', "bashrc")) # new file should reflect this
+        self.assertEqual(inst.context, "favorite_files")
+
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # new file should reflect this
+        self.assertEqual(inst.context, "favorite_files")
+
     #### end note creation
 
     def test_iterate_all_notes(self):
