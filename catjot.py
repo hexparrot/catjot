@@ -51,6 +51,14 @@ class Note(object):
     LABEL_CTX = "Context:"
     LABEL_ARG = "" # additional prefixing label for first line of note data
 
+    # All required fields to exist before note data
+    FIELDS_TO_PARSE = [
+        ('dir', LABEL_PWD),
+        ('now', LABEL_NOW),
+        ('tag', LABEL_TAG),
+        ('context', LABEL_CTX),
+    ]
+
     # Filepath to save to, saves in $HOME
     NOTEFILE = f"{environ['HOME']}/.catjot"
 
@@ -193,10 +201,10 @@ class Note(object):
                         yield cls.create(current_read)
 
                     try:
-                        current_read['dir'] = file.readline().rstrip().split(Note.LABEL_PWD)[1]
-                        current_read['now'] = file.readline().rstrip().split(Note.LABEL_NOW)[1]
-                        current_read['tag'] = file.readline().split(Note.LABEL_TAG)[1].strip()
-                        current_read['context'] = file.readline().split(Note.LABEL_CTX)[1].strip()
+                        # In this current design, the ordering of fields is non-negotiable;
+                        # Written in-file must match this exact ordering.
+                        for field, label in cls.FIELDS_TO_PARSE:
+                            current_read[field] = file.readline().split(label)[1].strip()
                     except IndexError:
                         lastline_lost = line
                         lines_skipped_counter += 1
