@@ -104,20 +104,22 @@ oh man, what am i even doing with my life!?
 Copy `catjot.py` to a directory found within your `$PATH`.
 This document recommends and demonstrates examples that rename
 this python script as `jot`, for ease-of-typing (length/autocomplete).
-This also helps encourage the mnemonic cat|jot for writing a quick note.
 
-Popular destinations include `$HOME/.local/bin` or `/usr/local/bin`.
+Popular destinations for saving the script include:
+`$HOME/.local/bin` or `/usr/local/bin`.
 
 ### installation only within `$HOME` (single-user)
 
 ```
 $ mkdir -p $HOME/.local/bin
+$ chmod +x catjot.py
 $ cp catjot.py $HOME/.local/bin/jot
 ```
 
 ### installation for system-wide use
 
 ```
+# chmod +x catjot.py
 # cp catjot.py /usr/local/bin/jot
 ```
 
@@ -130,10 +132,15 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 `jot` : display all notes created in the present working directory (pwd)
 
 `jot -ac "some info"` : Add context to last-written note
+`|jot -ac`            : Piped content written as context for last-written note
 
 `jot -ap "/var/log"` : Change pwd of last-written note
+`|jot -ap`           : Piped content (single string, no spaces)
+                     : written as pwd for last-written note
 
 `jot -at "strays"` : Add a tag to the last-written note
+`|jot -at`         : Piped content (single string, no spaces)
+                   : written as tag for last-written note
 
 ### Homenotes
 
@@ -150,6 +157,14 @@ $ jot h
 # date 2023-09-20 07:36:31 (1695220591)
 うち
 ```
+
+### Shortcuts
+
+`catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions.
+
+`jot l`        : show last-written note
+`jot p`        : pop/delete the last-written note
+`jot d`        : show all notes from all time, everywhere
 
 ### Alternate .catjot locations
 

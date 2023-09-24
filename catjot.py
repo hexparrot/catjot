@@ -332,7 +332,7 @@ def main():
 
     def printout(note_obj):
         print(Note.REC_TOP)
-        print(inst, end="")
+        print(note_obj, end="")
         print(Note.REC_BOT)
 
     mode = args.c or args.t or args.p
@@ -341,11 +341,6 @@ def main():
         params.pop(None)
     except KeyError:
         pass
-
-    #print(f"mode: {mode}")
-    #print(f"args: {flatten(args.additional_args)}")
-    #print(f"pipe: {flatten(sys.stdin.readlines())}")
-    #print(f"{sys.stdin.isatty()}")
 
     # context-related functionality
     if args.c:
