@@ -327,6 +327,14 @@ def main():
     def flatten(arg_lst):
         return ' '.join(arg_lst).rstrip()
 
+    def flatten_pipe(arg_lst):
+        return ''.join(arg_lst).rstrip()
+
+    def printout(note_obj):
+        print(Note.REC_TOP)
+        print(inst, end="")
+        print(Note.REC_BOT)
+
     mode = args.c or args.t or args.p
     params = { mode: flatten(args.additional_args) }
     try:
@@ -334,16 +342,187 @@ def main():
     except KeyError:
         pass
 
-    if args.a:  # amend the last written note
-        # USAGE: echo "!!" | jot -ac
-        # USAGE: jot -ac "this adds/replaces the most recently-written note's context"
-        if mode:
-            Note().amend(NOTEFILE, **params)
-            Note.commit(NOTEFILE)
-        else:
-            print("Invalid input, performing no action.")
-    elif mode: # if you're not amending, you're setting one in-line, and piping the data
-        Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+    #print(f"mode: {mode}")
+    #print(f"args: {flatten(args.additional_args)}")
+    #print(f"pipe: {flatten(sys.stdin.readlines())}")
+    #print(f"{sys.stdin.isatty()}")
+
+    # context-related functionality
+    if args.c:
+        if sys.stdin.isatty(): # interactive tty, no pipe!
+            if args.a:
+                # amend means editing last written note
+                context = flatten(args.additional_args)
+                if context: # non-null contents of addl_args
+                    # jot -ac personal_feelings
+                    params = { mode: context }
+                    Note.amend(NOTEFILE, **params)
+                    Note.commit(NOTEFILE)
+                else: # falsy evaluation means absent
+                    # jot -ac
+                    print("Missing piped <context> or provide to -c")
+                    exit(4)
+            else:
+                # jot -c observations
+                # not intending to amend means match by context field
+                context = flatten(args.additional_args)
+                params = { mode: context }
+                # TODO: implement match by context
+                raise NotImplementedError
+        else: # yes pipe!
+            if args.a:
+                # amend means editing last written note
+                context = flatten(args.additional_args)
+                if context: # non-null contents of addl_args
+                    # whoami | jot -ac ponderings
+                    print("Ambiguous input--amending last note with pipe or -c args?")
+                    exit(4)
+                else: # falsy evaluation means absent args
+                    # whoami | jot -ac
+                    # update last notes' context with piped data
+                    # EXAMPLE USAGE: Saving last executed command as context of last note
+                    # $ ls /usr |jot
+                    # $ echo "!!" |jot -ac
+                    # ensures that the context of /usr is included for a note
+                    # that otherwise will be displaying pwd of the dir it was executed
+                    piped_data = flatten_pipe(sys.stdin.readlines())
+                    if piped_data:
+                        params = { mode: piped_data }
+                        Note.amend(NOTEFILE, **params)
+                        Note.commit(NOTEFILE)
+                    else:
+                        # should definitely be getting piped info down this path
+                        print("Received no piped input, bailing")
+                        exit(4)
+            else:
+                context = flatten(args.additional_args)
+                if context:
+                    # | jot -c musings
+                    # write new note with provided context from arg
+                    piped_data = flatten_pipe(sys.stdin.readlines())
+                    params = { mode: context }
+                    Note().append(NOTEFILE, piped_data, **params)
+                else:
+                    # | jot -c
+                    print("Lacking required argument <context>")
+                    exit(4)
+    # tagging-related functionality
+    elif args.t:
+        if sys.stdin.isatty(): # interactive tty, no pipe!
+            if args.a:
+                # amend means editing last written note
+                tag = flatten(args.additional_args)
+                if tag: # non-null contents of addl_args
+                    # jot -at project1
+                    params = { mode: tag }
+                    Note.amend(NOTEFILE, **params)
+                    Note.commit(NOTEFILE)
+                else: # falsy evaluation means absent
+                    # jot -at
+                    print("Missing piped <tag> or provide to -t")
+                    exit(4)
+            else:
+                # jot -t project2
+                # not intending to amend means match by tag field
+                tag = flatten(args.additional_args)
+                try:
+                    for inst in Note().tagged(NOTEFILE, tag):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+        else: # yes pipe!
+            if args.a:
+                # amend means editing last written note
+                tag = flatten(args.additional_args)
+                if tag: # non-null contents of addl_args
+                    # whoami | jot -at project3
+                    print("Ambiguous input--amending last tag with pipe or -t args?")
+                    exit(4)
+                else: # falsy evaluation means absent args
+                    # whoami | jot -at
+                    # update last notes' tag with piped data
+                    # tags only take the first line, first word! tags are like that.
+                    piped_data = sys.stdin.readline().split(" ")[0].strip()
+                    if piped_data:
+                        params = { mode: piped_data }
+                        Note.amend(NOTEFILE, **params)
+                        Note.commit(NOTEFILE)
+                    else:
+                        # should definitely be getting piped info down this path
+                        print("Received no piped input, bailing")
+                        exit(4)
+            else:
+                tag = flatten(args.additional_args)
+                if tag:
+                    # | jot -t project4
+                    # new note with tag set to [project4]
+                    piped_data = flatten_pipe(sys.stdin.readlines())
+                    params = { mode: tag }
+                    Note().append(NOTEFILE, piped_data, **params)
+                else:
+                    # | jot -t
+                    print("Pipe lacking required argument <tag>")
+                    exit(4)
+    # pwd-related functionality
+    elif args.p:
+        if sys.stdin.isatty(): # interactive tty, no pipe!
+            if args.a:
+                # amend means editing last written note
+                pwd = flatten(args.additional_args)
+                if pwd: # non-null contents of addl_args
+                    # jot -ap /home/user
+                    params = { mode: pwd }
+                    Note.amend(NOTEFILE, **params)
+                    Note.commit(NOTEFILE)
+                else: # falsy evaluation means absent
+                    # jot -ap
+                    print("Missing piped <pwd> or provide to -p")
+                    exit(4)
+            else:
+                # jot -p /home/user
+                # not intending to amend means match by pwd field
+                pwd = flatten(args.additional_args)
+                try:
+                    for inst in Note().match_dir(NOTEFILE, pwd):
+                        printout(inst)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
+        else: # yes pipe!
+            if args.a:
+                # amend means editing last written note
+                pwd = flatten(args.additional_args)
+                if pwd: # non-null contents of addl_args
+                    # echo $PWD | jot -ap /home/user
+                    print("Ambiguous input--amending last pwd with pipe or -p args?")
+                    exit(4)
+                else: # falsy evaluation means absent args
+                    # echo $PWD | jot -ap
+                    # update last notes' pwd with piped data
+                    # tags only take the first line, first word! pwds are like that.
+                    piped_data = sys.stdin.readline().split(" ")[0].strip()
+                    if piped_data:
+                        assert mode == "pwd"
+                        params = { mode: piped_data }
+                        Note.amend(NOTEFILE, **params)
+                        Note.commit(NOTEFILE)
+                    else:
+                        # should definitely be getting piped info down this path
+                        print("Received no piped input, bailing")
+                        exit(4)
+            else:
+                pwd = flatten(args.additional_args)
+                if pwd:
+                    # | jot -p /home/usr
+                    # new note with pwd set to /home/usr
+                    piped_data = flatten_pipe(sys.stdin.readlines())
+                    params = { mode: pwd }
+                    Note().append(NOTEFILE, piped_data, **params)
+                else:
+                    # | jot -p
+                    print("Pipe lacking required argument <pwd>")
+                    exit(4)
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
@@ -357,12 +536,6 @@ def main():
             'SHOW_TAG': ['tagged', 'tag', 't'],
             'AMEND': ['amend', 'a'],
         }
-
-        def printout(note_obj):
-            print(Note.REC_TOP)
-            print(inst, end="")
-            print(Note.REC_BOT)
-
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
             # show notes originating from this PWD
@@ -380,7 +553,7 @@ def main():
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
             else:
-                Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+                Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
@@ -409,19 +582,14 @@ def main():
 
                 if sys.stdin.isatty():
                     try:
-                        count = 0
                         for inst in Note().match_dir(NOTEFILE, environ['HOME']):
-                            count += 1
                             printout(inst)
-                        else:
-                            child_matches = len(list(Note().list(NOTEFILE)))
-                            print(f"{child_matches-count} matches in child directories")
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
                         sys.exit(1)
                 else:
                     params['pwd'] = environ['HOME']
-                    Note().append(NOTEFILE, ''.join(sys.stdin.readlines()), **params)
+                    Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
                 try:
