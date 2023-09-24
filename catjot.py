@@ -206,68 +206,34 @@ class Note(object):
             Other functions should expect to start with this, pruning down unwanted
             notes via a matching mechanism such as search() """
 
-        current_read = {'msg': []}
+        def parse(record):
+            current_read = {}
+            # forces ordering of fields
+            for field, label in cls.FIELDS_TO_PARSE:
+                try:
+                    current_read[field] = record.pop(0).split(label)[1].strip()
+                except IndexError:
+                    pass # label/order does not match expected headers
+                    #print(f"Error reading line, expecting label \"{label}<value>\"")
+            else:
+                message = ''.join(record)
+                current_read['msg'] = message
+                return current_read
+
+        current_record = []
+        last_line = ''
         with open(src, 'r') as file:
-            # open the file, read-only
-            line = file.readline()
-            LINES_BEFORE_GIVEUP = 1000      # Number of lines to read without matching a record header
-                                            # This is a very inexpensive operation, as it is simple
-                                            # line reads, but should not be infinite.
-            lines_skipped_counter = 0
-            lastline_lost = False
-            while line:
-                cleaned = line.strip()
-                # cleaned exists for line identification only.
-                # once the purpose of a line is determined, the content is kept more or less
-                # completely intact, with the exception of rstrip() and then manually
-                # readding the newline \n
-                if lines_skipped_counter > LINES_BEFORE_GIVEUP:
-                    # lines_skipped_counter shows the number of times a readline has been
-                    # executed for a LABEL_SEP match `^-^` was not followed by:
-                    # LABEL_PWD ... LABEL_NOW ...
-                    # This kind of corruption is unexpected to ever experience in the wild,
-                    # but nonetheless not all edge cases assuredly have been accounted for.
-                    # This number, simply put, represents the number of lines the application
-                    # should continue to keep trying to find a valid record header
-                    # if it processes a record separator in a jot: `^-^\n`
-                    # Precisely the record separator, followed by a newline.
-                    # and therefore mistakenly truncates the record right then and there,
-                    # until the start of a valid record header n number down.
-                    lastline_lost = False
-                    line = file.readline()
-                    continue
-
-                if cleaned == Note.LABEL_SEP:
-                    if 'dir' in current_read and 'now' in current_read \
-                        and len(current_read['msg']) > 0:
-                        yield cls.create(current_read)
-
-                    try:
-                        # In this current design, the ordering of fields is non-negotiable;
-                        # Written in-file must match this exact ordering.
-                        for field, label in cls.FIELDS_TO_PARSE:
-                            current_read[field] = file.readline().split(label)[1].strip()
-                    except IndexError:
-                        lastline_lost = line
-                        lines_skipped_counter += 1
-                        current_read.pop('dir', None)
-                        current_read.pop('now', None)
-                        current_read['msg'] = []
-                    else:
-                        line = file.readline()
-                        current_read['msg'] = [line.rstrip() + '\n']
-                        lastline_lost = False
-                        lines_skipped_counter = 0
+            for line in file:
+                if last_line == '' and line.strip() == Note.LABEL_SEP:
+                    if len(current_record):
+                        yield Note.create(parse(current_record))
+                    current_record = []
                 else:
-                    if 'dir' in current_read and 'now' in current_read:
-                        current_read['msg'].append(line.rstrip() + '\n')
-
-                if not lastline_lost:
-                    # in the event of a malformed record, esp multiple LABEL_NOW in a row
-                    line = file.readline()
-
-            if 'dir' in current_read and 'now' in current_read:
-                yield cls.create(current_read)
+                    current_record.append(line)
+                    last_line = line.strip()
+            else:
+                if last_line == '' and len(current_record):
+                    yield Note.create(parse(current_record))
 
     @classmethod
     def list(cls, src):

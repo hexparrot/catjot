@@ -392,17 +392,17 @@ class TestTaker(unittest.TestCase):
     def test_handle_record_separator_note_invalidation(self):
         multi = Note.iterate("broken.jot")
         inst = next(multi) # ^-^ data case
-        inst = next(multi) # ^-^ extras "home warranty"
-        self.assertEqual(inst.now, 1694747612)
+        self.assertEqual(inst.now, 1394443232)
         self.assertEqual(inst.pwd, "/home/user")
-        self.assertEqual(inst.message, "important notice about your home warranty\n")
+        self.assertTrue(inst.message.startswith('^-^\n^-^\n^-^\nDirectory:/home/user\nDate'))
+        self.assertTrue(inst.message.endswith("important notice about your home warranty\n"))
 
-        inst = next(multi) # ^-^ extras "home warranty"
+        inst = next(multi)
         self.assertEqual(inst.now, 1694747613)
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "really important notice about your home warranty\n")
 
-        inst = next(multi) # ^-^ extras "home warranty"
+        inst = next(multi)
         self.assertEqual(inst.now, 1694747614)
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "really really important notice\n")
@@ -536,6 +536,22 @@ class TestTaker(unittest.TestCase):
         for inst in Note.iterate(TMP_CATNOTE):
             iters += 1
         self.assertEqual(iters, 1)
+
+    def test_separator_in_data_detectable(self):
+        NOTEFILE = "edgecase.jot"
+        multi = Note.iterate(NOTEFILE)
+        inst = next(multi)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.now, 1694747662)
+        self.assertIn("catland", inst.tag)
+        self.assertIn("project", inst.tag)
+        self.assertEqual(inst.context, "adoption")
+        self.assertEqual(inst.message, "the record separator looks like\n^-^\nand i want this to remain intact\n")
+
+        inst = next(multi)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.now, 1694747841)
+        self.assertEqual(inst.message, "testing that this shows up unimpacted\n")
 
 if __name__ == '__main__':
     unittest.main()
