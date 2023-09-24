@@ -285,9 +285,9 @@ class TestTaker(unittest.TestCase):
         inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
         self.assertEqual(inst.pwd, post_pwd)
 
-    def test_changing_tag_to_existing_jot(self):
+    def test_deleting_tag_from_existing_note(self):
         pre_tag = 'stuff'
-        post_tag = 'better_stuff'
+        post_tag = '-stuff'
         Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey"))
@@ -295,7 +295,7 @@ class TestTaker(unittest.TestCase):
         inst.amend(TMP_CATNOTE, tag=post_tag) # create .new file
 
         inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
-        self.assertEqual(inst.tag, post_tag)
+        self.assertEqual(inst.tag, "")
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
         self.assertEqual(inst.tag, pre_tag)
@@ -303,7 +303,54 @@ class TestTaker(unittest.TestCase):
         Note.commit(TMP_CATNOTE) # commit the change
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
-        self.assertEqual(inst.tag, post_tag)
+        self.assertEqual(inst.tag, "")
+
+    def test_append_multiple_tags(self):
+        pre_tag = 'blamo'
+        post_tag = 'better_stuff'
+        Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        self.assertIn(pre_tag, inst.tag)
+        inst.amend(TMP_CATNOTE, tag=post_tag) # create .new file
+
+        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
+        self.assertIn(pre_tag, inst.tag)
+        self.assertIn(post_tag, inst.tag)
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        self.assertEqual(inst.tag, pre_tag)
+        self.assertNotIn(post_tag, inst.tag)
+
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        self.assertIn(pre_tag, inst.tag)
+        self.assertIn(post_tag, inst.tag)
+
+        self.assertEqual(inst.tag, f"{pre_tag} {post_tag}")
+
+        another_tag = 'thebest'
+        inst.amend(TMP_CATNOTE, tag=another_tag) # create .new file
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        self.assertIn(pre_tag, inst.tag)
+        self.assertIn(post_tag, inst.tag)
+        self.assertIn(another_tag, inst.tag)
+        self.assertEqual(inst.tag, f"{pre_tag} {post_tag} {another_tag}")
+
+        last_tag = "-blamo"
+        inst.amend(TMP_CATNOTE, tag=last_tag) # create .new file
+        Note.commit(TMP_CATNOTE) # commit the change
+
+        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        self.assertNotIn(pre_tag, inst.tag)
+        self.assertIn(post_tag, inst.tag)
+        self.assertIn(another_tag, inst.tag)
+        self.assertNotIn(last_tag, inst.tag)
+
+        self.assertEqual(inst.tag, f"{post_tag} {another_tag}")
 
     #### end note creation
 

@@ -159,8 +159,17 @@ class Note(object):
                 trunc_file.write(f"{Note.LABEL_NOW}{inst.now}\n")
 
                 if tag and int(inst.now) == int(last_record.now):
-                    # new tag provided and this is the matching record time
-                    trunc_file.write(f"{Note.LABEL_TAG}{tag}\n")
+                    all_tags = inst.tag.split(" ")
+                    if tag.startswith('-'):
+                        try:
+                            all_tags.remove(tag[1:])
+                        except ValueError:
+                            pass #don't care if its not in there
+                    else:
+                        if tag not in all_tags:
+                            all_tags.append(tag)
+                    tag_str = " ".join(all_tags)
+                    trunc_file.write(f"{Note.LABEL_TAG}{tag_str}\n")
                 else:
                     trunc_file.write(f"{Note.LABEL_TAG}{inst.tag}\n")
 

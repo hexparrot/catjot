@@ -138,9 +138,12 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 `|jot -ap`           : Piped content (single string, no spaces)
                      : written as pwd for last-written note
 
-`jot -at "strays"` : Add a tag to the last-written note
-`|jot -at`         : Piped content (single string, no spaces)
-                   : written as tag for last-written note
+`jot -at "strays"`       : Add an additional tag to the last-written note
+`|jot -at`               : Piped content (single string, no spaces)
+                         : written as tag for last-written note
+`jot -at -- "-inventory" : Subtract a tag matching a word preceded by a hyphen `-`
+                         : The double `--` is to ensure the word is not interpreted
+                         : by the argument parser, e.g., -a
 
 ### Homenotes
 
