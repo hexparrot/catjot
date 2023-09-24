@@ -2,8 +2,9 @@
 
 * Simple CLI note-taker centering around the present working directory.
 * Notes can be easily created and manipulated with a shorthand syntax.
-* Tags and Context for greater organization.
+* Tags and Context include for greater organization.
 * Output format is readily customizable.
+* `cat`-centric, cat-themed
 
 ## Usage
 
@@ -23,6 +24,7 @@ $ cowsay -f kitty "meow" |jot
 The notes are saved and can be recalled like this:
 
 ```
+$ jot
 ^-^
 > cd /home/user/git/catjot
 # date 2023-09-23 00:23:15 (1695453795)
@@ -67,8 +69,8 @@ Tasks: 135 total,   1 running, 134 sleeping,   0 stopped,   0 zombie
 $
 ```
 
-You can add context and tagging after-the-fact, with the -a (Amend) toggle.
-Amending always touches the last-written note, no exception.
+You can add context and tagging after-the-fact, with the -a (amend) toggle.
+Amending always touches the last-written note in the file, no exception.
 
 ```
 $ cat|jot
@@ -95,25 +97,6 @@ $ jot l
 [sadnotes]
 % no more coffee after 8!
 oh man, what am i even doing with my life!?
-```
-
-
-
-### Additional, Frivolous cat-permissible method:
-
-```
-$ echo -e "mew\nmew\nmew" | jot    # also permssible
-$ jot <.bash_profile
-```
-
-```
-$ jot << cat
-> this is a frivolous, vanity use of cat, as en EOF marker
-> cat
-$ jot
-cd /home/user
-# date 2023-09-16 15:24:58 (1694903098)
-this is a frivolous, vanity use of cat, as en EOF marker
 ```
 
 ## Installation Steps:
