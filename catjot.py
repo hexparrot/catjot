@@ -309,7 +309,7 @@ class Note(object):
             case INSENSITIVE """
         for inst in cls.iterate(src):
             try:
-                if tag.lower() == inst.tag.lower():
+                if tag.lower() in inst.tag.lower().split(' '):
                     yield inst
             except AttributeError: # it's Nonetype from having nothing set
                 pass
