@@ -325,7 +325,7 @@ def main():
 
     def printout(note_obj, message_only=False):
         if message_only:
-            print(note_obj.message)
+            print(note_obj.message, end="")
         else: # normal display
             print(Note.REC_TOP)
             print(note_obj, end="")
