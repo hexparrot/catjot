@@ -323,10 +323,13 @@ def main():
     def flatten_pipe(arg_lst):
         return ''.join(arg_lst).rstrip()
 
-    def printout(note_obj):
-        print(Note.REC_TOP)
-        print(note_obj, end="")
-        print(Note.REC_BOT)
+    def printout(note_obj, message_only=False):
+        if message_only:
+            print(note_obj.message)
+        else: # normal display
+            print(Note.REC_TOP)
+            print(note_obj, end="")
+            print(Note.REC_BOT)
 
     mode = args.c or args.t or args.p
     params = { mode: flatten(args.additional_args) }
@@ -523,6 +526,7 @@ def main():
             'HOMENOTES': ['home', 'h'],
             'SHOW_TAG': ['tagged', 'tag', 't'],
             'AMEND': ['amend', 'a'],
+            'MESSAGE_ONLY': ['payload', 'pl'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
@@ -586,6 +590,17 @@ def main():
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
+            elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
+                # returns the last message, message only (no pwd, no timestamp, no context).
+                last_note = "No notes to show.\n"
+                try:
+                    for inst in Note().list(NOTEFILE):
+                        last_note = inst
+                    else:
+                        printout(last_note, message_only=True)
+                except FileNotFoundError:
+                    print(f"No notefile found at {NOTEFILE}")
+                    sys.exit(1)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
@@ -629,6 +644,38 @@ def main():
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
+            elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
+                # returns the message only (no pwd, no timestamp, no context).
+                # when provided a timestamp, any notes matching timestamp
+                # will be sent to stdout, concatenated in order of appearance
+                flattened = args.additional_args[1]
+                if flattened: # if truthy, somehow, use it for search
+                    try:
+                        for inst in Note().match_time(NOTEFILE, flattened):
+                            printout(inst, message_only=True)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                        sys.exit(1)
+                    except ValueError:
+                        print(f"Provided argument must be an int <timestamp>.")
+                        sys.exit(2)
+                else: # if not truthy, display pwd matches without headers
+                    # the fallback behavior of finding a non truthy value is not
+                    # expected to happen normally. this would be providing
+                    # a deliberately nonuseful value: |jot pl ""
+                    # the actual implementation of payload without timestamp
+                    # should be handled in # ONE USER-PROVIDED PARAMETER SHORTCUTS
+
+                    # always displays the most recently created note in this PWD
+                    last_note = "No notes to show.\n"
+                    try:
+                        for inst in Note().list(NOTEFILE):
+                            last_note = inst
+                        else:
+                            printout(last_note, message_only=True)
+                    except FileNotFoundError:
+                        print(f"No notefile found at {NOTEFILE}")
+                        sys.exit(1)
 
 if __name__ == "__main__":
     main()
