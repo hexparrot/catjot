@@ -592,7 +592,7 @@ def main():
                     sys.exit(1)
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the last message, message only (no pwd, no timestamp, no context).
-                last_note = "No notes to show.\n"
+                last_note = None
                 try:
                     for inst in Note().list(NOTEFILE):
                         last_note = inst
@@ -601,6 +601,9 @@ def main():
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
+                except AttributeError:
+                    print(f"No notes to show.")
+                    sys.exit(2)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
@@ -667,7 +670,7 @@ def main():
                     # should be handled in # ONE USER-PROVIDED PARAMETER SHORTCUTS
 
                     # always displays the most recently created note in this PWD
-                    last_note = "No notes to show.\n"
+                    last_note = None
                     try:
                         for inst in Note().list(NOTEFILE):
                             last_note = inst
@@ -676,6 +679,9 @@ def main():
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
                         sys.exit(1)
+                    except AttributeError:
+                        print(f"No notes to show.")
+                        sys.exit(2)
 
 if __name__ == "__main__":
     main()
