@@ -265,6 +265,13 @@ class Note(object):
                 yield inst
 
     @classmethod
+    def match_time(cls, src, timestamp):
+        """ Convenience function to iterate all notes corresponding to 'now' ONLY """
+        for inst in cls.iterate(src):
+            if int(timestamp) == inst.now:
+                yield inst
+
+    @classmethod
     def search(cls, src, term):
         """ Match any notes that contain term in message, single-line comparison.
             case SENSITIVE """

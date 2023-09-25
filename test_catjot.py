@@ -468,6 +468,19 @@ class TestTaker(unittest.TestCase):
 
         self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
 
+    def test_search_by_timestamp(self):
+        iters = 0
+        for inst in Note.match_time(FIXED_CATNOTE, 1695184544):
+            self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
+            iters += 1
+        self.assertEqual(iters, 1)
+
+        iters = 0
+        for inst in Note.match_time(FIXED_CATNOTE, 1694747662):
+            self.assertEqual(inst.context, "adoption")
+            iters += 1
+        self.assertEqual(iters, 1)
+
     def test_delete_record(self):
         iters = 0
         # file, untouched
