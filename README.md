@@ -168,6 +168,11 @@ $ jot h
 `jot l`        : show last-written note
 `jot p`        : pop/delete the last-written note
 `jot d`        : show all notes from all time, everywhere
+`jot pl`       : show last-written note, message PayLoad only (headers omitted)
+`jot pl 169...`: show note matching timestamp(s), concatenated, message PayLoad only (headers omitted)
+               : $ DATA=$(jot pl 1695220591)
+               : $ echo $DATA
+               : うち
 
 ### Alternate .catjot locations
 
