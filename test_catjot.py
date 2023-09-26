@@ -287,7 +287,7 @@ class TestTaker(unittest.TestCase):
 
     def test_deleting_tag_from_existing_note(self):
         pre_tag = 'stuff'
-        post_tag = '-stuff'
+        post_tag = '~stuff'
         Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey"))
@@ -340,7 +340,7 @@ class TestTaker(unittest.TestCase):
         self.assertIn(another_tag, inst.tag)
         self.assertEqual(inst.tag, f"{pre_tag} {post_tag} {another_tag}")
 
-        last_tag = "-blamo"
+        last_tag = "~blamo"
         inst.amend(TMP_CATNOTE, tag=last_tag) # create .new file
         Note.commit(TMP_CATNOTE) # commit the change
 

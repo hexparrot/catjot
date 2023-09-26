@@ -160,7 +160,7 @@ class Note(object):
 
                 if tag and int(inst.now) == int(last_record.now):
                     all_tags = inst.tag.split(" ")
-                    if tag.startswith('-'):
+                    if tag.startswith('~'):
                         try:
                             all_tags.remove(tag[1:])
                         except ValueError:
@@ -301,10 +301,10 @@ class Note(object):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="cat|jot notetaker")
-    parser.add_argument("-c", action="store_const", const="context", help="set context or amend context of last message")
-    parser.add_argument("-a", action="store_true", help="amend last jot instead")
-    parser.add_argument("-t", action="store_const", const="tag", help="set tag or amend tag of last message")
-    parser.add_argument("-p", action="store_const", const="pwd", help="set pwd or amend pwd of last message")
+    parser.add_argument("-a", action="store_true", help="amend last note instead of creating new note")
+    parser.add_argument("-c", type=str, help="set context for message")
+    parser.add_argument("-t", type=str, help="set tag for message")
+    parser.add_argument("-p", type=str, help="set pwd for message")
     parser.add_argument("additional_args", nargs="*", help="argument values")
 
     args = parser.parse_args()
@@ -331,19 +331,24 @@ def main():
             print(note_obj, end="")
             print(Note.REC_BOT)
 
-    mode = args.c or args.t or args.p
-    params = { mode: flatten(args.additional_args) }
-    try:
-        params.pop(None)
-    except KeyError:
-        pass
+    mode = None
+    if args.c:
+        mode = "context"
+    elif args.t:
+        mode = "tag"
+    elif args.p:
+        mode = "pwd"
+
+    params = {}
+    if mode:
+        params[mode] = flatten(args.additional_args)
 
     # context-related functionality
     if args.c:
         if sys.stdin.isatty(): # interactive tty, no pipe!
             if args.a:
                 # amend means editing last written note
-                context = flatten(args.additional_args)
+                context = args.c
                 if context: # non-null contents of addl_args
                     # jot -ac personal_feelings
                     params = { mode: context }
@@ -356,14 +361,14 @@ def main():
             else:
                 # jot -c observations
                 # not intending to amend means match by context field
-                context = flatten(args.additional_args)
+                context = args.c
                 params = { mode: context }
                 # TODO: implement match by context
                 raise NotImplementedError
         else: # yes pipe!
             if args.a:
                 # amend means editing last written note
-                context = flatten(args.additional_args)
+                context = args.c
                 if context: # non-null contents of addl_args
                     # whoami | jot -ac ponderings
                     print("Ambiguous input--amending last note with pipe or -c args?")
@@ -386,7 +391,7 @@ def main():
                         print("Received no piped input, bailing")
                         exit(4)
             else:
-                context = flatten(args.additional_args)
+                context = args.c
                 if context:
                     # | jot -c musings
                     # write new note with provided context from arg
@@ -402,7 +407,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             if args.a:
                 # amend means editing last written note
-                tag = flatten(args.additional_args)
+                tag = args.t
                 if tag: # non-null contents of addl_args
                     # jot -at project1
                     params = { mode: tag }
@@ -415,7 +420,7 @@ def main():
             else:
                 # jot -t project2
                 # not intending to amend means match by tag field
-                tag = flatten(args.additional_args)
+                tag = args.t
                 try:
                     for inst in Note().tagged(NOTEFILE, tag):
                         printout(inst)
@@ -425,7 +430,7 @@ def main():
         else: # yes pipe!
             if args.a:
                 # amend means editing last written note
-                tag = flatten(args.additional_args)
+                tag = args.t
                 if tag: # non-null contents of addl_args
                     # whoami | jot -at project3
                     print("Ambiguous input--amending last tag with pipe or -t args?")
@@ -444,7 +449,7 @@ def main():
                         print("Received no piped input, bailing")
                         exit(4)
             else:
-                tag = flatten(args.additional_args)
+                tag = args.t
                 if tag:
                     # | jot -t project4
                     # new note with tag set to [project4]
@@ -460,7 +465,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             if args.a:
                 # amend means editing last written note
-                pwd = flatten(args.additional_args)
+                pwd = args.p
                 if pwd: # non-null contents of addl_args
                     # jot -ap /home/user
                     params = { mode: pwd }
@@ -473,7 +478,7 @@ def main():
             else:
                 # jot -p /home/user
                 # not intending to amend means match by pwd field
-                pwd = flatten(args.additional_args)
+                pwd = args.p
                 try:
                     for inst in Note().match_dir(NOTEFILE, pwd):
                         printout(inst)
@@ -483,7 +488,7 @@ def main():
         else: # yes pipe!
             if args.a:
                 # amend means editing last written note
-                pwd = flatten(args.additional_args)
+                pwd = args.p
                 if pwd: # non-null contents of addl_args
                     # echo $PWD | jot -ap /home/user
                     print("Ambiguous input--amending last pwd with pipe or -p args?")
@@ -503,7 +508,7 @@ def main():
                         print("Received no piped input, bailing")
                         exit(4)
             else:
-                pwd = flatten(args.additional_args)
+                pwd = args.p
                 if pwd:
                     # | jot -p /home/usr
                     # new note with pwd set to /home/usr
