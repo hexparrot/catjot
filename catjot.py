@@ -427,7 +427,7 @@ def main():
         SHORTCUTS = {
             'MOST_RECENT': ['last', 'l'],
             'MATCH_NOTE_NAIVE': ['match', 'm'],
-            'MATCH_NOTE_NAIVE_I': ['search', 's'],
+            'MATCH_NOTE_NAIVE_I': ['search', 's', 'mi'],
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
             'SHOW_ALL': ['dump', 'display', 'd'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
@@ -524,21 +524,22 @@ def main():
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                try:
-                    for inst in Note().search(NOTEFILE, flattened):
+                print(flattened)
+                with NoteContext(NOTEFILE, "search", { 'term': flattened }) as nc:
+                    for inst in nc:
                         printout(inst)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
+
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                try:
-                    for inst in Note().search_i(NOTEFILE, flattened):
+                with NoteContext(NOTEFILE, "search_i", { 'term': flattened }) as nc:
+                    for inst in nc:
                         printout(inst)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
+
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
                 # delete any notes matching the provided timestamp
                 try:
@@ -556,12 +557,12 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
                 # show all notes with tag
                 flattened = args.additional_args[1]
-                try:
-                    for inst in Note().tagged(NOTEFILE, flattened):
+                with NoteContext(NOTEFILE, "tagged", { 'tag': flattened }) as nc:
+                    for inst in nc:
                         printout(inst)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
+
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the message only (no pwd, no timestamp, no context).
                 # when provided a timestamp, any notes matching timestamp
