@@ -272,6 +272,13 @@ class Note(object):
                 yield inst
 
     @classmethod
+    def search_context_i(cls, src, context):
+        """ Convenience function to iterate all notes matching context ONLY """
+        for inst in cls.iterate(src):
+            if context.lower() in inst.context.lower():
+                yield inst
+
+    @classmethod
     def search(cls, src, term):
         """ Match any notes that contain term in message, single-line comparison.
             case SENSITIVE """
@@ -332,6 +339,9 @@ def main():
             print(Note.REC_BOT)
 
     params = {}
+    if args.c: params['context'] = flatten(args.additional_args)
+    if args.t: params['tag'] = args.t
+    if args.p: params['pwd'] = args.p
     if args.a and (args.c or args.t or args.p):
         # amend engaged, and at least one amendable value provided
         # Accepted Usage:
@@ -340,9 +350,6 @@ def main():
         # jot -ap /home/user
         # jot -ac "this is how i feel" -t "personal_feelings"
         # jot -ac "this is how i feel" -t "personal_feelings" -p /home/user
-        if args.c: params['context'] = flatten(args.additional_args)
-        if args.t: params['tag'] = args.t
-        if args.p: params['pwd'] = args.p
 
         if sys.stdin.isatty(): # interactive tty, not a pipe!
             # accept all attrs to change and complete amendment
@@ -364,13 +371,16 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -c observations
             # not intending to amend instead means match by context field
-            # TODO: implement match by context
-            raise NotImplementedError
+            try:
+                for inst in Note().search_context_i(NOTEFILE, params['context']):
+                    printout(inst)
+            except FileNotFoundError:
+                print(f"No notefile found at {NOTEFILE}")
+                sys.exit(1)
         else: # yes pipe!
             # | jot -c musings
             # write new note with provided context from arg
             piped_data = flatten_pipe(sys.stdin.readlines())
-            params = { 'context': args.c }
             Note().append(NOTEFILE, piped_data, **params)
     # tagging-related functionality
     elif args.t:
@@ -378,7 +388,7 @@ def main():
             # jot -t project2
             # not intending to amend instead means match by tag field
             try:
-                for inst in Note().tagged(NOTEFILE, args.t):
+                for inst in Note().tagged(NOTEFILE, params['tag']):
                     printout(inst)
             except FileNotFoundError:
                 print(f"No notefile found at {NOTEFILE}")
@@ -387,7 +397,6 @@ def main():
             # | jot -t project4
             # new note with tag set to [project4]
             piped_data = flatten_pipe(sys.stdin.readlines())
-            params = { 'tag': args.t }
             Note().append(NOTEFILE, piped_data, **params)
     # pwd-related functionality
     elif args.p:
@@ -395,14 +404,13 @@ def main():
             # jot -p /home/user
             # not intending to amend instead means match by pwd field
             try:
-                for inst in Note().match_dir(NOTEFILE, args.p):
+                for inst in Note().match_dir(NOTEFILE, params['pwd']):
                     printout(inst)
             except FileNotFoundError:
                 print(f"No notefile found at {NOTEFILE}")
                 sys.exit(1)
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
-            params = { 'pwd': args.p }
             Note().append(NOTEFILE, piped_data, **params)
     else:
         # for all other cases where no argparse argument is provided

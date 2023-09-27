@@ -481,6 +481,19 @@ class TestTaker(unittest.TestCase):
             iters += 1
         self.assertEqual(iters, 1)
 
+    def test_search_by_context(self):
+        iters = 0
+        for inst in Note.search_context_i(FIXED_CATNOTE, "adoption"):
+            self.assertEqual(inst.now, 1694747662)
+            iters += 1
+        self.assertEqual(iters, 1)
+
+        iters = 0
+        for inst in Note.search_context_i(FIXED_CATNOTE, 'NEKO'):
+            self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
+            iters += 1
+        self.assertEqual(iters, 1)
+
     def test_delete_record(self):
         iters = 0
         # file, untouched
