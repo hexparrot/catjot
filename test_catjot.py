@@ -7,7 +7,7 @@ __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
 import unittest
-from catjot import Note
+from catjot import Note, NoteContext
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
@@ -578,6 +578,26 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.now, 1694747841)
         self.assertEqual(inst.message, "testing that this shows up unimpacted\n")
+
+    ### tests for context manager
+    def test_note_context_creation(self):
+        with NoteContext(FIXED_CATNOTE, "match_dir", { 'path_match': '/home/user' }) as nc:
+            iters = 0
+            for inst in nc:
+                iters += 1
+            self.assertEqual(iters, 4)
+
+        with NoteContext(FIXED_CATNOTE, "match_dir", { 'path_match': '/home/user/git/catjot' }) as nc:
+            iters = 0
+            for inst in nc:
+                iters += 1
+            self.assertEqual(iters, 1)
+
+        with NoteContext(FIXED_CATNOTE, "iterate", {}) as nc:
+            iters = 0
+            for inst in nc:
+                iters += 1
+            self.assertEqual(iters, 7)
 
 if __name__ == '__main__':
     unittest.main()

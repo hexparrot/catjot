@@ -305,6 +305,23 @@ class Note(object):
             except AttributeError: # it's Nonetype from having nothing set
                 pass
 
+class NoteContext:
+    def __init__(self, notefile, method, params={}):
+        self.notefile = notefile
+        self.method = method
+        self.params = params
+
+    def __enter__(self):
+        try:
+            method = getattr(Note, self.method)
+            return [i for i in method(self.notefile, **self.params)]
+        except FileNotFoundError:
+            print(f"No notefile found at {NOTEFILE}")
+            sys.exit(1)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="cat|jot notetaker")
@@ -323,6 +340,8 @@ def main():
         # the environment variable will always supercede $HOME default when set
         if environ['CATJOT_FILE']: # truthy test for env that exists but unset
             NOTEFILE = environ['CATJOT_FILE']
+
+    # helper variables for all CLI handling
 
     def flatten(arg_lst):
         return ' '.join(arg_lst).rstrip()
@@ -371,12 +390,9 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -c observations
             # not intending to amend instead means match by context field
-            try:
-                for inst in Note().search_context_i(NOTEFILE, params['context']):
+            with NoteContext(NOTEFILE, "search_context_i", { 'context': params['context'] }) as nc:
+                for inst in nc:
                     printout(inst)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-                sys.exit(1)
         else: # yes pipe!
             # | jot -c musings
             # write new note with provided context from arg
