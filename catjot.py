@@ -302,9 +302,9 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="cat|jot notetaker")
     parser.add_argument("-a", action="store_true", help="amend last note instead of creating new note")
-    parser.add_argument("-c", type=str, help="search notes by context / set context when amending")
     parser.add_argument("-t", type=str, help="search notes by tag / set tag when amending")
     parser.add_argument("-p", type=str, help="search notes by pwd / set pwd when amending")
+    parser.add_argument("-c", action="store_const", const="context", help="search notes by context / set context when amending")
     parser.add_argument("additional_args", nargs="*", help="argument values")
 
     args = parser.parse_args()
@@ -339,7 +339,7 @@ def main():
         # jot -ap /home/user
         # jot -ac "this is how i feel" -t "personal_feelings"
         # jot -ac "this is how i feel" -t "personal_feelings" -p /home/user
-        if args.c: params['context'] = args.c
+        if args.c: params['context'] = flatten(args.additional_args)
         if args.t: params['tag'] = args.t
         if args.p: params['pwd'] = args.p
 
@@ -350,11 +350,11 @@ def main():
         else: # if piping in, accept only one argument
             # | jot -ac "pipe it in"
             # | jot -at "celebration_notes"
+            # | jot -ap "/home/user"
             # piped data will be a ''.joined string, maintaining newlines
             mode = None
             if (bool(args.c) + bool(args.t) + bool(args.p)) == 1:
                 mode = args.c or args.t or args.p
-
                 if mode == 'context':
                     piped_data = flatten_pipe(sys.stdin.readlines())
                     params = { mode: piped_data }
