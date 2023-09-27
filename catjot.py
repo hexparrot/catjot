@@ -354,7 +354,7 @@ def main():
             # | jot -acp "/home/user"
             # piped data will be a ''.joined string, maintaining newlines
             piped_data = flatten_pipe(sys.stdin.readlines())
-            params = { 'context': piped_data } # overwrite anything in args
+            params['context'] = piped_data # overwrite anything in args
             Note.amend(NOTEFILE, **params)
             Note.commit(NOTEFILE)
         exit(0) # end logic for amending

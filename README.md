@@ -12,6 +12,12 @@
 
 Pipe `|` directly to catjot to create a new note.
 
+*Any* time a pipe is involved, it is a write-action, whether it is a new
+note being written or adding context or tags.
+
+Any time a pipe is absent, it is a search-action, whether it is matching
+a word in the message payload, the context, tags, or the directory path.
+
 ```
 $ cat|jot
  /\_/\     # cat directly to a new note (recommended).
@@ -89,13 +95,13 @@ $ jot l
 % no more coffee after 8!
 oh man, what am i even doing with my life!?
 
-$ jot -at "sadnotes"
+$ echo "combine context pipe with one other attribute" |jot -act "sadnotes"
 $ jot l
 ^-^
 > cd /home/user
 # date 2023-09-23 00:41:14 (1695454874)
 [sadnotes]
-% no more coffee after 8!
+% combine context pipe with one other attribute
 oh man, what am i even doing with my life!?
 ```
 
