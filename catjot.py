@@ -428,7 +428,7 @@ def main():
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
-            # show notes originating from this PWD
+            # show all notes originating from this PWD
             from os import getcwd
             if sys.stdin.isatty():
                 try:
@@ -447,9 +447,10 @@ def main():
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
-                # always displays the most recently created note in this PWD
+                # only display the most recently created note in this PWD
+                from os import getcwd
                 last_note = "No notes to show.\n"
-                for inst in Note().list(NOTEFILE):
+                for inst in Note().match_dir(NOTEFILE, getcwd()):
                     last_note = inst
                 else:
                     printout(last_note)
@@ -523,7 +524,7 @@ def main():
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
             elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
-                # delete any notes matching a precise timestamp
+                # delete any notes matching the provided timestamp
                 try:
                     Note().delete(NOTEFILE, int(args.additional_args[1]))
                     Note().commit(NOTEFILE)
@@ -550,7 +551,7 @@ def main():
                 # when provided a timestamp, any notes matching timestamp
                 # will be sent to stdout, concatenated in order of appearance
                 flattened = args.additional_args[1]
-                if flattened: # if truthy, somehow, use it for search
+                if flattened: # if truthy, e.g., timestamp, use it for search
                     try:
                         for inst in Note().match_time(NOTEFILE, flattened):
                             printout(inst, message_only=True)
