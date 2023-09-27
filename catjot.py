@@ -403,12 +403,9 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -t project2
             # not intending to amend instead means match by tag field
-            try:
-                for inst in Note().tagged(NOTEFILE, params['tag']):
+            with NoteContext(NOTEFILE, "tagged", { 'tag': params['tag'] }) as nc:
+                for inst in nc:
                     printout(inst)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-                sys.exit(1)
         else: # yes pipe!
             # | jot -t project4
             # new note with tag set to [project4]
@@ -419,12 +416,9 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -p /home/user
             # not intending to amend instead means match by pwd field
-            try:
-                for inst in Note().match_dir(NOTEFILE, params['pwd']):
+            with NoteContext(NOTEFILE, "match_dir", { 'path_match': params['pwd'] }) as nc:
+                for inst in nc:
                     printout(inst)
-            except FileNotFoundError:
-                print(f"No notefile found at {NOTEFILE}")
-                sys.exit(1)
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
             Note().append(NOTEFILE, piped_data, **params)
