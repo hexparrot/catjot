@@ -441,17 +441,22 @@ def main():
             # show all notes originating from this PWD
             from os import getcwd
             if sys.stdin.isatty():
-                try:
-                    count = 0
-                    for inst in Note().match_dir(NOTEFILE, getcwd()):
-                        count += 1
-                        printout(inst)
-                    else:
-                        child_matches = len(list(Note().list(NOTEFILE)))
-                        print(f"{child_matches-count} matches in child directories")
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
+                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                    match_count = 0
+                    non_match_count = 0
+                    total_count = 0
+                    for inst in nc:
+                        total_count += 1
+                        if getcwd() == inst.pwd:
+                            match_count += 1
+                            print(inst)
+                        else:
+                            non_match_count += 1
+
+                print(f"{Note.LABEL_SEP}")
+                print(f"{match_count} notes in current directory")
+                print(f"{non_match_count} notes in child directories")
+                print(f"{total_count} total notes overall")
             else:
                 Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
