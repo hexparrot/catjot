@@ -465,10 +465,11 @@ def main():
                 # only display the most recently created note in this PWD
                 from os import getcwd
                 last_note = "No notes to show.\n"
-                for inst in Note().match_dir(NOTEFILE, getcwd()):
-                    last_note = inst
-                else:
-                    printout(last_note)
+                with NoteContext(NOTEFILE, "match_dir", { 'path_match': getcwd() }) as nc:
+                    for inst in nc:
+                        last_note = inst
+                    else:
+                        printout(last_note)
             elif args.additional_args[0] in SHORTCUTS['DELETE_MOST_RECENT_PWD']:
                 # always deletes the most recently created note in this PWD
                 from os import getcwd
@@ -487,23 +488,23 @@ def main():
                 from os import environ
 
                 if sys.stdin.isatty():
-                    try:
-                        for inst in Note().match_dir(NOTEFILE, environ['HOME']):
+                    with NoteContext(NOTEFILE, "match_dir", { 'path_match': environ['HOME'] }) as nc:
+                        for inst in nc:
                             printout(inst)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
+
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{len(nc)} notes in current directory")
                 else:
                     params['pwd'] = environ['HOME']
                     Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
-                try:
-                    for inst in Note().iterate(NOTEFILE):
+                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                    for inst in nc:
                         printout(inst)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
+
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{len(nc)} notes in total")
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the last message, message only (no pwd, no timestamp, no context).
                 last_note = None
