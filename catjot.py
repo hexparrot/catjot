@@ -304,7 +304,7 @@ def main():
     parser.add_argument("-a", action="store_true", help="amend last note instead of creating new note")
     parser.add_argument("-t", type=str, help="search notes by tag / set tag when amending")
     parser.add_argument("-p", type=str, help="search notes by pwd / set pwd when amending")
-    parser.add_argument("-c", action="store_const", const="context", help="search notes by context / set context when amending")
+    parser.add_argument("-c", action="store_const", const="context", help="search notes by context / read pipe into context as amendment")
     parser.add_argument("additional_args", nargs="*", help="argument values")
 
     args = parser.parse_args()
@@ -334,6 +334,7 @@ def main():
     params = {}
     if args.a and (args.c or args.t or args.p):
         # amend engaged, and at least one amendable value provided
+        # Accepted Usage:
         # jot -ac this is how i feel
         # jot -at personal_feelings
         # jot -ap /home/user
@@ -347,32 +348,15 @@ def main():
             # accept all attrs to change and complete amendment
             Note.amend(NOTEFILE, **params)
             Note.commit(NOTEFILE)
-        else: # if piping in, accept only one argument
-            # | jot -ac "pipe it in"
-            # | jot -at "celebration_notes"
-            # | jot -ap "/home/user"
+        else: # pipe always interpreted as context, never pwd/tag
+            # Accepted Usage:
+            # | jot -act "celebration_notes"
+            # | jot -acp "/home/user"
             # piped data will be a ''.joined string, maintaining newlines
-            mode = None
-            if (bool(args.c) + bool(args.t) + bool(args.p)) == 1:
-                mode = args.c or args.t or args.p
-                if mode == 'context':
-                    piped_data = flatten_pipe(sys.stdin.readlines())
-                    params = { mode: piped_data }
-                    Note.amend(NOTEFILE, **params)
-                    Note.commit(NOTEFILE)
-                elif mode == 'tag':
-                    piped_data = flatten_pipe(sys.stdin.readlines().split())
-                    params = { mode: ' '.join(piped_data) }
-                    Note.amend(NOTEFILE, **params)
-                    Note.commit(NOTEFILE)
-                elif mode == 'pwd':
-                    piped_data = flatten_pipe(sys.stdin.readline().strip())
-                    params = { mode: piped_data }
-                    Note.amend(NOTEFILE, **params)
-                    Note.commit(NOTEFILE)
-            else: # multiple args provided to piping, not allowed
-                print("Only context may be piped to an amendment command, e.g., -ac")
-                exit(3)
+            piped_data = flatten_pipe(sys.stdin.readlines())
+            params = { 'context': piped_data } # overwrite anything in args
+            Note.amend(NOTEFILE, **params)
+            Note.commit(NOTEFILE)
         exit(0) # end logic for amending
 
     # context-related functionality
