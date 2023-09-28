@@ -435,6 +435,7 @@ def main():
             'SHOW_TAG': ['tagged', 'tag', 't'],
             'AMEND': ['amend', 'a'],
             'MESSAGE_ONLY': ['payload', 'pl'],
+            'SIDE_BY_SIDE': ['sidebyside', 'sbs'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
@@ -598,6 +599,77 @@ def main():
                     except AttributeError:
                         print(f"No notes to show.")
                         sys.exit(2)
+            elif args.additional_args[0] in SHORTCUTS['SIDE_BY_SIDE']:
+                # prints a note and allows you to rewrite the line/accept line as-is
+                # Acceptable Input:
+                # <matched input> = matched input kept
+                # <input comprised only of strip()'ed chars, including blank line> = keep original input
+                # ' ' = delete line
+                # <anything else> = keep new input
+                import os
+                from math import ceil
+
+                last_note = None
+                last_mark = ' '
+                user_timestamp = int(args.additional_args[1])
+                
+                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                    for inst in nc:
+                        if inst.now == user_timestamp:
+                            last_note = inst
+                            break
+                    else: # if no match, and avoided "break"
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"No note to display matching this timestamp ({user_timestamp}) in {NOTEFILE}")
+                        #exit(2)
+
+                    # this path accessible only if last_note was successfully populated else exited(2)
+                    if not last_note:
+                        last_note = inst
+
+                newnote_lines = []
+                MARKS = {
+                    'check': '✓',
+                    'circle': '⊕',
+                    'x': '✗',
+                }
+
+                longest_line_length = max(len(line) for line in last_note.message.split('\n'))
+                terminal_width = os.get_terminal_size().columns
+                print(f"max line length: {longest_line_length}")
+                print(f"terminal_width : {terminal_width}")
+
+                min_left_side_width = max(ceil(longest_line_length / 10) * 10, 35) # Round up to the nearest 10, or 35 min
+                if terminal_width >= (min_left_side_width * 2) + 3: # last mark, pipe sep, last char
+                    for line in last_note.message.split():
+                        print(f"{line.rstrip().ljust(min_left_side_width)}{last_mark}|", end="")
+                        usr_in = input()
+                        if line.rstrip() == usr_in.rstrip(): # line matches...
+                            last_mark = MARKS['check']
+                            newnote_lines.append(line + '\n') # ...preserve original
+                        elif usr_in == ' ': # if the line is a single space...
+                            last_mark = MARKS['x'] # ... throw it away (by not appending it)
+                        elif not usr_in.strip(): # if the user provided line is effectively blank...
+                            last_mark = MARKS['circle']
+                            newnote_lines.append(line + '\n') # ...preserve original
+                        else:
+                            # value is changed from original, keep provided value
+                            last_mark = MARKS['x']
+                            newnote_lines.append(usr_in.rstrip() + '\n')
+                    else: # after all the iterating
+                        addl_context = f"rewritten note from {last_note.now}"
+                        new_note = {
+                            'message': ''.join(newnote_lines),
+                            'pwd': last_note.pwd,
+                            'now': None,
+                            'tag': last_note.tag,
+                            'context': addl_context if not last_note.context else f"{last_note.context};{addl_context}"
+                        }
+                        Note.append(NOTEFILE, **new_note)
+                else:
+                    print(f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting")
+                    exit(2)
+
 
 if __name__ == "__main__":
     main()
