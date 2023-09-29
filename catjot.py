@@ -49,7 +49,7 @@ class Note(object):
     LABEL_NOW = "Date:"
     LABEL_TAG = "Tag:"
     LABEL_CTX = "Context:"
-    LABEL_ARG = "" # additional prefixing label for first line of note data
+    LABEL_ARG = "Message:"
 
     # All required fields to exist before note data
     FIELDS_TO_PARSE = [
@@ -103,6 +103,9 @@ class Note(object):
             while len(basic_struct['msg']) > 1 and basic_struct['msg'][-1] == '\n':
                 basic_struct['msg'].pop()
             retval.message = ''.join(basic_struct['msg'])
+
+        if retval.message.startswith(Note.LABEL_ARG):
+            retval.message = retval.message.lstrip(Note.LABEL_ARG)
 
         return retval
 
