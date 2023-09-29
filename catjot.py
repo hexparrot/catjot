@@ -400,7 +400,7 @@ def main():
             # | jot -c musings
             # write new note with provided context from arg
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note().append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, piped_data, **params)
     # tagging-related functionality
     elif args.t:
         if sys.stdin.isatty(): # interactive tty, no pipe!
@@ -413,7 +413,7 @@ def main():
             # | jot -t project4
             # new note with tag set to [project4]
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note().append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, piped_data, **params)
     # pwd-related functionality
     elif args.p:
         if sys.stdin.isatty(): # interactive tty, no pipe!
@@ -424,7 +424,7 @@ def main():
                     printout(inst)
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note().append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, piped_data, **params)
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
@@ -462,7 +462,7 @@ def main():
                 print(f"{non_match_count} notes in child directories")
                 print(f"{total_count} total notes overall")
             else:
-                Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
+                Note.append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
@@ -478,8 +478,8 @@ def main():
                 # always deletes the most recently created note in this PWD
                 from os import getcwd
                 try:
-                    Note().pop(NOTEFILE, getcwd())
-                    Note().commit(NOTEFILE)
+                    Note.pop(NOTEFILE, getcwd())
+                    Note.commit(NOTEFILE)
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
@@ -500,7 +500,7 @@ def main():
                     print(f"{len(nc)} notes in current directory")
                 else:
                     params['pwd'] = environ['HOME']
-                    Note().append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
+                    Note.append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
                 with NoteContext(NOTEFILE, "iterate", {}) as nc:
@@ -513,7 +513,7 @@ def main():
                 # returns the last message, message only (no pwd, no timestamp, no context).
                 last_note = None
                 try:
-                    for inst in Note().list(NOTEFILE):
+                    for inst in Note.list(NOTEFILE):
                         last_note = inst
                     else:
                         printout(last_note, message_only=True)
@@ -547,8 +547,8 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
                 # delete any notes matching the provided timestamp
                 try:
-                    Note().delete(NOTEFILE, int(args.additional_args[1]))
-                    Note().commit(NOTEFILE)
+                    Note.delete(NOTEFILE, int(args.additional_args[1]))
+                    Note.commit(NOTEFILE)
                 except FileNotFoundError:
                     print(f"No notefile found at {NOTEFILE}")
                     sys.exit(1)
@@ -574,7 +574,7 @@ def main():
                 flattened = args.additional_args[1]
                 if flattened: # if truthy, e.g., timestamp, use it for search
                     try:
-                        for inst in Note().match_time(NOTEFILE, flattened):
+                        for inst in Note.match_time(NOTEFILE, flattened):
                             printout(inst, message_only=True)
                     except FileNotFoundError:
                         print(f"No notefile found at {NOTEFILE}")
@@ -592,7 +592,7 @@ def main():
                     # always displays the most recently created note in this PWD
                     last_note = None
                     try:
-                        for inst in Note().list(NOTEFILE):
+                        for inst in Note.list(NOTEFILE):
                             last_note = inst
                         else:
                             printout(last_note, message_only=True)
