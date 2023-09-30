@@ -124,7 +124,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "the smallest unit passable to make a note\n")
 
     def test_write_note(self):
-        Note.append(TMP_CATNOTE, "this is a note")
+        Note.append(TMP_CATNOTE, Note.jot("this is a note"))
 
         inst = next(Note.search(TMP_CATNOTE, "note"))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
@@ -132,7 +132,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "this is a note\n")
 
     def test_write_note_to_diff_pwd(self):
-        Note.append(TMP_CATNOTE, "this is a note", pwd="/home/user/git/git/git")
+        Note.append(TMP_CATNOTE, Note.jot("this is a note", pwd="/home/user/git/git/git"))
 
         inst = next(Note.search(TMP_CATNOTE, "note"))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
@@ -146,7 +146,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(iters, 1)
 
     def test_write_note_to_diff_timestamp(self):
-        Note.append(TMP_CATNOTE, "this is a note", pwd="/home/user/git/git/git", now=1694744444)
+        Note.append(TMP_CATNOTE, Note.jot("this is a note", pwd="/home/user/git/git/git", now=1694744444))
 
         inst = next(Note.search(TMP_CATNOTE, "note"))
         self.assertEqual(inst.now, 1694744444)
@@ -154,13 +154,13 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "this is a note\n")
 
     def test_list_herenote(self):
-        Note.append(TMP_CATNOTE, "this is a note")
+        Note.append(TMP_CATNOTE, Note.jot("this is a note"))
         inst = next(Note.list(TMP_CATNOTE))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
 
-        Note.append(TMP_CATNOTE, "nnnnnote2")
+        Note.append(TMP_CATNOTE, Note.jot("nnnnnote2"))
         multi = Note.list(TMP_CATNOTE)
         inst = next(multi)
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
@@ -173,13 +173,13 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "nnnnnote2\n")
 
     def test_list_herenote_homenote(self):
-        Note.append(TMP_CATNOTE, "this is a note")
+        Note.append(TMP_CATNOTE, Note.jot("this is a note"))
         inst = next(Note.list(TMP_CATNOTE))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
 
-        Note.append(TMP_CATNOTE, "nnnnnote2")
+        Note.append(TMP_CATNOTE, Note.jot("nnnnnote2"))
         multi = Note.list(TMP_CATNOTE)
         inst = next(multi)
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
@@ -193,7 +193,7 @@ class TestTaker(unittest.TestCase):
 
     def test_string_representation(self):
         thenote = "this is a note-o"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().list(TMP_CATNOTE))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -201,7 +201,7 @@ class TestTaker(unittest.TestCase):
 
     def test_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().list(TMP_CATNOTE))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -209,7 +209,7 @@ class TestTaker(unittest.TestCase):
 
     def test_search_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().search(TMP_CATNOTE, "take"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -217,7 +217,7 @@ class TestTaker(unittest.TestCase):
 
     def test_search_multi_line_string_with_empty_lines(self):
         thenote = "notes can sometimes\n\n\n\ntake many lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().search(TMP_CATNOTE, "many"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -225,7 +225,7 @@ class TestTaker(unittest.TestCase):
 
     def test_search_multi_line_string_insensitive(self):
         thenote = "notes can sometimes\nTAKE two lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().search_i(TMP_CATNOTE, "take"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -233,7 +233,7 @@ class TestTaker(unittest.TestCase):
 
     def test_search_multi_line_string_with_empty_lines_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -241,7 +241,7 @@ class TestTaker(unittest.TestCase):
 
     def test_search_multi_line_string_with_split_words_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -249,7 +249,7 @@ class TestTaker(unittest.TestCase):
 
     def test_creating_label(self):
         thenote = "notes take labels now"
-        Note.append(TMP_CATNOTE, thenote, tag="secret")
+        Note.append(TMP_CATNOTE, Note.jot(thenote, tag="secret"))
         inst = next(Note().search_i(TMP_CATNOTE, "notes"))
         self.assertEqual(inst.tag, "secret")
         dt = datetime.fromtimestamp(inst.now)
@@ -258,7 +258,7 @@ class TestTaker(unittest.TestCase):
 
     def test_adding_context(self):
         thenote = ".bash_profile"
-        Note.append(TMP_CATNOTE, thenote, context="ls /home/user")
+        Note.append(TMP_CATNOTE, Note.jot(thenote, context="ls /home/user"))
         inst = next(Note().search_i(TMP_CATNOTE, "profile"))
         self.assertEqual(inst.context, "ls /home/user")
         dt = datetime.fromtimestamp(inst.now)
@@ -272,7 +272,7 @@ class TestTaker(unittest.TestCase):
 
     def test_adding_context_to_existing_jot(self):
         thenote = ".bashrc"
-        Note.append(TMP_CATNOTE, thenote)
+        Note.append(TMP_CATNOTE, Note.jot(thenote))
 
         inst = next(Note().search_i(TMP_CATNOTE, "bashrc"))
         self.assertEqual(inst.context, "") # no context yet
@@ -293,7 +293,7 @@ class TestTaker(unittest.TestCase):
     def test_changing_pwd_to_existing_jot(self):
         pre_pwd = '/home/user/git'
         post_pwd = '/home/alice/in'
-        Note.append(TMP_CATNOTE, "notey", pwd=pre_pwd)
+        Note.append(TMP_CATNOTE, Note.jot("notey", pwd=pre_pwd))
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey"))
         self.assertEqual(inst.pwd, pre_pwd)
@@ -313,7 +313,7 @@ class TestTaker(unittest.TestCase):
     def test_deleting_tag_from_existing_note(self):
         pre_tag = 'stuff'
         post_tag = '~stuff'
-        Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
+        Note.append(TMP_CATNOTE, Note.jot("notey", tag=pre_tag))
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey"))
         self.assertEqual(inst.tag, pre_tag)
@@ -333,7 +333,7 @@ class TestTaker(unittest.TestCase):
     def test_append_multiple_tags(self):
         pre_tag = 'blamo'
         post_tag = 'better_stuff'
-        Note.append(TMP_CATNOTE, "notey", tag=pre_tag)
+        Note.append(TMP_CATNOTE, Note.jot("notey", tag=pre_tag))
 
         inst = next(Note().search_i(TMP_CATNOTE, "notey"))
         self.assertIn(pre_tag, inst.tag)
@@ -574,14 +574,16 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(iters, 1)
 
     def test_empty_append_is_aborted(self):
-        Note.append(TMP_CATNOTE, "this is the first note")
+        Note.append(TMP_CATNOTE, Note.jot("this is the first note"))
 
         iters = 0
         for inst in Note.iterate(TMP_CATNOTE):
             iters += 1
         self.assertEqual(iters, 1)
 
-        Note.append(TMP_CATNOTE, "")
+        with self.assertRaises(ValueError):
+            # empty message not allowed
+            Note.append(TMP_CATNOTE, Note.jot(""))
 
         iters = 0
         for inst in Note.iterate(TMP_CATNOTE):

@@ -102,35 +102,33 @@ class Note(object):
     @classmethod
     def jot(cls, message, tag="", context="", pwd=None, now=None):
         """ Convenience function for low-effort creation of notes """
-        if not pwd: pwd = getcwd()
-        if not now:
-            from time import time
-            now = int(time())
+        from time import time
+        if not message: raise ValueError
 
         return Note({
-            'pwd': getcwd(),
-            'now': now,
+            'pwd': pwd or getcwd(),
+            'now': now or int(time()),
             'tag': tag,
             'context': context,
             'message': message.strip() + '\n',
         })
 
     @classmethod
-    def append(cls, src, message, pwd=None, now=None, tag="", context=""):
+    def append(cls, src, note):
         """ Accepts non-falsy text and writes it to the .catjot file. """
-        if not message: return
-        if not pwd: pwd = getcwd()
-        if not now:
+        if not note.message: return
+        if not note.pwd: note.pwd = getcwd()
+        if not note.now:
             from time import time
-            now = int(time())
+            note.now = int(time())
 
         with open(src, 'at') as file:
             file.write(f"{Note.LABEL_SEP}\n")
-            file.write(f"{Note.LABEL_PWD}{pwd}\n")
-            file.write(f"{Note.LABEL_NOW}{now}\n")
-            file.write(f"{Note.LABEL_TAG}{tag}\n")
-            file.write(f"{Note.LABEL_CTX}{context}\n")
-            file.write(f"{Note.LABEL_ARG}{message}\n\n")
+            file.write(f"{Note.LABEL_PWD}{note.pwd}\n")
+            file.write(f"{Note.LABEL_NOW}{note.now}\n")
+            file.write(f"{Note.LABEL_TAG}{note.tag}\n")
+            file.write(f"{Note.LABEL_CTX}{note.context}\n")
+            file.write(f"{Note.LABEL_ARG}{note.message}\n\n")
 
     @classmethod
     def delete(cls, src, timestamp):
