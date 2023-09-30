@@ -415,7 +415,7 @@ def main():
             # | jot -c musings
             # write new note with provided context from arg
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
     elif args.t:
         if sys.stdin.isatty(): # interactive tty, no pipe!
@@ -428,7 +428,7 @@ def main():
             # | jot -t project4
             # new note with tag set to [project4]
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # pwd-related functionality
     elif args.p:
         if sys.stdin.isatty(): # interactive tty, no pipe!
@@ -439,7 +439,7 @@ def main():
                     printout(inst)
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, piped_data, **params)
+            Note.append(NOTEFILE, Note.jot(piped_data, **params))
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
@@ -477,7 +477,7 @@ def main():
                 print(f"{non_match_count} notes in child directories")
                 print(f"{total_count} total notes overall")
             else:
-                Note.append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
+                Note.append(NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params))
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
@@ -515,7 +515,7 @@ def main():
                     print(f"{len(nc)} notes in current directory")
                 else:
                     params['pwd'] = environ['HOME']
-                    Note.append(NOTEFILE, flatten_pipe(sys.stdin.readlines()), **params)
+                    Note.append(NOTEFILE, Note(flatten_pipe(sys.stdin.readlines()), **params))
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
                 with NoteContext(NOTEFILE, "iterate", {}) as nc:
@@ -683,7 +683,7 @@ def main():
                             'tag': last_note.tag,
                             'context': addl_context if not last_note.context else f"{last_note.context};{addl_context}"
                         }
-                        Note.append(NOTEFILE, **new_note)
+                        Note.append(NOTEFILE, Note.jot(**new_note))
                 else:
                     print(f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting")
                     exit(2)
