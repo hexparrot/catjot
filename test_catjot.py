@@ -114,6 +114,15 @@ class TestTaker(unittest.TestCase):
 
     ### Start note creation tests
 
+    def test_jot_note(self):
+        inst = Note.jot("the smallest unit passable to make a note")
+
+        self.assertEqual(inst.pwd, getcwd())
+        self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
+        self.assertEqual(inst.tag, "")
+        self.assertEqual(inst.context, "")
+        self.assertEqual(inst.message, "the smallest unit passable to make a note\n")
+
     def test_write_note(self):
         Note.append(TMP_CATNOTE, "this is a note")
 

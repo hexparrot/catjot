@@ -63,11 +63,10 @@ class Note(object):
     NOTEFILE = f"{environ['HOME']}/.catjot"
 
     def __init__(self, values_dict={}):
-        import os
         from time import time
 
         now = int(time())
-        self.pwd = values_dict.get('pwd', os.getcwd())
+        self.pwd = values_dict.get('pwd', getcwd())
         assert self.pwd.startswith('/')
         self.now = int(values_dict.get('now', now))
         assert isinstance(self.now, int)
@@ -99,6 +98,22 @@ class Note(object):
                tagline + \
                context + \
                f"{Note.LABEL_DATA}{self.message}"
+
+    @classmethod
+    def jot(cls, message, tag="", context="", pwd=None, now=None):
+        """ Convenience function for low-effort creation of notes """
+        if not pwd: pwd = getcwd()
+        if not now:
+            from time import time
+            now = int(time())
+
+        return Note({
+            'pwd': getcwd(),
+            'now': now,
+            'tag': tag,
+            'context': context,
+            'message': message.strip() + '\n',
+        })
 
     @classmethod
     def append(cls, src, message, pwd=None, now=None, tag="", context=""):
