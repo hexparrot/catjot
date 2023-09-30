@@ -201,6 +201,11 @@ class Note(object):
             notes via a matching mechanism such as search() """
 
         def parse(record):
+            """ Receives a list of lines which represent one single record.
+                It forces the arrangement of the notes to be specifically matching
+                that of FIELDS_TO_PARSE, but it is not enforced here.
+                Leaving here is simply a dictionary matching all the fields
+                from __init__ """
             current_read = {}
             # forces ordering of fields
             for field, label in cls.FIELDS_TO_PARSE:
@@ -217,6 +222,10 @@ class Note(object):
         current_record = []
         last_record = None
         last_line = ''
+        # Loops through all lines in the file looking for anywhere where the last line
+        # was empty, followed by the LABEL_SEP (^-^). Lines are added to the
+        # current_record list and once the next LABEL_SEP combo is met, the previous
+        # record parsed and casted into a Note
         with open(src, 'r') as file:
             for line in file:
                 if last_line == '' and line.strip() == Note.LABEL_SEP:
@@ -237,6 +246,8 @@ class Note(object):
                     current_record.append(line)
                     last_line = line.strip()
             else:
+                # There is no LABEL_SEP at the end of a file, so this would be reached
+                # at the end of loop, and occurs once only per file
                 if last_line == '' and len(current_record):
                     yield Note(parse(current_record))
 
