@@ -53,7 +53,7 @@ class Note(object):
 
     # All required fields to exist before note data
     FIELDS_TO_PARSE = [
-        ('dir', LABEL_PWD),
+        ('pwd', LABEL_PWD),
         ('now', LABEL_NOW),
         ('tag', LABEL_TAG),
         ('context', LABEL_CTX),
@@ -66,18 +66,17 @@ class Note(object):
         import os
         from time import time
 
-        if 'message' not in values_dict:
-            return
-
         now = int(time())
         self.pwd = values_dict.get('pwd', os.getcwd())
         assert self.pwd.startswith('/')
-        self.now = values_dict.get('now', now)
+        self.now = int(values_dict.get('now', now))
         assert isinstance(self.now, int)
         self.tag = values_dict.get('tag', '')
         assert isinstance(self.tag, str)
         self.context = values_dict.get('context', '')
         self.message = values_dict.get('message', '')
+        if self.message.startswith(Note.LABEL_ARG):
+            self.message = self.message.lstrip(Note.LABEL_ARG)
 
     def __str__(self):
         """ Returns the string representation of a note.
@@ -100,28 +99,6 @@ class Note(object):
                tagline + \
                context + \
                f"{Note.LABEL_DATA}{self.message}"
-
-    @classmethod
-    def create(cls, basic_struct):
-        retval = Note()
-
-        retval.pwd = basic_struct['dir']
-        assert retval.pwd.startswith("/")
-        retval.now = int(basic_struct['now'])
-        retval.tag = basic_struct.get('tag', "")
-        retval.context = basic_struct.get('context', "")
-
-        if isinstance(basic_struct['msg'], str):
-            retval.message = basic_struct['msg'].rstrip() + '\n'
-        elif isinstance(basic_struct['msg'], list):
-            while len(basic_struct['msg']) > 1 and basic_struct['msg'][-1] == '\n':
-                basic_struct['msg'].pop()
-            retval.message = ''.join(basic_struct['msg'])
-
-        if retval.message.startswith(Note.LABEL_ARG):
-            retval.message = retval.message.lstrip(Note.LABEL_ARG)
-
-        return retval
 
     @classmethod
     def append(cls, src, message, pwd=None, now=None, tag="", context=""):
@@ -228,13 +205,13 @@ class Note(object):
             # forces ordering of fields
             for field, label in cls.FIELDS_TO_PARSE:
                 try:
-                    current_read[field] = record.pop(0).split(label)[1].strip()
+                    current_read[field] = record.pop(0).split(label, 1)[1].strip()
                 except IndexError:
                     pass # label/order does not match expected headers
                     #print(f"Error reading line, expecting label \"{label}<value>\"")
             else:
-                message = ''.join(record)
-                current_read['msg'] = message
+                message = ''.join(record).rstrip() + '\n'
+                current_read['message'] = message
                 return current_read
 
         current_record = []
@@ -246,7 +223,7 @@ class Note(object):
                     if len(current_record):
                         import copy
                         last_record = copy.deepcopy(current_record)
-                        yield Note.create(parse(current_record))
+                        yield Note(parse(current_record))
                     current_record = []
                 else:
                     if current_record and Note.LABEL_PWD not in current_record[0]:
@@ -261,7 +238,7 @@ class Note(object):
                     last_line = line.strip()
             else:
                 if last_line == '' and len(current_record):
-                    yield Note.create(parse(current_record))
+                    yield Note(parse(current_record))
 
     @classmethod
     def list(cls, src):

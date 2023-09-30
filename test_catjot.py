@@ -51,14 +51,14 @@ class TestTaker(unittest.TestCase):
 
     def test_create_note(self):
         data = {
-            'dir': '/home/user/git',
+            'pwd': '/home/user/git',
             'now': 1694747655,
             'tag': 'projectx',
             'context': 'whoami',
-            'msg': 'hello\nthere\n'
+            'message': 'hello\nthere\n'
         }
 
-        inst = Note.create(data)
+        inst = Note(data)
         self.assertEqual(inst.pwd, "/home/user/git")
         self.assertEqual(inst.now, 1694747655)
         self.assertEqual(inst.tag, "projectx")
