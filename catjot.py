@@ -62,8 +62,22 @@ class Note(object):
     # Filepath to save to, saves in $HOME
     NOTEFILE = f"{environ['HOME']}/.catjot"
 
-    def __init__(self):
-        pass
+    def __init__(self, values_dict={}):
+        import os
+        from time import time
+
+        if 'message' not in values_dict:
+            return
+
+        now = int(time())
+        self.pwd = values_dict.get('pwd', os.getcwd())
+        assert self.pwd.startswith('/')
+        self.now = values_dict.get('now', now)
+        assert isinstance(self.now, int)
+        self.tag = values_dict.get('tag', '')
+        assert isinstance(self.tag, str)
+        self.context = values_dict.get('context', '')
+        self.message = values_dict.get('message', '')
 
     def __str__(self):
         """ Returns the string representation of a note.
