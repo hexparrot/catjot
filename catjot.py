@@ -328,7 +328,9 @@ class Note(object):
         for inst in cls.iterate(src):
             CRITERIA_MET = 0
             for s_type, s_text in criteria:
-                if not s_text:
+                if s_type is SearchType.ALL:
+                    CRITERIA_MET += 1 # ALL, match all
+                elif not s_text:
                     pass #no matching, no incrementing
                 elif s_type is SearchType.DIRECTORY:
                     if inst.pwd == s_text:
@@ -352,7 +354,7 @@ class Note(object):
                     if inst.now == s_text:
                         CRITERIA_MET += 1
                 elif s_type is SearchType.TAG:
-                    if inst.tag == s_text:
+                    if s_text in inst.tag.split():
                         CRITERIA_MET += 1
 
                 if CRITERIA_MET == len(criteria):
@@ -388,7 +390,7 @@ class Note(object):
                     if inst.now == s_text:
                         CRITERIA_MET += 1
                 elif s_type is SearchType.TAG:
-                    if inst.tag == s_text:
+                    if s_text in inst.tag.split():
                         CRITERIA_MET += 1
 
                 if CRITERIA_MET:
@@ -398,6 +400,7 @@ class Note(object):
 from enum import Enum, auto
 
 class SearchType(Enum):
+    ALL = auto()
     TAG = auto()
     MESSAGE = auto()
     MESSAGE_I = auto()
@@ -408,15 +411,13 @@ class SearchType(Enum):
     TREE = auto()
 
 class NoteContext:
-    def __init__(self, notefile, method, params={}):
+    def __init__(self, notefile, search_criteria):
         self.notefile = notefile
-        self.method = method
-        self.params = params
+        self.criteria = search_criteria
 
     def __enter__(self):
         try:
-            method = getattr(Note, self.method)
-            return [i for i in method(self.notefile, **self.params)]
+            return list(Note.match_and(self.notefile, self.criteria))
         except FileNotFoundError:
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
@@ -492,7 +493,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -c observations
             # not intending to amend instead means match by context field
-            with NoteContext(NOTEFILE, "search_context_i", { 'context': params['context'] }) as nc:
+            with NoteContext(NOTEFILE, [(SearchType.CONTEXT_I, params['context'])]) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -505,7 +506,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -t project2
             # not intending to amend instead means match by tag field
-            with NoteContext(NOTEFILE, "tagged", { 'tag': params['tag'] }) as nc:
+            with NoteContext(NOTEFILE, [(SearchType.TAG, params['tag'])]) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -518,7 +519,8 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -p /home/user
             # not intending to amend instead means match by pwd field
-            with NoteContext(NOTEFILE, "match_dir", { 'path_match': params['pwd'] }) as nc:
+            #with NoteContext(NOTEFILE, "match_dir", { 'path_match': params['pwd'] }) as nc:
+            with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, params['pwd'])]) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -544,7 +546,7 @@ def main():
             # show all notes originating from this PWD
             from os import getcwd
             if sys.stdin.isatty():
-                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
                     match_count = 0
                     non_match_count = 0
                     total_count = 0
@@ -568,7 +570,7 @@ def main():
                 # only display the most recently created note in this PWD
                 from os import getcwd
                 last_note = "No notes to show.\n"
-                with NoteContext(NOTEFILE, "match_dir", { 'path_match': getcwd() }) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, getcwd())]) as nc:
                     for inst in nc:
                         last_note = inst
                     else:
@@ -591,7 +593,7 @@ def main():
                 from os import environ
 
                 if sys.stdin.isatty():
-                    with NoteContext(NOTEFILE, "match_dir", { 'path_match': environ['HOME'] }) as nc:
+                    with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, environ['HOME'])]) as nc:
                         for inst in nc:
                             printout(inst)
 
@@ -602,7 +604,7 @@ def main():
                     Note.append(NOTEFILE, Note(flatten_pipe(sys.stdin.readlines()), **params))
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
-                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -627,8 +629,7 @@ def main():
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                print(flattened)
-                with NoteContext(NOTEFILE, "search", { 'term': flattened }) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.MESSAGE, flattened)]) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -637,7 +638,7 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                with NoteContext(NOTEFILE, "search_i", { 'term': flattened }) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.MESSAGE_I, flattened)]) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -660,7 +661,7 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
                 # show all notes with tag
                 flattened = args.additional_args[1]
-                with NoteContext(NOTEFILE, "tagged", { 'tag': flattened }) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.TAG, flattened)]) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -715,7 +716,7 @@ def main():
                 last_mark = ' '
                 user_timestamp = int(args.additional_args[1])
                 
-                with NoteContext(NOTEFILE, "iterate", {}) as nc:
+                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
                     for inst in nc:
                         if inst.now == user_timestamp:
                             last_note = inst

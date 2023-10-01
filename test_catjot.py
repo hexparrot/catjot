@@ -608,26 +608,26 @@ class TestTaker(unittest.TestCase):
 
     ### tests for context manager
     def test_note_context_creation(self):
-        with NoteContext(FIXED_CATNOTE, "match_dir", { 'path_match': '/home/user' }) as nc:
-            iters = 0
-            for inst in nc:
-                iters += 1
-            self.assertEqual(iters, 4)
+        with NoteContext(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')]) as nc:
+            self.assertEqual(len(nc), 4)
 
-        with NoteContext(FIXED_CATNOTE, "match_dir", { 'path_match': '/home/user/git/catjot' }) as nc:
-            iters = 0
-            for inst in nc:
-                iters += 1
-            self.assertEqual(iters, 1)
+        with NoteContext(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user/git/catjot')]) as nc:
+            self.assertEqual(len(nc), 1)
 
-        with NoteContext(FIXED_CATNOTE, "iterate", {}) as nc:
-            iters = 0
-            for inst in nc:
-                iters += 1
-            self.assertEqual(iters, 7)
+        with NoteContext(FIXED_CATNOTE, []) as nc:
+            self.assertEqual(len(nc), 0)
+
+        with NoteContext(FIXED_CATNOTE, [(SearchType.ALL, '')]) as nc:
+            self.assertEqual(len(nc), 7)
+
+        with NoteContext(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')]) as nc:
+            self.assertEqual(len(nc), 1)
 
     ### tests for enum-based record matching
     def test_match_and(self):
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.ALL, '')])
+        self.assertEqual(len(list(matches)), 7)
+
         matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
         self.assertEqual(len(list(matches)), 4)
 
@@ -728,6 +728,16 @@ class TestTaker(unittest.TestCase):
 
         matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
         self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
+                                                 (SearchType.TAG, 'unrelated')])
+        self.assertEqual(len(list(matches)), 1)
 
     def test_match_or(self):
         matches = Note.match_or(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
@@ -838,6 +848,16 @@ class TestTaker(unittest.TestCase):
 
         matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
         self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
+                                                (SearchType.TAG, 'unrelated')])
+        self.assertEqual(len(list(matches)), 1)
 
 if __name__ == '__main__':
     unittest.main()
