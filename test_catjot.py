@@ -7,7 +7,7 @@ __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
 import unittest
-from catjot import Note, NoteContext
+from catjot import Note, NoteContext, SearchType
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
@@ -625,6 +625,78 @@ class TestTaker(unittest.TestCase):
             for inst in nc:
                 iters += 1
             self.assertEqual(iters, 7)
+
+    ### tests for enum-based record matching
+    def test_match_and(self):
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
+        self.assertEqual(len(list(matches)), 4)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user')])
+        self.assertEqual(len(list(matches)), 7)
+
+        matches = Note.match_and(FIXED_CATNOTE, [])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                                 (SearchType.TREE, '/home/user/catjot')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')])
+        self.assertEqual(len(list(matches)), 2)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'work')])
+        self.assertEqual(len(list(matches)), 2)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'WORK')])
+        self.assertEqual(len(list(matches)), 2)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'ふわふわ')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, '')])
+        self.assertEqual(len(list(matches)), 0) # no matches on falsy values
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, '')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'ふわふわ')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, 'ふわふわ')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, '0')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 0)])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'project1')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'project2')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
+        self.assertEqual(len(list(matches)), 0)
 
 if __name__ == '__main__':
     unittest.main()
