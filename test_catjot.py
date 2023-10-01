@@ -625,238 +625,238 @@ class TestTaker(unittest.TestCase):
 
     ### tests for enum-based record matching
     def test_match_and(self):
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.ALL, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.ALL, '')])
         self.assertEqual(len(list(matches)), 7)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
         self.assertEqual(len(list(matches)), 4)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user')])
         self.assertEqual(len(list(matches)), 7)
 
-        matches = Note.match_and(FIXED_CATNOTE, [])
+        matches = Note.match(FIXED_CATNOTE, [])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
-                                                 (SearchType.TREE, '/home/user/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                             (SearchType.TREE, '/home/user/catjot')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
-                                                 (SearchType.TREE, '/home/user/git/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                             (SearchType.TREE, '/home/user/git/catjot')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user'),
-                                                 (SearchType.DIRECTORY, '/home/user/git/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user'),
+                                             (SearchType.DIRECTORY, '/home/user/git/catjot')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
-                                                 (SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
+                                             (SearchType.DIRECTORY, '/home/user')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1111111111),
-                                                 (SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1111111111),
+                                             (SearchType.DIRECTORY, '/home/user')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')])
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'work')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'work')])
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'WORK')])
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'ふわふわ')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, '')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '^-^')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '^-^')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, '')])
         self.assertEqual(len(list(matches)), 0) # no matches on falsy values
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, '')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'ふわふわ')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, 'ふわふわ')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, '0')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, '0')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 0)])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 0)])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'project1')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'project1')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'project2')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'project2')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')])
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
-                                                 (SearchType.TAG, 'unrelated')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
+                                             (SearchType.TAG, 'unrelated')])
         self.assertEqual(len(list(matches)), 1)
 
     def test_match_or(self):
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user')], 'or')
         self.assertEqual(len(list(matches)), 4)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TREE, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user')], 'or')
         self.assertEqual(len(list(matches)), 7)
 
-        matches = Note.match_or(FIXED_CATNOTE, [])
+        matches = Note.match(FIXED_CATNOTE, [], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
-                                                (SearchType.TREE, '/home/user/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                             (SearchType.TREE, '/home/user/catjot')], 'or')
         self.assertEqual(len(list(matches)), 7)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
-                                                (SearchType.TREE, '/home/user/git/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                             (SearchType.TREE, '/home/user/git/catjot')], 'or')
         self.assertEqual(len(list(matches)), 7)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user'),
-                                                (SearchType.DIRECTORY, '/home/user/git/catjot')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user'),
+                                             (SearchType.DIRECTORY, '/home/user/git/catjot')], 'or')
         self.assertEqual(len(list(matches)), 5)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption'),
-                                                (SearchType.CONTEXT_I, 'neko')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption'),
+                                             (SearchType.CONTEXT_I, 'neko')], 'or')
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
-                                                (SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
+                                             (SearchType.DIRECTORY, '/home/user')], 'or')
         self.assertEqual(len(list(matches)), 4)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1111111111),
-                                                (SearchType.DIRECTORY, '/home/user')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1111111111),
+                                             (SearchType.DIRECTORY, '/home/user')], 'or')
         self.assertEqual(len(list(matches)), 4)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
-                                                (SearchType.TIMESTAMP, 1694748108)])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
+                                             (SearchType.TIMESTAMP, 1694748108)], 'or')
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')], 'or')
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'work')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'work')], 'or')
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'WORK')], 'or')
         self.assertEqual(len(list(matches)), 2)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'WORK')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, 'ふわふわ')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, '')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '^-^')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '^-^')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TREE, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TREE, '')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.DIRECTORY, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, '')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'adoption')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, '')], 'or')
         self.assertEqual(len(list(matches)), 0) # no matches on falsy values
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT_I, '')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, '')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'ふわふわ')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.CONTEXT, 'ふわふわ')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT, 'ふわふわ')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, '0')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, '0')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 0)])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 0)], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'project1')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'project1')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'project2')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'project2')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'neko')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'neko')], 'or')
         self.assertEqual(len(list(matches)), 0)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'multiple')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'unrelated')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
-        matches = Note.match_or(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
-                                                (SearchType.TAG, 'unrelated')])
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.TAG, 'multiple'),
+                                             (SearchType.TAG, 'unrelated')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
 if __name__ == '__main__':

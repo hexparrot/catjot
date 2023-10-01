@@ -324,78 +324,60 @@ class Note(object):
                 pass
 
     @classmethod
-    def match_and(cls, src, criteria):
-        for inst in cls.iterate(src):
-            CRITERIA_MET = 0
-            for s_type, s_text in criteria:
-                if s_type is SearchType.ALL:
-                    CRITERIA_MET += 1 # ALL, match all
-                elif not s_text:
-                    pass #no matching, no incrementing
-                elif s_type is SearchType.DIRECTORY:
-                    if inst.pwd == s_text:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TREE:
-                    if inst.pwd.startswith(s_text):
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.MESSAGE:
-                    if s_text in inst.message:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.MESSAGE_I:
-                    if s_text.lower() in inst.message.lower():
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.CONTEXT:
-                    if s_text in inst.context:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.CONTEXT_I:
-                    if s_text.lower() in inst.context.lower():
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TIMESTAMP:
-                    if inst.now == s_text:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TAG:
-                    if s_text in inst.tag.split():
-                        CRITERIA_MET += 1
+    def match(cls, src, criteria, logic='and'):
+        if logic == 'and':
+            for inst in cls.iterate(src):
+                CRITERIA_MET = 0
+                for s_type, s_text in criteria:
+                    if s_type is SearchType.ALL:
+                        CRITERIA_MET += 1 # ALL, match all
+                    elif not s_text:
+                        pass #no matching, no incrementing
+                    elif s_type is SearchType.DIRECTORY:
+                        CRITERIA_MET += 1 if inst.pwd == s_text else 0
+                    elif s_type is SearchType.TREE:
+                        CRITERIA_MET += 1 if inst.pwd.startswith(s_text) else 0
+                    elif s_type is SearchType.MESSAGE:
+                        CRITERIA_MET += 1 if s_text in inst.message else 0
+                    elif s_type is SearchType.MESSAGE_I:
+                        CRITERIA_MET += 1 if s_text.lower() in inst.message.lower() else 0
+                    elif s_type is SearchType.CONTEXT:
+                        CRITERIA_MET += 1 if s_text in inst.context else 0
+                    elif s_type is SearchType.CONTEXT_I:
+                        CRITERIA_MET += 1 if s_text.lower() in inst.context.lower() else 0
+                    elif s_type is SearchType.TIMESTAMP:
+                        CRITERIA_MET += 1 if inst.now == s_text else 0
+                    elif s_type is SearchType.TAG:
+                        CRITERIA_MET += 1 if s_text in inst.tag.split() else 0
 
-                if CRITERIA_MET == len(criteria):
-                    yield inst
+                    if CRITERIA_MET == len(criteria):
+                        yield inst
+        else:
+            for inst in cls.iterate(src):
+                CRITERIA_MET = 0
+                for s_type, s_text in criteria:
+                    if not s_text:
+                        pass #no matching, no incrementing
+                    elif s_type is SearchType.DIRECTORY:
+                        CRITERIA_MET += 1 if inst.pwd == s_text else 0
+                    elif s_type is SearchType.TREE:
+                        CRITERIA_MET += 1 if inst.pwd.startswith(s_text) else 0
+                    elif s_type is SearchType.MESSAGE:
+                        CRITERIA_MET += 1 if s_text in inst.message else 0
+                    elif s_type is SearchType.MESSAGE_I:
+                        CRITERIA_MET += 1 if s_text.lower() in inst.message.lower() else 0
+                    elif s_type is SearchType.CONTEXT:
+                        CRITERIA_MET += 1 if s_text in inst.context else 0
+                    elif s_type is SearchType.CONTEXT_I:
+                        CRITERIA_MET += 1 if s_text.lower() in inst.context.lower() else 0
+                    elif s_type is SearchType.TIMESTAMP:
+                        CRITERIA_MET += 1 if inst.now == s_text else 0
+                    elif s_type is SearchType.TAG:
+                        CRITERIA_MET += 1 if s_text in inst.tag.split() else 0
 
-    @classmethod
-    def match_or(cls, src, criteria):
-        count = len(list(cls.iterate(src)))
-        for inst in cls.iterate(src):
-            CRITERIA_MET = 0
-            for s_type, s_text in criteria:
-                if not s_text:
-                    pass #no matching, no incrementing
-                elif s_type is SearchType.DIRECTORY:
-                    if inst.pwd == s_text:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TREE:
-                    if inst.pwd.startswith(s_text):
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.MESSAGE:
-                    if s_text in inst.message:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.MESSAGE_I:
-                    if s_text.lower() in inst.message.lower():
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.CONTEXT:
-                    if s_text in inst.context:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.CONTEXT_I:
-                    if s_text.lower() in inst.context.lower():
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TIMESTAMP:
-                    if inst.now == s_text:
-                        CRITERIA_MET += 1
-                elif s_type is SearchType.TAG:
-                    if s_text in inst.tag.split():
-                        CRITERIA_MET += 1
-
-                if CRITERIA_MET:
-                    yield inst
-                    break
+                    if CRITERIA_MET:
+                        yield inst
+                        break
 
 from enum import Enum, auto
 
@@ -417,7 +399,7 @@ class NoteContext:
 
     def __enter__(self):
         try:
-            return list(Note.match_and(self.notefile, self.criteria))
+            return list(Note.match(self.notefile, self.criteria))
         except FileNotFoundError:
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
