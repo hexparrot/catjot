@@ -358,6 +358,43 @@ class Note(object):
                 if CRITERIA_MET == len(criteria):
                     yield inst
 
+    @classmethod
+    def match_or(cls, src, criteria):
+        count = len(list(cls.iterate(src)))
+        for inst in cls.iterate(src):
+            CRITERIA_MET = 0
+            for s_type, s_text in criteria:
+                if not s_text:
+                    pass #no matching, no incrementing
+                elif s_type is SearchType.DIRECTORY:
+                    if inst.pwd == s_text:
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.TREE:
+                    if inst.pwd.startswith(s_text):
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.MESSAGE:
+                    if s_text in inst.message:
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.MESSAGE_I:
+                    if s_text.lower() in inst.message.lower():
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.CONTEXT:
+                    if s_text in inst.context:
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.CONTEXT_I:
+                    if s_text.lower() in inst.context.lower():
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.TIMESTAMP:
+                    if inst.now == s_text:
+                        CRITERIA_MET += 1
+                elif s_type is SearchType.TAG:
+                    if inst.tag == s_text:
+                        CRITERIA_MET += 1
+
+                if CRITERIA_MET:
+                    yield inst
+                    break
+
 from enum import Enum, auto
 
 class SearchType(Enum):
