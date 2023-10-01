@@ -641,6 +641,22 @@ class TestTaker(unittest.TestCase):
                                                  (SearchType.TREE, '/home/user/catjot')])
         self.assertEqual(len(list(matches)), 0)
 
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '/home/user'),
+                                                 (SearchType.TREE, '/home/user/git/catjot')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '/home/user'),
+                                                 (SearchType.DIRECTORY, '/home/user/git/catjot')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747797),
+                                                 (SearchType.DIRECTORY, '/home/user')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1111111111),
+                                                 (SearchType.DIRECTORY, '/home/user')])
+        self.assertEqual(len(list(matches)), 0)
+
         matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, 'work')])
         self.assertEqual(len(list(matches)), 2)
 
@@ -661,6 +677,21 @@ class TestTaker(unittest.TestCase):
 
         matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, 'ふわふわ')])
         self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE, '')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.MESSAGE_I, '^-^')])
+        self.assertEqual(len(list(matches)), 1)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.TREE, '')])
+        self.assertEqual(len(list(matches)), 0)
+
+        matches = Note.match_and(FIXED_CATNOTE, [(SearchType.DIRECTORY, '')])
+        self.assertEqual(len(list(matches)), 0)
 
         matches = Note.match_and(FIXED_CATNOTE, [(SearchType.CONTEXT, 'neko')])
         self.assertEqual(len(list(matches)), 1)
