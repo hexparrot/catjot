@@ -192,7 +192,7 @@ class Note(object):
     def pop(cls, src, path):
         """ Deletes the most recent note from the PWD """
         last_record = None
-        for inst in cls.match_dir(src, path):
+        for inst in Note.match(src, [(SearchType.DIRECTORY, path)]):
             last_record = inst.now
         else:
             cls.delete(src, last_record)
@@ -263,65 +263,6 @@ class Note(object):
                 # at the end of loop, and occurs once only per file
                 if last_line == '' and len(current_record):
                     yield Note(parse(current_record))
-
-    @classmethod
-    def list(cls, src):
-        """ Convenience function to iterate all notes corresponding to PWD
-            *as well* as all notes held by sub-directories. """
-        from os import getcwd
-
-        pwd = getcwd()
-        for inst in cls.iterate(src):
-            if pwd in inst.pwd:
-                yield inst
-
-    @classmethod
-    def match_dir(cls, src, path_match):
-        """ Convenience function to iterate all notes corresponding to PWD ONLY """
-        for inst in cls.iterate(src):
-            if path_match == inst.pwd:
-                yield inst
-
-    @classmethod
-    def match_time(cls, src, timestamp):
-        """ Convenience function to iterate all notes corresponding to 'now' ONLY """
-        for inst in cls.iterate(src):
-            if int(timestamp) == inst.now:
-                yield inst
-
-    @classmethod
-    def search_context_i(cls, src, context):
-        """ Convenience function to iterate all notes matching context ONLY """
-        for inst in cls.iterate(src):
-            if context.lower() in inst.context.lower():
-                yield inst
-
-    @classmethod
-    def search(cls, src, term):
-        """ Match any notes that contain term in message, single-line comparison.
-            case SENSITIVE """
-        for inst in cls.iterate(src):
-            if term in inst.message:
-                yield inst
-
-    @classmethod
-    def search_i(cls, src, term):
-        """ Match any notes that contain term in message, single-line comparison.
-            case INSENSITIVE """
-        for inst in cls.iterate(src):
-            if term.lower() in inst.message.lower():
-                yield inst
-
-    @classmethod
-    def tagged(cls, src, tag):
-        """ Match any notes that contain match of tag
-            case INSENSITIVE """
-        for inst in cls.iterate(src):
-            try:
-                if tag.lower() in inst.tag.lower().split(' '):
-                    yield inst
-            except AttributeError: # it's Nonetype from having nothing set
-                pass
 
     @classmethod
     def match(cls, src, criteria, logic='and'):
@@ -501,7 +442,6 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -p /home/user
             # not intending to amend instead means match by pwd field
-            #with NoteContext(NOTEFILE, "match_dir", { 'path_match': params['pwd'] }) as nc:
             with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, params['pwd'])]) as nc:
                 for inst in nc:
                     printout(inst)

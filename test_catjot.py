@@ -67,19 +67,18 @@ class TestTaker(unittest.TestCase):
 
     def test_find_path_match(self):
         # searches through an example file for a matching string argument
-        # using the default parameter "search"
 
-        inst = next(Note.search(FIXED_CATNOTE, "hello"))
+        inst = next(Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "hello")]))
         self.assertEqual(inst.now, 1694747662)
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "hello\n")
 
-        inst = next(Note.search(FIXED_CATNOTE, "really"))
+        inst = next(Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "really")]))
         self.assertEqual(inst.now, 1694748108)
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "This is really working!\n")
 
-        multi = Note.search(FIXED_CATNOTE, "what")
+        multi = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "what")])
         # expecting two hits
         inst = next(multi)
         self.assertEqual(inst.now, 1694747797)
@@ -91,12 +90,12 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "that is what i call work\n")
 
-        inst = next(Note.search(FIXED_CATNOTE, "working"))
+        inst = next(Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "working")]))
         self.assertEqual(inst.now, 1694748108)
         self.assertEqual(inst.pwd, "/home/user")
         self.assertEqual(inst.message, "This is really working!\n")
 
-        multi = Note.search(FIXED_CATNOTE, "work")
+        multi = Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "work")])
         # expecting two hits
         inst = next(multi)
         self.assertEqual(inst.now, 1694747841)
@@ -126,7 +125,7 @@ class TestTaker(unittest.TestCase):
     def test_write_note(self):
         Note.append(TMP_CATNOTE, Note.jot("this is a note"))
 
-        inst = next(Note.search(TMP_CATNOTE, "note"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "note")]))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
@@ -134,13 +133,13 @@ class TestTaker(unittest.TestCase):
     def test_write_note_to_diff_pwd(self):
         Note.append(TMP_CATNOTE, Note.jot("this is a note", pwd="/home/user/git/git/git"))
 
-        inst = next(Note.search(TMP_CATNOTE, "note"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "note")]))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, "/home/user/git/git/git")
         self.assertEqual(inst.message, "this is a note\n")
 
         iters = 0
-        for inst in Note.match_dir(TMP_CATNOTE, "/home/user/git/git/git"):
+        for inst in Note.match(TMP_CATNOTE, [(SearchType.DIRECTORY, "/home/user/git/git/git")]):
             self.assertEqual(inst.pwd, "/home/user/git/git/git")
             iters += 1
         self.assertEqual(iters, 1)
@@ -148,20 +147,20 @@ class TestTaker(unittest.TestCase):
     def test_write_note_to_diff_timestamp(self):
         Note.append(TMP_CATNOTE, Note.jot("this is a note", pwd="/home/user/git/git/git", now=1694744444))
 
-        inst = next(Note.search(TMP_CATNOTE, "note"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "note")]))
         self.assertEqual(inst.now, 1694744444)
         self.assertEqual(inst.pwd, "/home/user/git/git/git")
         self.assertEqual(inst.message, "this is a note\n")
 
     def test_list_herenote(self):
         Note.append(TMP_CATNOTE, Note.jot("this is a note"))
-        inst = next(Note.list(TMP_CATNOTE))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())]))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
 
         Note.append(TMP_CATNOTE, Note.jot("nnnnnote2"))
-        multi = Note.list(TMP_CATNOTE)
+        multi = Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())])
         inst = next(multi)
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
@@ -174,13 +173,13 @@ class TestTaker(unittest.TestCase):
 
     def test_list_herenote_homenote(self):
         Note.append(TMP_CATNOTE, Note.jot("this is a note"))
-        inst = next(Note.list(TMP_CATNOTE))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())]))
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "this is a note\n")
 
         Note.append(TMP_CATNOTE, Note.jot("nnnnnote2"))
-        multi = Note.list(TMP_CATNOTE)
+        multi = Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())])
         inst = next(multi)
         self.assertTrue(abs(time() - inst.now) <= 1) #is within one second
         self.assertEqual(inst.pwd, getcwd())
@@ -194,7 +193,7 @@ class TestTaker(unittest.TestCase):
     def test_string_representation(self):
         thenote = "this is a note-o"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().list(TMP_CATNOTE))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -202,7 +201,7 @@ class TestTaker(unittest.TestCase):
     def test_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().list(TMP_CATNOTE))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.TREE, getcwd())]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -210,7 +209,7 @@ class TestTaker(unittest.TestCase):
     def test_search_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().search(TMP_CATNOTE, "take"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "take")]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -218,7 +217,7 @@ class TestTaker(unittest.TestCase):
     def test_search_multi_line_string_with_empty_lines(self):
         thenote = "notes can sometimes\n\n\n\ntake many lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().search(TMP_CATNOTE, "many"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "many")]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -226,7 +225,7 @@ class TestTaker(unittest.TestCase):
     def test_search_multi_line_string_insensitive(self):
         thenote = "notes can sometimes\nTAKE two lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().search_i(TMP_CATNOTE, "take"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "take")]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -234,7 +233,7 @@ class TestTaker(unittest.TestCase):
     def test_search_multi_line_string_with_empty_lines_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "MANY")]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -242,7 +241,7 @@ class TestTaker(unittest.TestCase):
     def test_search_multi_line_string_with_split_words_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note().search_i(TMP_CATNOTE, "MANY"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "MANY")]))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
         self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
@@ -250,7 +249,7 @@ class TestTaker(unittest.TestCase):
     def test_creating_label(self):
         thenote = "notes take labels now"
         Note.append(TMP_CATNOTE, Note.jot(thenote, tag="secret"))
-        inst = next(Note().search_i(TMP_CATNOTE, "notes"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notes")]))
         self.assertEqual(inst.tag, "secret")
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -259,7 +258,7 @@ class TestTaker(unittest.TestCase):
     def test_adding_context(self):
         thenote = ".bash_profile"
         Note.append(TMP_CATNOTE, Note.jot(thenote, context="ls /home/user"))
-        inst = next(Note().search_i(TMP_CATNOTE, "profile"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "profile")]))
         self.assertEqual(inst.context, "ls /home/user")
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
@@ -274,40 +273,40 @@ class TestTaker(unittest.TestCase):
         thenote = ".bashrc"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
 
-        inst = next(Note().search_i(TMP_CATNOTE, "bashrc"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "bashrc")]))
         self.assertEqual(inst.context, "") # no context yet
         inst.amend(TMP_CATNOTE, context="favorite_files") # context should exist in .new
         self.assertEqual(inst.context, "") # no but no read ever had it present
 
-        inst = next(Note().search_i(TMP_CATNOTE + '.new', "bashrc")) # new file should reflect this
-        self.assertEqual(inst.context, "favorite_files")
+        inst = next(Note.match(TMP_CATNOTE + '.new', [(SearchType.MESSAGE_I, "bashrc")]))
+        self.assertEqual(inst.context, "favorite_files") # new file should reflect this
 
-        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # but not on the original file
-        self.assertEqual(inst.context, "") # no context yet
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "bashrc")]))
+        self.assertEqual(inst.context, "") # but not on the original file
 
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "bashrc")) # new file should reflect this
-        self.assertEqual(inst.context, "favorite_files")
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "bashrc")]))
+        self.assertEqual(inst.context, "favorite_files") # new file should reflect this
 
     def test_changing_pwd_to_existing_jot(self):
         pre_pwd = '/home/user/git'
         post_pwd = '/home/alice/in'
         Note.append(TMP_CATNOTE, Note.jot("notey", pwd=pre_pwd))
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.pwd, pre_pwd)
         inst.amend(TMP_CATNOTE, pwd=post_pwd) # create .new file
 
-        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
-        self.assertEqual(inst.pwd, post_pwd)
+        inst = next(Note.match(TMP_CATNOTE + '.new', [(SearchType.MESSAGE_I, "notey")]))
+        self.assertEqual(inst.pwd, post_pwd) # new file should reflect this
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.pwd, pre_pwd)
 
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.pwd, post_pwd)
 
     def test_deleting_tag_from_existing_note(self):
@@ -315,41 +314,41 @@ class TestTaker(unittest.TestCase):
         post_tag = '~stuff'
         Note.append(TMP_CATNOTE, Note.jot("notey", tag=pre_tag))
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.tag, pre_tag)
         inst.amend(TMP_CATNOTE, tag=post_tag) # create .new file
 
-        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
-        self.assertEqual(inst.tag, "")
+        inst = next(Note.match(TMP_CATNOTE + '.new', [(SearchType.MESSAGE_I, "notey")]))
+        self.assertEqual(inst.tag, "") # new file should reflect this
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.tag, pre_tag)
 
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
-        self.assertEqual(inst.tag, "")
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
+        self.assertEqual(inst.tag, "") # new file should reflect this
 
     def test_append_multiple_tags(self):
         pre_tag = 'blamo'
         post_tag = 'better_stuff'
         Note.append(TMP_CATNOTE, Note.jot("notey", tag=pre_tag))
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey"))
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertIn(pre_tag, inst.tag)
         inst.amend(TMP_CATNOTE, tag=post_tag) # create .new file
 
-        inst = next(Note().search_i(TMP_CATNOTE + '.new', "notey")) # new file should reflect this
+        inst = next(Note.match(TMP_CATNOTE + '.new', [(SearchType.MESSAGE_I, "notey")]))
         self.assertIn(pre_tag, inst.tag)
         self.assertIn(post_tag, inst.tag)
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # but not on the original file
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertEqual(inst.tag, pre_tag)
         self.assertNotIn(post_tag, inst.tag)
 
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertIn(pre_tag, inst.tag)
         self.assertIn(post_tag, inst.tag)
 
@@ -359,7 +358,7 @@ class TestTaker(unittest.TestCase):
         inst.amend(TMP_CATNOTE, tag=another_tag) # create .new file
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertIn(pre_tag, inst.tag)
         self.assertIn(post_tag, inst.tag)
         self.assertIn(another_tag, inst.tag)
@@ -369,7 +368,7 @@ class TestTaker(unittest.TestCase):
         inst.amend(TMP_CATNOTE, tag=last_tag) # create .new file
         Note.commit(TMP_CATNOTE) # commit the change
 
-        inst = next(Note().search_i(TMP_CATNOTE, "notey")) # new file should reflect this
+        inst = next(Note.match(TMP_CATNOTE, [(SearchType.MESSAGE_I, "notey")]))
         self.assertNotIn(pre_tag, inst.tag)
         self.assertIn(post_tag, inst.tag)
         self.assertIn(another_tag, inst.tag)
@@ -446,7 +445,7 @@ class TestTaker(unittest.TestCase):
             inst = next(multi)
 
     def test_tag_header(self):
-        inst = next(Note.match_dir(FIXED_CATNOTE, "/home/user"))
+        inst = next(Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]))
         self.assertEqual(inst.tag, "project1")
 
         dt = datetime.fromtimestamp(inst.now)
@@ -457,7 +456,7 @@ class TestTaker(unittest.TestCase):
 
     def test_show_only_tagged_by(self):
         iters = 0
-        for inst in Note.tagged(FIXED_CATNOTE, "project1"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.TAG, "project1")]):
             self.assertEqual(inst.now, 1694747662)
             self.assertEqual(inst.tag, "project1")
             iters += 1
@@ -465,29 +464,29 @@ class TestTaker(unittest.TestCase):
 
     def test_only_perfect_path_match(self):
         iters = 0
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]):
             self.assertEqual(inst.pwd, "/home/user")
             iters += 1
         self.assertEqual(iters, 4)
 
         iters = 0
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/child"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user/child")]):
             self.assertEqual(inst.pwd, "/home/user/child")
             iters += 1
         self.assertEqual(iters, 1)
 
     def test_readin_unicode(self):
         iters = 0
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/git/catjot"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user/git/catjot")]):
             self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
             iters += 1
         self.assertEqual(iters, 1)
 
     def test_match_unicode(self):
         iters = 0
-        for inst in Note().search(FIXED_CATNOTE, "なんでこんなにふわふわなの?"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE, "なんでこんなにふわふわなの?")]):
             iters += 1
-        for inst in Note().search_i(FIXED_CATNOTE, "なんでこんなにふわふわなの?"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.MESSAGE_I, "なんでこんなにふわふわなの?")]):
             iters += 1
         self.assertEqual(iters, 2)
 
@@ -495,26 +494,26 @@ class TestTaker(unittest.TestCase):
 
     def test_search_by_timestamp(self):
         iters = 0
-        for inst in Note.match_time(FIXED_CATNOTE, 1695184544):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1695184544)]):
             self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
             iters += 1
         self.assertEqual(iters, 1)
 
         iters = 0
-        for inst in Note.match_time(FIXED_CATNOTE, 1694747662):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.TIMESTAMP, 1694747662)]):
             self.assertEqual(inst.context, "adoption")
             iters += 1
         self.assertEqual(iters, 1)
 
     def test_search_by_context(self):
         iters = 0
-        for inst in Note.search_context_i(FIXED_CATNOTE, "adoption"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, "adoption")]):
             self.assertEqual(inst.now, 1694747662)
             iters += 1
         self.assertEqual(iters, 1)
 
         iters = 0
-        for inst in Note.search_context_i(FIXED_CATNOTE, 'NEKO'):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.CONTEXT_I, 'NEKO')]):
             self.assertEqual(inst.message, "なんでこんなにふわふわなの?\n")
             iters += 1
         self.assertEqual(iters, 1)
@@ -522,7 +521,7 @@ class TestTaker(unittest.TestCase):
     def test_delete_record(self):
         iters = 0
         # file, untouched
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
         self.assertEqual(iters, 4)
 
@@ -530,7 +529,7 @@ class TestTaker(unittest.TestCase):
 
         iters = 0
         # new file, reduced by any timestamp matches
-        for inst in Note.match_dir(f"{FIXED_CATNOTE}.new", "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE + '.new', [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
             self.assertNotEqual(inst.now, 1694747797)
         self.assertEqual(iters, 3)
@@ -538,38 +537,38 @@ class TestTaker(unittest.TestCase):
         Note.commit(FIXED_CATNOTE)
 
         iters = 0
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
         self.assertEqual(iters, 3)
 
         iters = 0
-        for inst in Note.match_dir(f"{FIXED_CATNOTE}.old", "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE + '.old', [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
         self.assertEqual(iters, 4)
 
     def test_pop_record(self):
         iters = 0
         # file, untouched
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
         self.assertEqual(iters, 4)
 
         Note.pop(FIXED_CATNOTE, "/home/user")
         Note.commit(FIXED_CATNOTE)
 
-        for inst in Note.list(FIXED_CATNOTE):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.TREE, "/home/user")]):
             # check the exact match (last timestamp is removed)
             self.assertNotEqual(inst.now, 1694748108)
 
         iters = 0
         # should show one fewer entry
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user")]):
             iters += 1
         self.assertEqual(iters, 3)
 
         iters = 0
         # other directories should be untouched
-        for inst in Note.match_dir(FIXED_CATNOTE, "/home/user/child"):
+        for inst in Note.match(FIXED_CATNOTE, [(SearchType.DIRECTORY, "/home/user/child")]):
             iters += 1
         self.assertEqual(iters, 1)
 
