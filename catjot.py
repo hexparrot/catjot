@@ -266,6 +266,10 @@ class Note(object):
 
     @classmethod
     def match(cls, src, criteria, logic='and'):
+        if isinstance(criteria, tuple):
+            criteria = [criteria] # force all criteria passed in as tuples into a list
+                                  # and save all the boilerplate of [] everywhere else
+
         if logic == 'and':
             for inst in cls.iterate(src):
                 CRITERIA_MET = 0
