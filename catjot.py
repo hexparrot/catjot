@@ -545,7 +545,7 @@ def main():
                     print(f"{len(nc)} notes in current directory")
                 else:
                     params['pwd'] = environ['HOME']
-                    Note.append(NOTEFILE, Note(flatten_pipe(sys.stdin.readlines()), **params))
+                    Note.append(NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params))
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
                 with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
