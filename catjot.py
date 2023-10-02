@@ -348,6 +348,9 @@ class NoteContext:
         except FileNotFoundError:
             print(f"No notefile found at {NOTEFILE}")
             sys.exit(1)
+        except ValueError:
+            print(f"Value provided does not match expected type, like having a character in an int.")
+            sys.exit(3)
 
     def __exit__(self, exc_type, exc_value, traceback):
         pass
@@ -566,18 +569,17 @@ def main():
                     print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
                 # delete any notes matching the provided timestamp
+                flattened = 0
                 try:
-                    Note.delete(NOTEFILE, int(args.additional_args[1]))
-                    Note.commit(NOTEFILE)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
-                except TypeError:
-                    print(f"No note to pop for this path in {NOTEFILE}")
-                    sys.exit(2)
+                    flattened = int(flatten(args.additional_args[1:]))
                 except ValueError:
-                    print(f"Timestamp argument not an integer value.")
-                    sys.exit(3)
+                    print("Invalid input, like having an alpha in a numeric")
+                    exit(2)
+
+                with NoteContext(NOTEFILE, [(SearchType.TIMESTAMP, flattened)]) as nc:
+                    for inst in nc:
+                        Note.delete(NOTEFILE, int(args.additional_args[1]))
+                        Note.commit(NOTEFILE)
             elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
                 # show all notes with tag
                 flattened = args.additional_args[1]
