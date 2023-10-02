@@ -141,12 +141,12 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 `|jot -ac`            : Piped content written as context for last-written note
 
 `jot -ap "/var/log"` : Change pwd of last-written note
-`|jot -ap`           : Piped content (single string, no spaces)
-                     : written as pwd for last-written note
+`|jot -acp /var`     : Piped content (single string, no spaces)
+                     : written as context, plus provided pwd for last-written note
 
 `jot -at "strays"`       : Add an additional tag to the last-written note
-`|jot -at`               : Piped content (single string, no spaces)
-                         : written as tag for last-written note
+`|jot -act healthy`      : Piped content (single string, no spaces)
+                         : written as context, plus provided tag for last-written note
 `jot -at ~inventory      : Subtract a tag matching a word preceded by a tilde `~`
 
 ### Homenotes
@@ -170,13 +170,17 @@ $ jot h
 `catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions.
 
 `jot l`        : show last-written note
-`jot p`        : pop/delete the last-written note
+`jot p`        : pop/delete the last-written note in this pwd
 `jot d`        : show all notes from all time, everywhere
 `jot pl`       : show last-written note, message PayLoad only (headers omitted)
 `jot pl 169...`: show note matching timestamp(s), concatenated, message PayLoad only (headers omitted)
                : $ DATA=$(jot pl 1695220591)
                : $ echo $DATA
                : うち
+`jot r 169...` : delete note by timestamp
+`jot h`        : show homenotes
+`jot m Milo`   : (M)atch case-sensitive <term> with message payload
+`jot s tabby`  : (S)earch case-insensitive <term> with message payload
 
 ### Alternate .catjot locations
 
