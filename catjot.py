@@ -386,6 +386,8 @@ def main():
         # the environment variable will always supercede $HOME default when set
         if environ['CATJOT_FILE']: # truthy test for env that exists but unset
             NOTEFILE = environ['CATJOT_FILE']
+            with open(NOTEFILE, 'a') as file:
+                pass
 
     # helper variables for all CLI handling
 
