@@ -233,12 +233,11 @@ class Note(object):
                 Leaving here is simply a dictionary matching all the fields
                 from __init__ """
             current_read = {}
-            # forces ordering of fields
-            for field, label in cls.FIELDS_TO_PARSE:
+            for field, label in cls.FIELDS_TO_PARSE: # forces ordering of fields
                 try:
                     current_read[field] = record.pop(0).split(label, 1)[1].strip()
                 except IndexError:
-                    pass # label/order does not match expected headers
+                    break # label/order does not match expected headers
                     #print(f"Error reading line, expecting label \"{label}<value>\"")
             else:
                 message = ''.join(record).rstrip() + '\n'
@@ -256,8 +255,6 @@ class Note(object):
             for line in file:
                 if last_line == '' and line.strip() == Note.LABEL_SEP:
                     if len(current_record):
-                        import copy
-                        last_record = copy.deepcopy(current_record)
                         yield Note(parse(current_record))
                     current_record = []
                 else:
