@@ -588,20 +588,15 @@ def main():
                     print(f"{Note.LABEL_SEP}")
                     print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
+                from os import getcwd
                 # returns the message only (no pwd, no timestamp, no context).
                 # when provided a timestamp, any notes matching timestamp
                 # will be sent to stdout, concatenated in order of appearance
-                flattened = args.additional_args[1]
+                flattened = int(args.additional_args[1])
                 if flattened: # if truthy, e.g., timestamp, use it for search
-                    try:
-                        for inst in Note.match_time(NOTEFILE, flattened):
+                    with NoteContext(NOTEFILE, [(SearchType.TIMESTAMP, flattened)]) as nc:
+                        for inst in nc:
                             printout(inst, message_only=True)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                    except ValueError:
-                        print(f"Provided argument must be an int <timestamp>.")
-                        sys.exit(2)
                 else: # if not truthy, display pwd matches without headers
                     # the fallback behavior of finding a non truthy value is not
                     # expected to happen normally. this would be providing
@@ -611,17 +606,11 @@ def main():
 
                     # always displays the most recently created note in this PWD
                     last_note = None
-                    try:
-                        for inst in Note.list(NOTEFILE):
+                    with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, getcwd())]) as nc:
+                        for inst in nc:
                             last_note = inst
                         else:
                             printout(last_note, message_only=True)
-                    except FileNotFoundError:
-                        print(f"No notefile found at {NOTEFILE}")
-                        sys.exit(1)
-                    except AttributeError:
-                        print(f"No notes to show.")
-                        sys.exit(2)
             elif args.additional_args[0] in SHORTCUTS['SIDE_BY_SIDE']:
                 # prints a note and allows you to rewrite the line/accept line as-is
                 # Acceptable Input:
