@@ -858,6 +858,47 @@ class TestTaker(unittest.TestCase):
                                              (SearchType.TAG, 'unrelated')], 'or')
         self.assertEqual(len(list(matches)), 1)
 
+    def test_equality(self):
+        a_note = Note.jot("hello")
+        b_note = Note.jot("hello")
+        self.assertEqual(a_note, b_note)
+
+        a_note = Note.jot("hello")
+        b_note = Note.jot("helloz")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz")
+        b_note = Note.jot("helloz", pwd="/home")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz", pwd="/home")
+        b_note = Note.jot("helloz", pwd="/home", context="fun")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz", pwd="/home", context="fun")
+        b_note = Note.jot("helloz", pwd="/home", context="fun", tag="taggin")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz\nthere\n", pwd="/home", context="fun")
+        b_note = Note.jot("helloz\nthere", pwd="/home", context="fun", tag="taggin")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz\nthere\n", pwd="/home", context="fun")
+        b_note = Note.jot("helloz\nthere", pwd="/home", context="fun\n", tag="taggin")
+        self.assertNotEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz\nthere", pwd="/home", context="fun", tag="taggin")
+        b_note = Note.jot("helloz\nthere\n\n", pwd="/home", context="fun\n", tag="taggin")
+        self.assertEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz\nthere", pwd="/home", context="fun", tag="taggin", now=1695184544)
+        b_note = Note.jot("helloz\nthere\n\n", pwd="/home", context="fun\n", tag="taggin", now=1695184544)
+        self.assertEqual(a_note, b_note)
+
+        a_note = Note.jot("helloz\nthere", pwd="/home", context="fun", tag="taggin", now=1695184544)
+        b_note = Note.jot("helloz\nthere\n\n", pwd="/home", context="fun\n", tag="taggin", now=1695184111)
+        self.assertNotEqual(a_note, b_note)
+
 if __name__ == '__main__':
     unittest.main()
 

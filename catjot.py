@@ -99,6 +99,19 @@ class Note(object):
                context + \
                f"{Note.LABEL_DATA}{self.message}"
 
+    def __eq__(self, other):
+        """ Equality test for notes should:
+            Return true if strip()'ed and flattened values match. """
+
+        if isinstance(other, Note):
+            return self.message.strip() == other.message.strip() and \
+                   self.pwd == other.pwd and \
+                   self.now == other.now and \
+                   self.context.strip() == other.context.strip() and \
+                   self.tag == other.tag
+        else:
+            return False
+
     @classmethod
     def jot(cls, message, tag="", context="", pwd=None, now=None):
         """ Convenience function for low-effort creation of notes """
