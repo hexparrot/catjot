@@ -438,7 +438,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -c observations
             # not intending to amend instead means match by context field
-            with NoteContext(NOTEFILE, [(SearchType.CONTEXT_I, params['context'])]) as nc:
+            with NoteContext(NOTEFILE, (SearchType.CONTEXT_I, params['context'])) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -451,7 +451,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -t project2
             # not intending to amend instead means match by tag field
-            with NoteContext(NOTEFILE, [(SearchType.TAG, params['tag'])]) as nc:
+            with NoteContext(NOTEFILE, (SearchType.TAG, params['tag'])) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -464,7 +464,7 @@ def main():
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -p /home/user
             # not intending to amend instead means match by pwd field
-            with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, params['pwd'])]) as nc:
+            with NoteContext(NOTEFILE, (SearchType.DIRECTORY, params['pwd'])) as nc:
                 for inst in nc:
                     printout(inst)
         else: # yes pipe!
@@ -490,7 +490,7 @@ def main():
             # show all notes originating from this PWD
             from os import getcwd
             if sys.stdin.isatty():
-                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     match_count = 0
                     non_match_count = 0
                     total_count = 0
@@ -514,7 +514,7 @@ def main():
                 # only display the most recently created note in this PWD
                 from os import getcwd
                 last_note = "No notes to show.\n"
-                with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, getcwd())]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                     for inst in nc:
                         last_note = inst
                     else:
@@ -537,7 +537,7 @@ def main():
                 from os import environ
 
                 if sys.stdin.isatty():
-                    with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, environ['HOME'])]) as nc:
+                    with NoteContext(NOTEFILE, (SearchType.DIRECTORY, environ['HOME'])) as nc:
                         for inst in nc:
                             printout(inst)
 
@@ -548,7 +548,7 @@ def main():
                     Note.append(NOTEFILE, Note(flatten_pipe(sys.stdin.readlines()), **params))
             elif args.additional_args[0] in SHORTCUTS['SHOW_ALL']:
                 # show all notes, from everywhere, everywhen
-                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -557,7 +557,7 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the last message, message only (no pwd, no timestamp, no context).
                 last_note = None
-                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     for inst in nc:
                         last_note = inst
                     else:
@@ -567,7 +567,7 @@ def main():
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                with NoteContext(NOTEFILE, [(SearchType.MESSAGE, flattened)]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.MESSAGE, flattened)) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -576,7 +576,7 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
-                with NoteContext(NOTEFILE, [(SearchType.MESSAGE_I, flattened)]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.MESSAGE_I, flattened)) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -591,14 +591,14 @@ def main():
                     print("Invalid input, like having an alpha in a numeric")
                     exit(2)
 
-                with NoteContext(NOTEFILE, [(SearchType.TIMESTAMP, flattened)]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
                     for inst in nc:
                         Note.delete(NOTEFILE, int(args.additional_args[1]))
                         Note.commit(NOTEFILE)
             elif args.additional_args[0] in SHORTCUTS['SHOW_TAG']:
                 # show all notes with tag
                 flattened = args.additional_args[1]
-                with NoteContext(NOTEFILE, [(SearchType.TAG, flattened)]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.TAG, flattened)) as nc:
                     for inst in nc:
                         printout(inst)
 
@@ -611,7 +611,7 @@ def main():
                 # will be sent to stdout, concatenated in order of appearance
                 flattened = int(args.additional_args[1])
                 if flattened: # if truthy, e.g., timestamp, use it for search
-                    with NoteContext(NOTEFILE, [(SearchType.TIMESTAMP, flattened)]) as nc:
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
                         for inst in nc:
                             printout(inst, message_only=True)
                 else: # if not truthy, display pwd matches without headers
@@ -623,7 +623,7 @@ def main():
 
                     # always displays the most recently created note in this PWD
                     last_note = None
-                    with NoteContext(NOTEFILE, [(SearchType.DIRECTORY, getcwd())]) as nc:
+                    with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                         for inst in nc:
                             last_note = inst
                         else:
@@ -642,7 +642,7 @@ def main():
                 last_mark = ' '
                 user_timestamp = int(args.additional_args[1])
                 
-                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     for inst in nc:
                         last_note = inst
                         if inst.now == user_timestamp:
