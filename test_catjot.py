@@ -899,6 +899,51 @@ class TestTaker(unittest.TestCase):
         b_note = Note.jot("helloz\nthere\n\n", pwd="/home", context="fun\n", tag="taggin", now=1695184111)
         self.assertNotEqual(a_note, b_note)
 
+    def test_equality_full_example(self):
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")))
+        self.assertEqual(len(matches), 4)
+
+        for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")):
+            self.assertEqual(inst, matches.pop(0))
+
+        # showing subsequent iterations still yields same objects
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.ALL, "")))
+        self.assertEqual(len(matches), 7)
+
+        for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")):
+            self.assertEqual(inst, matches.pop(0))
+
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.ALL, "")))
+        # capture before delete
+        Note.delete(FIXED_CATNOTE, 1694747797)
+
+        # new file, reduced by one timestamp match and removal
+        multi = Note.match(FIXED_CATNOTE + '.new', (SearchType.DIRECTORY, "/home/user"))
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747662)
+        self.assertEqual(inst, matches.pop(0))
+        matches.pop(0) # skip over dropped one (7797)
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747841)
+        self.assertEqual(inst, matches.pop(0))
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694748108)
+        self.assertEqual(inst, matches.pop(0))
+
+        Note.commit(FIXED_CATNOTE)
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.ALL, "")))
+
+        multi = Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user"))
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747662)
+        self.assertEqual(inst, matches.pop(0))
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694747841)
+        self.assertEqual(inst, matches.pop(0))
+        inst = next(multi)
+        self.assertEqual(inst.now, 1694748108)
+        self.assertEqual(inst, matches.pop(0))
+
 if __name__ == '__main__':
     unittest.main()
 
