@@ -654,9 +654,9 @@ def main():
 
                 newnote_lines = []
                 MARKS = {
-                    'check': '✓',
-                    'circle': '⊕',
-                    'x': '✗',
+                    'check': '✓', # indicates for unchanged lines, typed
+                    'circle': '⊕', # indicates for unchanged lines, untyped (empty line)
+                    'x': '✗', # indicates changed line from original
                 }
 
                 longest_line_length = max(len(line) for line in last_note.message.split('\n'))
