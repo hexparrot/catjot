@@ -644,17 +644,13 @@ def main():
                 
                 with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
                     for inst in nc:
-                        if inst.now == user_timestamp:
-                            last_note = inst
-                            break
-                    else: # if no match, and avoided "break"
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"No note to display matching this timestamp ({user_timestamp}) in {NOTEFILE}")
-                        #exit(2)
-
-                    # this path accessible only if last_note was successfully populated else exited(2)
-                    if not last_note:
                         last_note = inst
+                        if inst.now == user_timestamp:
+                            break
+
+                if not last_note:
+                    print("No notes to side-by-side.")
+                    exit(3)
 
                 newnote_lines = []
                 MARKS = {
