@@ -539,17 +539,11 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the last message, message only (no pwd, no timestamp, no context).
                 last_note = None
-                try:
-                    for inst in Note.list(NOTEFILE):
+                with NoteContext(NOTEFILE, [(SearchType.ALL, '')]) as nc:
+                    for inst in nc:
                         last_note = inst
                     else:
                         printout(last_note, message_only=True)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
-                except AttributeError:
-                    print(f"No notes to show.")
-                    sys.exit(2)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
