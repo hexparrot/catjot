@@ -138,16 +138,18 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 `jot` : display all notes created in the present working directory (pwd)
 
 `jot -ac "some info"` : Add context to last-written note
-`|jot -ac`            : Piped content written as context for last-written note
+
+`|jot -ac` : Piped content written as context for last-written note
 
 `jot -ap "/var/log"` : Change pwd of last-written note
-`|jot -acp /var`     : Piped content (single string, no spaces)
-                     : written as context, plus provided pwd for last-written note
 
-`jot -at "strays"`       : Add an additional tag to the last-written note
-`|jot -act healthy`      : Piped content (single string, no spaces)
-                         : written as context, plus provided tag for last-written note
-`jot -at ~inventory      : Subtract a tag matching a word preceded by a tilde `~`
+`|jot -acp /var` : Piped content (single string, no spaces) written as context, plus provided pwd for last-written note
+
+`jot -at "strays friendly"` : Add an additional tag to the last-written note
+
+`|jot -act healthy` : Piped content (single string, no spaces) written as context, plus provided tag for last-written note
+                         
+`jot -at ~inventory` : Subtract a tag matching a word preceded by a tilde `~`
 
 ### Homenotes
 
@@ -156,6 +158,8 @@ homenotes acts as a catch-all. Catjot uses a shortcut for homenotes to help faci
 easy saving and recalling for path-agnostic notes:
 
 ```
+$ echo $PWD
+/usr/local/games
 $ cat|jot h
 うち
 $ jot h
@@ -167,20 +171,54 @@ $ jot h
 
 ### Shortcuts
 
-`catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions.
+`catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions and can be readily adapted to your needs. Many of these functions have corresponding long-forms; these are indicated in parentheses and are accepted as substitutes for the short-form.
 
-`jot l`        : show last-written note
-`jot p`        : pop/delete the last-written note in this pwd
-`jot d`        : show all notes from all time, everywhere
-`jot pl`       : show last-written note, message PayLoad only (headers omitted)
-`jot pl 169...`: show note matching timestamp(s), concatenated, message PayLoad only (headers omitted)
-               : $ DATA=$(jot pl 1695220591)
-               : $ echo $DATA
-               : うち
-`jot r 169...` : delete note by timestamp
-`jot h`        : show homenotes
-`jot m Milo`   : (M)atch case-sensitive <term> with message payload
-`jot s tabby`  : (S)earch case-insensitive <term> with message payload
+`jot d`        : (dump)/show all notes from all time, everywhere
+               
+`jot h`        : show (home)notes
+
+`jot l`        : show (last)-written note
+
+`jot m Milo`   : (match) case-sensitive <term> within message payload
+
+`jot p`        : (pop)/delete the last-written note in this pwd
+
+`jot pl`       : show last-written note, message (payload) only, omitting headers
+
+`jot pl 16952...`: show note matching timestamp(s), concatenated, message (payload) only
+
+```
+$ DATA=$(jot pl 1695220591)
+$ echo $DATA
+うち
+```
+
+`jot r 16952...` : (remove) note by timestamp
+
+`jot s tabby`  : (search) case-insensitive <term> within message payload
+
+`jot t friendly`  : (tag) match case-sensitive; tags are discrete words. "playful kitten" as a tag is intepreted as two separate tags, "playful" and "kitten" and would be removed with separate entries.
+
+```
+$ cat|jot
+ ねこ      
+$ jot -at "playful kitten"
+$ jot l
+^-^
+> cd /home/user/git/catjot
+# date 2023-10-02 20:41:47 (1696304507)
+[playful kitten]
+ねこ
+
+$ jot -at ~kitten
+$ jot -at cat
+$ jot l
+^-^
+> cd /home/user/git/catjot
+# date 2023-10-02 20:41:47 (1696304507)
+[playful cat]
+ねこ
+```
 
 ### Alternate .catjot locations
 
@@ -188,4 +226,3 @@ Setting the environment variable `CATJOT_FILE` will allow you to choose a differ
 other than `$HOME/.catjot`. The file directory and name can be set freely:
 
 `export CATJOT_FILE=/home/user/mycatjot`
-
