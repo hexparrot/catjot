@@ -563,13 +563,14 @@ def main():
             elif args.additional_args[0] in SHORTCUTS['SLEEPING_CAT']:
                 import time
 
-                def alternate_last_n_lines(text, n):
+                def alternate_last_n_lines(text, n, repeat_count):
+                    # n refers to number of lines at bottom of list that are candidates to cycle.
                     lines = text.strip().split('\n')
                     # Print all but the last 'n' lines
                     for line in lines[:-n]:
                         print(line)
 
-                    while True:
+                    for _ in range(repeat_count):
                         for i in range(-n, 0):
                             # Print one of the last 'n' lines
                             print(lines[i], end='\r')
@@ -578,13 +579,13 @@ def main():
                             # Clear the line
                             print(' ' * len(lines[i]), end='\r')
 
-                newcat = '''-------------------------------------
-     ("`-/")_.-'"``-._
-      . . `; -._    )-;-,_`)
-     (v_,)'  _  )`-.\  ``-'
-    _.- _..-_/ / ((.'
-  ((,.-'   ((,/
-   ((,-'    ((,|
+                newcat = '''------------------------------\\
+     ("`-/")_.-'"``-._         \\
+      . . `; -._    )-;-,_`)    \\
+     (v_,)'  _  )`-.\  ``-'      \\
+    _.- _..-_/ / ((.'             \\
+  ((,.-'   ((,/                    \\
+   ((,-'    ((,|                   \\
 ''' # credits felix lee
                 twocat = '''_____________________________________
 \            |\      _,,,---,,_      \\
@@ -596,7 +597,20 @@ def main():
    \   Z   '---''(_/--'  `-'\_)         \\
    \  Zz   '---''(_/--'  `-'\_)         \\
 ''' # credits felix lee
-                alternate_last_n_lines(twocat, 5)
+
+                import time
+                ts = time.time()
+                TIMES_TO_REPEAT = 5
+
+                try:
+                    if int(ts) % 2 == 0:
+                        alternate_last_n_lines(newcat, 2, TIMES_TO_REPEAT)
+                    else:
+                        alternate_last_n_lines(twocat, 5, TIMES_TO_REPEAT)
+                    print()
+                except KeyboardInterrupt:
+                    print()
+                    exit(4)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
