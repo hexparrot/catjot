@@ -481,6 +481,7 @@ def main():
             'AMEND': ['amend', 'a'],
             'MESSAGE_ONLY': ['payload', 'pl'],
             'SIDE_BY_SIDE': ['sidebyside', 'sbs'],
+            'SLEEPING_CAT': ['zzz'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
@@ -559,6 +560,43 @@ def main():
                         last_note = inst
                     else:
                         printout(last_note, message_only=True)
+            elif args.additional_args[0] in SHORTCUTS['SLEEPING_CAT']:
+                import time
+
+                def alternate_last_n_lines(text, n):
+                    lines = text.strip().split('\n')
+                    # Print all but the last 'n' lines
+                    for line in lines[:-n]:
+                        print(line)
+
+                    while True:
+                        for i in range(-n, 0):
+                            # Print one of the last 'n' lines
+                            print(lines[i], end='\r')
+                            time.sleep(1)
+
+                            # Clear the line
+                            print(' ' * len(lines[i]), end='\r')
+
+                newcat = '''-------------------------------------
+     ("`-/")_.-'"``-._
+      . . `; -._    )-;-,_`)
+     (v_,)'  _  )`-.\  ``-'
+    _.- _..-_/ / ((.'
+  ((,.-'   ((,/
+   ((,-'    ((,|
+''' # credits felix lee
+                twocat = '''_____________________________________
+\            |\      _,,,---,,_      \\
+ \           /,`.-'`'    -.  ;-;;,_   \\
+  \         |,4-  ) )-,_..;\ (  `'-'   \\
+   \ ZzZ   '---''(_/--'  `-'\_)         \\
+   \ zZ    '---''(_/--'  `-'\_)         \\
+   \ Z     '---''(_/--'  `-'\_)         \\
+   \   Z   '---''(_/--'  `-'\_)         \\
+   \  Zz   '---''(_/--'  `-'\_)         \\
+''' # credits felix lee
+                alternate_last_n_lines(twocat, 5)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
