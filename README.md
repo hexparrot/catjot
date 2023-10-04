@@ -199,6 +199,8 @@ $ echo $DATA
 
 `jot s tabby`  : (search) case-insensitive <term> within message payload
 
+`jot scoop`  : view list of all notes in $EDITOR, delete by timestamp by prefixing records with 's' or 'd'
+
 `jot t friendly`  : (tag) match case-sensitive; tags are discrete words. "playful kitten" as a tag is intepreted as two separate tags, "playful" and "kitten" and would be removed with separate entries.
 
 ```
