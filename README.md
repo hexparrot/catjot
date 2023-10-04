@@ -220,6 +220,8 @@ $ jot l
 ねこ
 ```
 
+`jot zzz`  : spend a short moment with a kitten
+
 ### Alternate .catjot locations
 
 Setting the environment variable `CATJOT_FILE` will allow you to choose a different location
