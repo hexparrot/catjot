@@ -470,7 +470,8 @@ def main():
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
-            'MOST_RECENT': ['last', 'l'],
+            'MOST_RECENTLY_WRITTEN_ALLTIME': ['HEAD', 'head'],
+            'MOST_RECENTLY_WRITTEN_HERE': ['last', 'l'],
             'MATCH_NOTE_NAIVE': ['match', 'm'],
             'MATCH_NOTE_NAIVE_I': ['search', 's', 'mi'],
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
@@ -508,11 +509,20 @@ def main():
                 Note.append(NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params))
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 1:
-            if args.additional_args[0] in SHORTCUTS['MOST_RECENT']:
+            if args.additional_args[0] in SHORTCUTS['MOST_RECENTLY_WRITTEN_HERE']:
                 # only display the most recently created note in this PWD
                 from os import getcwd
                 last_note = "No notes to show.\n"
                 with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
+                    for inst in nc:
+                        last_note = inst
+                    else:
+                        printout(last_note)
+            elif args.additional_args[0] in SHORTCUTS['MOST_RECENTLY_WRITTEN_ALLTIME']:
+                # only display the most recently created note in this PWD
+                from os import getcwd
+                last_note = "No notes to show.\n"
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     for inst in nc:
                         last_note = inst
                     else:
