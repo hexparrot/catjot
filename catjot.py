@@ -475,6 +475,7 @@ def main():
             'MATCH_NOTE_NAIVE': ['match', 'm'],
             'MATCH_NOTE_NAIVE_I': ['search', 's', 'mi'],
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
+            'BULK_DELETE_NOTES': ['scoop'],
             'SHOW_ALL': ['dump', 'display', 'd'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
             'HOMENOTES': ['home'],
@@ -607,6 +608,46 @@ def main():
    \  Zz   '---''(_/--'  `-'\_)         \\
 ''' # credits felix lee
                 alternate_last_n_lines(twocat, 5)
+            elif args.additional_args[0] in SHORTCUTS['BULK_DELETE_NOTES']:
+                import tempfile
+                import subprocess
+                import os
+
+                last_note = None
+                records = [] # will consist of (timestamp, message[0])
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
+                    for inst in nc:
+                        records.append((inst.now,
+                                        inst.pwd.ljust(25),
+                                        inst.message.split('\n')[0].strip()))
+
+                with tempfile.NamedTemporaryFile(mode='w+t', delete=False) as f:
+                    f.write(f"# Prefix any timestamp with 'd' or 's' to delete all notes matching this timestamp\n")
+                    for record in records:
+                        f.write(f"{record[0]}\t{record[1]}\t{record[2]}\n")
+                    temp_file_name = f.name
+
+                preferred_editor = os.environ.get('EDITOR', 'vi')  # Default to nano if EDITOR is not set
+                subprocess.run([preferred_editor, temp_file_name])
+
+                to_delete = []
+                with open(temp_file_name, 'r') as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        if line.startswith('d') or line.startswith('s'):
+                            try:
+                                to_delete.append(int(line[1:].split('\t')[0].strip()))
+                            except ValueError:
+                                pass # if instruction line is delete, or too much of the line (not retaining timestamp)
+
+                os.unlink(temp_file_name)
+
+                for record_ts in to_delete:
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
+                        for inst in nc:
+                            print(f"Removing records matching timestamp: {record_ts}")
+                            Note.delete(NOTEFILE, record_ts)
+                            Note.commit(NOTEFILE)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
