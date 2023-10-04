@@ -174,10 +174,12 @@ $ jot h
 `catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions and can be readily adapted to your needs. Many of these functions have corresponding long-forms; these are indicated in parentheses and are accepted as substitutes for the short-form.
 
 `jot d`        : (dump)/show all notes from all time, everywhere
-               
-`jot h`        : show (home)notes
 
-`jot l`        : show (last)-written note
+`jot h`        : show note (head)--the last note written of all notes
+               
+`jot home`     : show (home)notes
+
+`jot l`        : show (last) written note from this directory only
 
 `jot m Milo`   : (match) case-sensitive <term> within message payload
 

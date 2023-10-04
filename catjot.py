@@ -470,14 +470,14 @@ def main():
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
-            'MOST_RECENTLY_WRITTEN_ALLTIME': ['HEAD', 'head'],
+            'MOST_RECENTLY_WRITTEN_ALLTIME': ['HEAD', 'head', 'h'],
             'MOST_RECENTLY_WRITTEN_HERE': ['last', 'l'],
             'MATCH_NOTE_NAIVE': ['match', 'm'],
             'MATCH_NOTE_NAIVE_I': ['search', 's', 'mi'],
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
             'SHOW_ALL': ['dump', 'display', 'd'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
-            'HOMENOTES': ['home', 'h'],
+            'HOMENOTES': ['home'],
             'SHOW_TAG': ['tagged', 'tag', 't'],
             'AMEND': ['amend', 'a'],
             'MESSAGE_ONLY': ['payload', 'pl'],
