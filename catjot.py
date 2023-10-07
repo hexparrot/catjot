@@ -275,7 +275,7 @@ class Note(object):
                     yield Note(parse(current_record))
 
     @classmethod
-    def match(cls, src, criteria, logic='and'):
+    def match(cls, src, criteria, logic='and', time_only=False):
         if isinstance(criteria, tuple):
             criteria = [criteria] # force all criteria passed in as tuples into a list
                                   # and save all the boilerplate of [] everywhere else
@@ -306,7 +306,10 @@ class Note(object):
                         CRITERIA_MET += 1 if s_text in inst.tag.split() else 0
 
                     if CRITERIA_MET == len(criteria):
-                        yield inst
+                        if time_only:
+                            yield inst.now
+                        else:
+                            yield inst
         else:
             for inst in cls.iterate(src):
                 CRITERIA_MET = 0
@@ -331,7 +334,10 @@ class Note(object):
                         CRITERIA_MET += 1 if s_text in inst.tag.split() else 0
 
                     if CRITERIA_MET:
-                        yield inst
+                        if time_only:
+                            yield inst.now
+                        else:
+                            yield inst
                         break
 
 from enum import Enum, auto
@@ -373,6 +379,7 @@ def main():
     parser.add_argument("-p", type=str, help="search notes by pwd / set pwd when amending")
     parser.add_argument("-c", action="store_const", const="context", help="search notes by context / read pipe into context as amendment")
     parser.add_argument("additional_args", nargs="*", help="argument values")
+    parser.add_argument("-d", action="store_true", help="only return (date)/timestamps for match")
 
     args = parser.parse_args()
 
@@ -394,9 +401,11 @@ def main():
     def flatten_pipe(arg_lst):
         return ''.join(arg_lst).rstrip()
 
-    def printout(note_obj, message_only=False):
+    def printout(note_obj, message_only=False, time_only=args.d):
         if message_only:
             print(note_obj.message, end="")
+        elif time_only:
+            print(note_obj.now)
         else: # normal display
             print(Note.REC_TOP)
             print(note_obj, end="")
@@ -498,14 +507,16 @@ def main():
                         total_count += 1
                         if getcwd() == inst.pwd:
                             match_count += 1
-                            print(inst)
+                            printout(inst)
                         else:
                             non_match_count += 1
 
-                print(f"{Note.LABEL_SEP}")
-                print(f"{match_count} notes in current directory")
-                print(f"{non_match_count} notes in child directories")
-                print(f"{total_count} total notes overall")
+
+                if not args.d:
+                    print(f"{Note.LABEL_SEP}")
+                    print(f"{match_count} notes in current directory")
+                    print(f"{non_match_count} notes in child directories")
+                    print(f"{total_count} total notes overall")
             else:
                 Note.append(NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params))
         # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
@@ -550,8 +561,9 @@ def main():
                         for inst in nc:
                             printout(inst)
 
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{len(nc)} notes in current directory")
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes in current directory")
                 else:
                     params['pwd'] = environ['HOME']
                     Note.append(NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params))
@@ -561,8 +573,9 @@ def main():
                     for inst in nc:
                         printout(inst)
 
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{len(nc)} notes in total")
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes in total")
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 # returns the last message, message only (no pwd, no timestamp, no context).
                 last_note = None
@@ -657,8 +670,9 @@ def main():
                     for inst in nc:
                         printout(inst)
 
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{len(nc)} notes matching '{flattened}'")
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE_I']:
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
@@ -666,8 +680,9 @@ def main():
                     for inst in nc:
                         printout(inst)
 
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{len(nc)} notes matching '{flattened}'")
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['REMOVE_BY_TIMESTAMP']:
                 # delete any notes matching the provided timestamp
                 flattened = 0
@@ -688,8 +703,9 @@ def main():
                     for inst in nc:
                         printout(inst)
 
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{len(nc)} notes matching '{flattened}'")
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS['MESSAGE_ONLY']:
                 from os import getcwd
                 # returns the message only (no pwd, no timestamp, no context).

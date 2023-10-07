@@ -944,6 +944,24 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.now, 1694748108)
         self.assertEqual(inst, matches.pop(0))
 
+    def test_return_only_timestamps(self):
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user"), time_only=True))
+        self.assertEqual(len(matches), 4)
+
+        self.assertEqual(matches[0], 1694747662)
+        self.assertEqual(matches[1], 1694747797)
+        self.assertEqual(matches[2], 1694747841)
+        self.assertEqual(matches[3], 1694748108)
+
+        matches = list(inst for inst in Note.match(FIXED_CATNOTE, (SearchType.ALL, ""), time_only=True))
+        self.assertEqual(matches[0], 1694747662)
+        self.assertEqual(matches[1], 1694747797)
+        self.assertEqual(matches[2], 1694747841)
+        self.assertEqual(matches[3], 1694748108)
+        self.assertEqual(matches[4], 1694941231)
+        self.assertEqual(matches[5], 1695184544)
+        self.assertEqual(matches[6], 1694955555)
+
 if __name__ == '__main__':
     unittest.main()
 

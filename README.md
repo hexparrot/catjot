@@ -232,3 +232,19 @@ Setting the environment variable `CATJOT_FILE` will allow you to choose a differ
 other than `$HOME/.catjot`. The file directory and name can be set freely:
 
 `export CATJOT_FILE=/home/user/mycatjot`
+
+### Returning Only the (date)/Timestamp Value
+
+Add `-d` to the command to return only the timestamps for the matched notes.
+This can then be used with `xargs` or similar to bulk-modify notes.
+This feature works with all available matching methods, simply add the flag.
+
+```
+$ jot -d match なまえ
+1696701382
+1696701481
+$ jot -d match なまえ|xargs -I {} jot remove {}
+$ jot -d match なまえ
+$
+```
+
