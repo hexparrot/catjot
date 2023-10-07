@@ -75,7 +75,7 @@ class Note(object):
         self.context = values_dict.get('context', '')
         self.message = values_dict.get('message', '')
         if self.message.startswith(Note.LABEL_ARG):
-            self.message = self.message.lstrip(Note.LABEL_ARG)
+            self.message = self.message[len(Note.LABEL_ARG):]
 
     def __str__(self):
         """ Returns the string representation of a note.
