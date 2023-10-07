@@ -482,7 +482,7 @@ def main():
             'SHOW_TAG': ['tagged', 'tag', 't'],
             'AMEND': ['amend', 'a'],
             'MESSAGE_ONLY': ['payload', 'pl'],
-            'SIDE_BY_SIDE': ['sidebyside', 'sbs'],
+            'SIDE_BY_SIDE': ['sidebyside', 'sbs', 'rewrite', 'transcribe'],
             'SLEEPING_CAT': ['zzz'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
@@ -723,18 +723,34 @@ def main():
                 # <anything else> = keep new input
                 import os
                 from math import ceil
-
-                last_note = None
+                last_note = "No notes to show.\n"
                 last_mark = ' '
-                user_timestamp = int(args.additional_args[1])
-                
-                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
-                    for inst in nc:
-                        last_note = inst
-                        if inst.now == user_timestamp:
-                            break
 
-                if not last_note:
+                if args.additional_args[1] in SHORTCUTS['MOST_RECENTLY_WRITTEN_HERE']:
+                    # only display the most recently created note in this PWD
+                    with NoteContext(NOTEFILE, (SearchType.DIRECTORY, os.getcwd())) as nc:
+                        for inst in nc:
+                            last_note = inst
+                elif args.additional_args[1] in SHORTCUTS['MOST_RECENTLY_WRITTEN_ALLTIME']:
+                    # last written note
+                    with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
+                        for inst in nc:
+                            last_note = inst
+                else:
+                    user_timestamp = int(args.additional_args[1])
+                    with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
+                        for inst in nc:
+                            last_note = inst
+                            # falls back to very last note written if provided int
+                            # doesnt match any existing note
+                            if inst.now == user_timestamp:
+                                break
+
+                try:
+                    if not last_note.message.strip(): #falsy message
+                        print("No notes to side-by-side.")
+                        exit(3)
+                except AttributeError: #missing attribute
                     print("No notes to side-by-side.")
                     exit(3)
 
@@ -780,7 +796,6 @@ def main():
                 else:
                     print(f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting")
                     exit(2)
-
 
 if __name__ == "__main__":
     main()
