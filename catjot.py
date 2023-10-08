@@ -784,7 +784,7 @@ def main():
 
                 min_left_side_width = max(ceil(longest_line_length / 10) * 10, 35) # Round up to the nearest 10, or 35 min
                 if terminal_width >= (min_left_side_width * 2) + 3: # last mark, pipe sep, last char
-                    for line in last_note.message.split():
+                    for line in last_note.message.split('\n'):
                         print(f"{line.rstrip().ljust(min_left_side_width)}{last_mark}|", end="")
                         usr_in = input()
                         if line.rstrip() == usr_in.rstrip(): # line matches...
