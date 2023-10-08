@@ -248,3 +248,32 @@ $ jot -d match なまえ
 $
 ```
 
+### Line-by-Line Transcribing, Side-by-Side Layout
+
+Line-by-line rewriting creates a new note while allowing you to view another note to read. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
+
+✓ - the line matches the original source
+✗ - line is different from original source
+⊕ - line has been preserved
+
+Entering following lines have special meanings and will be interpreted as such:
+
+* ' ' <single space> = Deletes the line, making the output one line shorter
+* <Hit Enter on an empty line> = Reproduce the line as-written (shortcut to not retype)
+
+This mode had a few purposes originally in mind as use-cases:
+
+* Testing typing accuracy - Allow for line-by-line reproductions of text, displaying state-changes immediately upon each line ending. Each attempt is timestamped and made as a new note, connected to the previous, to see performance over time.
+
+```
+$ jot sbs 1696727387
+max line length: 13
+terminal_width : 138
+おたんじょうびおめでとう、                       |おたんじょうびおめでとう、
+おたんじょうびおめでとう、                      ✓|おたんしょうびおめでとう、
+〇〇（なまえ）の                                ✗|
+おたんじょうびおめでとう。                      ⊕|
+```
+
+* Text revision - Output from `tesseract` optical-character recognition software for linux produces plain-text files easily digestible and rewritten for proofing of documents.
+
