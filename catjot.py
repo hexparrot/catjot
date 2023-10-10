@@ -486,6 +486,7 @@ def main():
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
             'BULK_DELETE_NOTES': ['scoop'],
             'SHOW_ALL': ['dump', 'display', 'd'],
+            'MATCH_TIMESTAMP': ['timestamp', 'ts'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
             'HOMENOTES': ['home'],
             'SHOW_TAG': ['tagged', 'tag', 't'],
@@ -677,6 +678,16 @@ def main():
                 # match if "term [+term2] [..]" exists in any line of the note
                 flattened = flatten(args.additional_args[1:])
                 with NoteContext(NOTEFILE, (SearchType.MESSAGE_I, flattened)) as nc:
+                    for inst in nc:
+                        printout(inst)
+
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{len(nc)} notes matching '{flattened}'")
+            elif args.additional_args[0] in SHORTCUTS['MATCH_TIMESTAMP']:
+                # match if timestamp matches!
+                flattened = int(flatten(args.additional_args[1:]))
+                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
                     for inst in nc:
                         printout(inst)
 

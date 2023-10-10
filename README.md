@@ -160,9 +160,9 @@ easy saving and recalling for path-agnostic notes:
 ```
 $ echo $PWD
 /usr/local/games
-$ cat|jot h
+$ cat|jot home
 うち
-$ jot h
+$ jot home
 ^-^
 > cd /home/user
 # date 2023-09-20 07:36:31 (1695220591)
@@ -202,6 +202,8 @@ $ echo $DATA
 `jot scoop`  : view list of all notes in $EDITOR, delete by timestamp by prefixing records with 's' or 'd'
 
 `jot t friendly`  : (tag) match case-sensitive; tags are discrete words. "playful kitten" as a tag is intepreted as two separate tags, "playful" and "kitten" and would be removed with separate entries.
+
+`jot ts 16952...` : display note by (timestamp)
 
 ```
 $ cat|jot
