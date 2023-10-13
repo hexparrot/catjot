@@ -828,36 +828,56 @@ def main():
                 from collections import deque
 
                 record_count_to_show = 1
+                user_tilde_given = False
                 try:
                     record_count_to_show = int(args.additional_args[1])
                 except ValueError:
-                    pass
+                    # if user includes ~ (tilde), show ONLY the one note, counting backwards
+                    if args.additional_args[1].startswith('~'):
+                        record_count_to_show = int(args.additional_args[1][1:])
+                        user_tilde_given = True
 
                 last_notes = deque(maxlen=record_count_to_show)
                 with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
                     for inst in nc:
                         last_notes.append(inst)
 
-                for inst in last_notes:
-                    printout(inst)
+                if not user_tilde_given:
+                    for inst in last_notes:
+                        printout(inst)
+                else:
+                    try:
+                        printout(last_notes[-record_count_to_show])
+                    except IndexError:
+                        pass
             elif args.additional_args[0] in SHORTCUTS['MOST_RECENTLY_WRITTEN_HERE']:
                 # only display the most recently created n notes in this PWD
                 from collections import deque
                 from os import getcwd
 
                 record_count_to_show = 1
+                user_tilde_given = False
                 try:
                     record_count_to_show = int(args.additional_args[1])
                 except ValueError:
-                    pass
+                    # if user includes ~ (tilde), show ONLY the one note, counting backwards
+                    if args.additional_args[1].startswith('~'):
+                        record_count_to_show = int(args.additional_args[1][1:])
+                        user_tilde_given = True
 
                 last_notes = deque(maxlen=record_count_to_show)
                 with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                     for inst in nc:
                         last_notes.append(inst)
 
-                for inst in last_notes:
-                    printout(inst)
+                if not user_tilde_given:
+                    for inst in last_notes:
+                        printout(inst)
+                else:
+                    try:
+                        printout(last_notes[-record_count_to_show])
+                    except IndexError:
+                        pass
 
 if __name__ == "__main__":
     main()
