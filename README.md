@@ -175,15 +175,19 @@ $ jot home
 
 `jot d`        : (dump)/show all notes from all time, everywhere
 
-`jot h`        : show note (head)--show the last 1 note written, from anywhere
+`jot h`        : show note (head)--show the last 1 note written, among all notes
 
-`jot h 3`      : show note (head)--show the last n notes written, from anywhere
+`jot h 3`      : show note (head)--show the last n notes written, among all notes
                
+`jot h ~3`     : show note (head)--show n-th from last note, among all notes
+
 `jot home`     : show (home)notes
 
 `jot l`        : show (last) written note from this directory only
 
 `jot l 3`      : show (last) n written notes from this directory only
+
+`jot l ~3`     : show n-th to (last) written note, from this directory only
 
 `jot m Milo`   : (match) case-sensitive <term> within message payload
 
