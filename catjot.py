@@ -485,6 +485,7 @@ def main():
             'MATCH_NOTE_NAIVE_I': ['search', 's', 'mi'],
             'DELETE_MOST_RECENT_PWD': ['pop', 'p'],
             'BULK_DELETE_NOTES': ['scoop'],
+            'NOTES_REFERENCING_ABSENT_DIRS': ['str', 'stra', 'stray', 'strays'],
             'SHOW_ALL': ['dump', 'display', 'd'],
             'MATCH_TIMESTAMP': ['timestamp', 'ts'],
             'REMOVE_BY_TIMESTAMP': ['remove', 'r'],
@@ -662,6 +663,20 @@ def main():
                             print(f"Removing records matching timestamp: {record_ts}")
                             Note.delete(NOTEFILE, record_ts)
                             Note.commit(NOTEFILE)
+            elif args.additional_args[0] in SHORTCUTS['NOTES_REFERENCING_ABSENT_DIRS']:
+                import os
+
+                with NoteContext(NOTEFILE, (SearchType.ALL, '')) as nc:
+                    matches = 0
+                    for inst in nc:
+                        if not os.path.exists(inst.pwd):
+                            matches += 1
+                            printout(inst)
+
+                    if not args.d:
+                        print(f"{Note.LABEL_SEP}")
+                        print(f"{matches} stray notes among")
+                        print(f"{len(nc)} notes in total")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
