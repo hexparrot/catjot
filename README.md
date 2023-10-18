@@ -209,6 +209,8 @@ $ echo $DATA
 
 `jot scoop`  : view list of all notes in $EDITOR, delete by timestamp by prefixing records with 's' or 'd'
 
+`jot strays`  : identify (stray) notes; those whose home no longer exists (the pwd not present on system)
+
 `jot t friendly`  : (tag) match case-sensitive; tags are discrete words. "playful kitten" as a tag is intepreted as two separate tags, "playful" and "kitten" and would be removed with separate entries.
 
 `jot ts 16952...` : display note by (timestamp)
