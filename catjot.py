@@ -340,6 +340,41 @@ class Note(object):
                             yield inst
                         break
 
+NEWCAT = '''-------------------------------------
+     ("`-/")_.-'"``-._
+      . . `; -._    )-;-,_`)
+     (v_,)'  _  )`-.\  ``-'
+    _.- _..-_/ / ((.'
+  ((,.-'   ((,/
+   ((,-'    ((,|
+''' # credits felix lee
+TWOCAT = '''_____________________________________
+\            |\      _,,,---,,_      \\
+ \           /,`.-'`'    -.  ;-;;,_   \\
+  \         |,4-  ) )-,_..;\ (  `'-'   \\
+   \ ZzZ   '---''(_/--'  `-'\_)         \\
+   \ zZ    '---''(_/--'  `-'\_)         \\
+   \ Z     '---''(_/--'  `-'\_)         \\
+   \   Z   '---''(_/--'  `-'\_)         \\
+   \  Zz   '---''(_/--'  `-'\_)         \\
+''' # credits felix lee
+
+def alternate_last_n_lines(text, n):
+    import time
+    lines = text.strip().split('\n')
+    # Print all but the last 'n' lines
+    for line in lines[:-n]:
+        print(line)
+
+    while True:
+        for i in range(-n, 0):
+            # Print one of the last 'n' lines
+            print(lines[i], end='\r')
+            time.sleep(1)
+
+            # Clear the line
+            print(' ' * len(lines[i]), end='\r')
+
 from enum import Enum, auto
 
 class SearchType(Enum):
@@ -363,7 +398,9 @@ class NoteContext:
         try:
             return list(Note.match(self.notefile, self.criteria))
         except FileNotFoundError:
-            print(f"Initializing jotfile at {self.notefile}. Now, try again.")
+            print(f"Waking up the cat at {self.notefile}. Now, try again.")
+            for line in NEWCAT.split('\n')[0:-2]:
+                print(line)
             open(self.notefile, 'a').close()
             sys.exit(1)
         except ValueError:
@@ -589,42 +626,7 @@ def main():
                     else:
                         printout(last_note, message_only=True)
             elif args.additional_args[0] in SHORTCUTS['SLEEPING_CAT']:
-                import time
-
-                def alternate_last_n_lines(text, n):
-                    lines = text.strip().split('\n')
-                    # Print all but the last 'n' lines
-                    for line in lines[:-n]:
-                        print(line)
-
-                    while True:
-                        for i in range(-n, 0):
-                            # Print one of the last 'n' lines
-                            print(lines[i], end='\r')
-                            time.sleep(1)
-
-                            # Clear the line
-                            print(' ' * len(lines[i]), end='\r')
-
-                newcat = '''-------------------------------------
-     ("`-/")_.-'"``-._
-      . . `; -._    )-;-,_`)
-     (v_,)'  _  )`-.\  ``-'
-    _.- _..-_/ / ((.'
-  ((,.-'   ((,/
-   ((,-'    ((,|
-''' # credits felix lee
-                twocat = '''_____________________________________
-\            |\      _,,,---,,_      \\
- \           /,`.-'`'    -.  ;-;;,_   \\
-  \         |,4-  ) )-,_..;\ (  `'-'   \\
-   \ ZzZ   '---''(_/--'  `-'\_)         \\
-   \ zZ    '---''(_/--'  `-'\_)         \\
-   \ Z     '---''(_/--'  `-'\_)         \\
-   \   Z   '---''(_/--'  `-'\_)         \\
-   \  Zz   '---''(_/--'  `-'\_)         \\
-''' # credits felix lee
-                alternate_last_n_lines(twocat, 5)
+                alternate_last_n_lines(TWOCAT, 5)
             elif args.additional_args[0] in SHORTCUTS['BULK_DELETE_NOTES']:
                 import tempfile
                 import subprocess
