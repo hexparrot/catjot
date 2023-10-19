@@ -359,10 +359,12 @@ class NoteContext:
         self.criteria = search_criteria
 
     def __enter__(self):
+        import sys
         try:
             return list(Note.match(self.notefile, self.criteria))
         except FileNotFoundError:
-            print(f"No notefile found at {NOTEFILE}")
+            print(f"Initializing jotfile at {self.notefile}. Now, try again.")
+            open(self.notefile, 'a').close()
             sys.exit(1)
         except ValueError:
             print(f"Value provided does not match expected type, like having a character in an int.")
