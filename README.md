@@ -1,22 +1,19 @@
 # cat|jot
 
-* Simple CLI note-taker centering around the present working directory.
-* Notes can be easily created and manipulated with a shorthand syntax.
-* Tags and Context include for greater organization.
-* Output format is readily customizable.
-* `cat`-centric, cat-themed
+* Cat-themed, `cat`-centric command-line note-taking app
+* Assign Tags and add Context to your notes
+* Timestamp and location always captured to every note
+* Organization revolves around your present working directory
+* Notes can be created and manipulated with the `|` pipe character
 
 ## Usage
 
 ### Cat-preferred Method for Note Creation:
 
-Pipe `|` directly to catjot to create a new note.
+Pipe `|` to catjot to create a new note.
 
-*Any* time a pipe is involved, it is a write-action, whether it is a new
-note being written or adding context or tags.
-
-Any time a pipe is absent, it is a search-action, whether it is matching
-a word in the message payload, the context, tags, or the directory path.
+*Any* time a pipe is involved, it is a write-action;
+this includes writing new notes, adding context, or assigning tags.
 
 ```
 $ cat|jot
@@ -27,7 +24,7 @@ $ cat|jot
 $ cowsay -f kitty "meow" |jot
 ```
 
-The notes are saved and can be recalled like this:
+You can recall notes saved in your present working directory like this:
 
 ```
 $ jot
@@ -57,7 +54,7 @@ $ jot
 3 matches in child directories
 ```
 
-### Other Available Syntax for Note Creation
+### Additional Syntax for Note Creation
 
 You can add additional context to a note by providing the `-c` flag:
 
@@ -75,8 +72,8 @@ Tasks: 135 total,   1 running, 134 sleeping,   0 stopped,   0 zombie
 $
 ```
 
-You can add context and tagging after-the-fact, with the -a (amend) toggle.
-Amending always touches the last-written note in the file, no exception.
+You can add context and tags after-the-fact, with the -a (amend) toggle.
+Amending *always* touches the last-written note (`jot l`) in the file.
 
 ```
 $ cat|jot
@@ -109,7 +106,8 @@ oh man, what am i even doing with my life!?
 
 Copy `catjot.py` to a directory found within your `$PATH`.
 This document recommends and demonstrates examples that rename
-this python script as `jot`, for ease-of-typing (length/autocomplete).
+this python script as `jot`, for ease-of-typing and for adherence to
+the cat|jot mnemonic.
 
 Popular destinations for saving the script include:
 `$HOME/.local/bin` or `/usr/local/bin`.
@@ -118,15 +116,13 @@ Popular destinations for saving the script include:
 
 ```
 $ mkdir -p $HOME/.local/bin
-$ chmod +x catjot.py
-$ cp catjot.py $HOME/.local/bin/jot
+$ install -m 555 catjot.py $HOME/.local/bin/jot
 ```
 
 ### installation for system-wide use
 
 ```
-# chmod +x catjot.py
-# cp catjot.py /usr/local/bin/jot
+$ install -m 555 catjot.py $HOME/.local/bin/jot
 ```
 
 In all cases, individual users' notes will appear in `~/.catjot`.
@@ -137,25 +133,24 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 `jot` : display all notes created in the present working directory (pwd)
 
-`jot -ac "some info"` : Add context to last-written note
+`jot -ac "some context"` : Add context to last-written note
 
-`|jot -ac` : Piped content written as context for last-written note
+`|jot -ac` : Piped content appended as context for last-written note
 
 `jot -ap "/var/log"` : Change pwd of last-written note
 
-`|jot -acp /var` : Piped content (single string, no spaces) written as context, plus provided pwd for last-written note
+`|jot -acp /var` : Piped content appended as context, provided pwd amends last-written note
 
-`jot -at "strays friendly"` : Add an additional tag to the last-written note
+`jot -at "tabby friendly"` : Add one or more single-word tags to the last-written note
 
-`|jot -act healthy` : Piped content (single string, no spaces) written as context, plus provided tag for last-written note
+`|jot -act healthy` : Piped content written as context, provided tag amends last-written note
                          
-`jot -at ~inventory` : Subtract a tag matching a word preceded by a tilde `~`
+`jot -at ~inventory` : Subtract a tag from last-written note by preceding the word with a tilde `~`
 
 ### Homenotes
 
-Some notes have very little connection to the path they are written in, and this is where
-homenotes acts as a catch-all. Catjot uses a shortcut for homenotes to help facilitate
-easy saving and recalling for path-agnostic notes:
+Some notes have very little relevance to the path they are written in.
+Homenotes serve as a catch-all for these notes and allow effortless recall.
 
 ```
 $ echo $PWD
@@ -171,7 +166,7 @@ $ jot home
 
 ### Shortcuts
 
-`catjoy.py` defines many shortcuts to meet the syntax: `jot <letter>` for various functions and can be readily adapted to your needs. Many of these functions have corresponding long-forms; these are indicated in parentheses and are accepted as substitutes for the short-form.
+The abbreviated and (parenthesized) forms are both acceptable.
 
 `jot d`        : (dump)/show all notes from all time, everywhere
 
@@ -189,7 +184,7 @@ $ jot home
 
 `jot l ~3`     : show n-th to (last) written note, from this directory only
 
-`jot m Milo`   : (match) case-sensitive <term> within message payload
+`jot m Milo`   : (match) case-sensitive <term> within message payload (*see s)
 
 `jot p`        : (pop)/delete the last-written note in this pwd
 
@@ -205,15 +200,13 @@ $ echo $DATA
 
 `jot r 16952...` : (remove) note by timestamp
 
-`jot s tabby`  : (search) case-insensitive <term> within message payload
+`jot s tabby`  : (search) case-insensitive <term> within message payload (*see m)
 
-`jot scoop`  : view list of all notes in $EDITOR, delete by timestamp by prefixing records with 's' or 'd'
+`jot scoop`  : view list of all notes in $EDITOR, delete prefixing records with 's' or 'd'
 
-`jot strays`  : identify (stray) notes; those whose home no longer exists (the pwd not present on system)
+`jot stray`  : display all (strays), which are all notes whose pwd are absent on this system
 
-`jot t friendly`  : (tag) match case-sensitive; tags are discrete words. "playful kitten" as a tag is intepreted as two separate tags, "playful" and "kitten" and would be removed with separate entries.
-
-`jot ts 16952...` : display note by (timestamp)
+`jot t friendly`  : search all notes, filtering by (tag), case-sensitive. Tags are discrete words: "playful kitten" is intepreted as two separate tags, "playful" and "kitten" which can be removed independently.
 
 ```
 $ cat|jot
@@ -236,20 +229,22 @@ $ jot l
 ねこ
 ```
 
+`jot ts 16952...` : search all notes, filtering by (timestamp)
+
 `jot zzz`  : spend a short moment with a kitten
 
 ### Alternate .catjot locations
 
-Setting the environment variable `CATJOT_FILE` will allow you to choose a different location
-other than `$HOME/.catjot`. The file directory and name can be set freely:
+Set environment variable `CATJOT_FILE` to relocate your notefile.
 
-`export CATJOT_FILE=/home/user/mycatjot`
+`export CATJOT_FILE=$HOME/.catjot # this is the default when unset`
+`export CATJOT_FILE=$HOME/notesandmusings`
 
 ### Returning Only the (date)/Timestamp Value
 
 Add `-d` to the command to return only the timestamps for the matched notes.
-This can then be used with `xargs` or similar to bulk-modify notes.
-This feature works with all available matching methods, simply add the flag.
+This can then be used with `xargs` or similar utilities to bulk-modify notes.
+This feature works with all available matching methods, simply add `-d`.
 
 ```
 $ jot -d match なまえ
@@ -262,16 +257,16 @@ $
 
 ### Line-by-Line Transcribing, Side-by-Side Layout
 
-Line-by-line rewriting creates a new note while allowing you to view another note to read. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
+Line-by-line transcribing creates a new note while while feeding you each line from an existing note. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
 
-✓ - the line matches the original source
-✗ - line is different from original source
-⊕ - line has been preserved
+✓ - typed line matches original source
+✗ - line differs from original source
+⊕ - original line has been preserved
 
 Entering following lines have special meanings and will be interpreted as such:
 
-* ' ' <single space> = Deletes the line, making the output one line shorter
-* <Hit Enter on an empty line> = Reproduce the line as-written (shortcut to not retype)
+* ' ' `<single space>` = Deletes the line, making the output note one line shorter
+* `<Hit Enter on an empty line>` = Reproduce the line as-written (shortcut to not retype)
 
 This mode had a few purposes originally in mind as use-cases:
 
