@@ -168,6 +168,8 @@ $ jot home
 
 The abbreviated and (parenthesized) forms are both acceptable.
 
+`jot c 16952...` : (catgpt)/send note matching timestamp to openai endpoint. This function depends on `openai_api_key` environment variable set.
+
 `jot d`        : (dump)/show all notes from all time, everywhere
 
 `jot h`        : show note (head)--show the last 1 note written, among all notes

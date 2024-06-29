@@ -390,6 +390,8 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
     from os import getenv
 
     api_key = getenv('openai_api_key')
+    # set this key in your shell, e.g., this line in your ~/.bash_profile:
+    #export openai_api_key="sk-proj...8EEF"
     url = 'https://api.openai.com/v1/chat/completions'
     headers = {
         'Authorization': f'Bearer {api_key}',
