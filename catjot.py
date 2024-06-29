@@ -360,6 +360,12 @@ TWOCAT = r'''_____________________________________
    \  Zz   '---''(_/--'  `-'\_)         \\
 '''  # credits felix lee
 
+CATGPT_ROLE = """You're proudly a cat assistant trained to review shorthand notes
+written using filepath-based note-taking systems.
+Try to intuit what is being asked, provide technical advice,
+resolve syntaxical or grammar issues, or troubleshoot error codes.
+Don't offer follow-up help and say succinctly if instructions unclear."""
+
 def alternate_last_n_lines(text, n):
     import time
     lines = text.strip().split('\n')
@@ -736,7 +742,10 @@ def main():
                     for inst in nc:
                         last_note = inst
                     else:
+                        print("Sending prompt:")
+                        print()
                         print(str(last_note))
+                        print(Note.LABEL_SEP)
 
                 try:
                     throwaway = input("any key to submit above note (control-c to cancel)...")
@@ -748,11 +757,7 @@ def main():
                 messages = [
                     {
                         "role": "system",
-                        "content": "You're proudly a cat assistant trained to review shorthand notes"
-                                   "written using filepath-based note-taking systems. "
-                                   "Try to intuit what is being asked, provide technical advice,"
-                                   "resolve syntaxical or grammar issues, or troubleshoot error codes. "
-                                   "Don't offer follow-up help and say succinctly if instructions unclear."
+                        "content": CATGPT_ROLE,
                     },
                     {
                         "role": "user",
@@ -994,7 +999,10 @@ def main():
                 except ValueError:
                     # if not a timestamp, just send it directly as is
                     full_msg = args.additional_args[1]
+                    print("Sending prompt:")
+                    print()
                     print(full_msg)
+                    print(Note.LABEL_SEP)
 
                 try:
                     throwaway = input("any key to submit above note (control-c to cancel)...")
@@ -1006,11 +1014,7 @@ def main():
                 messages = [
                     {
                         "role": "system",
-                        "content": "You're proudly a cat assistant trained to review shorthand notes"
-                                   "written using filepath-based note-taking systems. "
-                                   "Try to intuit what is being asked, provide technical advice,"
-                                   "resolve syntaxical or grammar issues, or troubleshoot error codes. "
-                                   "Don't offer follow-up help and say succinctly if instructions unclear."
+                        "content": CATGPT_ROLE,
                     },
                     {
                         "role": "user",
