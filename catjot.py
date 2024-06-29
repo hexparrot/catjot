@@ -962,6 +962,40 @@ def main():
                         printout(last_notes[-record_count_to_show])
                     except IndexError:
                         pass
+            elif args.additional_args[0] in SHORTCUTS['CHAT']:
+                # submits the last note (in this dir) to an LLM-endpoint
+                flattened = int(args.additional_args[1])
+                full_msg = ""
+                if flattened: # if truthy, e.g., timestamp, use it for search
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
+                        full_msg = f"\n\n".join([str(inst) for inst in nc])
+                        print(full_msg)
+                try:
+                    throwaway = input("any key to submit above note (control-c to cancel)...")
+                except KeyboardInterrupt:
+                    exit(0)
+
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You're proudly a cat assistant trained to review shorthand notes"
+                                   "written using filepath-based note-taking systems. "
+                                   "Try to intuit what is being asked, provide technical advice,"
+                                   "resolve syntaxical or grammar issues, or troubleshoot error codes. "
+                                   "Don't offer follow-up help and say succinctly if instructions unclear."
+                    },
+                    {
+                        "role": "user",
+                        "content": full_msg,
+                    }
+                ]
+
+                response = send_prompt_to_openai(messages)
+                if response:
+                    from pprint import pprint
+                    pprint(response)
+                else:
+                    print("Failed to get response from OpenAI API.")
 
 if __name__ == "__main__":
     main()
