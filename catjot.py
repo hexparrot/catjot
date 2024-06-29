@@ -402,6 +402,24 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
         print(f"Error sending request: {e}")
         return None
 
+def print_ascii_cat_with_text(text):
+    import textwrap
+    cat = r""" /\_/\
+( o.o )
+ > ^ <
+"""
+    wrapped_text = textwrap.wrap(text, 80)
+
+    # Determine the height of the ASCII cat
+    cat_height = cat.count('\n')
+
+    # Print the ASCII cat and the wrapped text side by side
+    cat_lines = cat.split('\n')
+    for i in range(max(len(cat_lines), len(wrapped_text))):
+        cat_line = cat_lines[i] if i < len(cat_lines) else " " * 8
+        text_line = wrapped_text[i] if i < len(wrapped_text) else ""
+        print(f"{cat_line:<8} {text_line}")
+
 from enum import Enum, auto
 
 class SearchType(Enum):
@@ -561,7 +579,7 @@ def main():
             'MESSAGE_ONLY': ['payload', 'pl'],
             'SIDE_BY_SIDE': ['sidebyside', 'sbs', 'rewrite', 'transcribe'],
             'SLEEPING_CAT': ['zzz'],
-            'CHAT': ['chat', 'c'],
+            'CHAT': ['chat', 'catgpt', 'c'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
@@ -724,6 +742,8 @@ def main():
                     throwaway = input("any key to submit above note (control-c to cancel)...")
                 except KeyboardInterrupt:
                     exit(0)
+                else:
+                    print()
 
                 messages = [
                     {
@@ -742,8 +762,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    from pprint import pprint
-                    pprint(response)
+                    print_ascii_cat_with_text(response['choices'][0]['message']['content'])
                 else:
                     print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
@@ -981,6 +1000,8 @@ def main():
                     throwaway = input("any key to submit above note (control-c to cancel)...")
                 except KeyboardInterrupt:
                     exit(0)
+                else:
+                    print()
 
                 messages = [
                     {
@@ -999,8 +1020,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    from pprint import pprint
-                    pprint(response)
+                    print_ascii_cat_with_text(response['choices'][0]['message']['content'])
                 else:
                     print("Failed to get response from OpenAI API.")
 
