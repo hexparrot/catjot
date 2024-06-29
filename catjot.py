@@ -376,6 +376,32 @@ def alternate_last_n_lines(text, n):
             # Clear the line
             print(' ' * len(lines[i]), end='\r')
 
+def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
+    # sends a prompt and receives the response in a json object
+    # from the openai gpt completion api
+    import requests
+    import json
+    from os import getenv
+
+    api_key = getenv('openai_api_key')
+    url = 'https://api.openai.com/v1/chat/completions'
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    }
+    data = {
+        "model": model_name,
+        "messages": messages
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending request: {e}")
+        return None
+
 from enum import Enum, auto
 
 class SearchType(Enum):
@@ -535,6 +561,7 @@ def main():
             'MESSAGE_ONLY': ['payload', 'pl'],
             'SIDE_BY_SIDE': ['sidebyside', 'sbs', 'rewrite', 'transcribe'],
             'SLEEPING_CAT': ['zzz'],
+            'CHAT': ['chat', 'c'],
         }
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         if len(args.additional_args) == 0:
@@ -682,6 +709,43 @@ def main():
                         print(f"{Note.LABEL_SEP}")
                         print(f"{matches} stray notes among")
                         print(f"{len(nc)} notes in total")
+            elif args.additional_args[0] in SHORTCUTS['CHAT']:
+                # submits the last note (in this dir) to an LLM-endpoint
+                from os import getcwd
+
+                last_note = "No notes to show.\n"
+                with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
+                    for inst in nc:
+                        last_note = inst
+                    else:
+                        print(str(last_note))
+
+                try:
+                    throwaway = input("any key to submit above note (control-c to cancel)...")
+                except KeyboardInterrupt:
+                    exit(0)
+
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You're proudly a cat assistant trained to review shorthand notes"
+                                   "written using filepath-based note-taking systems. "
+                                   "Try to intuit what is being asked, provide technical advice,"
+                                   "resolve syntaxical or grammar issues, or troubleshoot error codes. "
+                                   "Don't offer follow-up help and say succinctly if instructions unclear."
+                    },
+                    {
+                        "role": "user",
+                        "content": str(last_note),
+                    }
+                ]
+
+                response = send_prompt_to_openai(messages)
+                if response:
+                    from pprint import pprint
+                    pprint(response)
+                else:
+                    print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
