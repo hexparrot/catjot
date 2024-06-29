@@ -964,12 +964,19 @@ def main():
                         pass
             elif args.additional_args[0] in SHORTCUTS['CHAT']:
                 # submits the last note (in this dir) to an LLM-endpoint
-                flattened = int(args.additional_args[1])
+                # or alternatively, send it a prompt enclosed in quotes
                 full_msg = ""
-                if flattened: # if truthy, e.g., timestamp, use it for search
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
-                        full_msg = f"\n\n".join([str(inst) for inst in nc])
-                        print(full_msg)
+                try:
+                    flattened = int(args.additional_args[1])
+                    if flattened: # if truthy, e.g., timestamp, use it for search
+                        with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
+                            full_msg = f"\n\n".join([str(inst) for inst in nc])
+                            print(full_msg)
+                except ValueError:
+                    # if not a timestamp, just send it directly as is
+                    full_msg = args.additional_args[1]
+                    print(full_msg)
+
                 try:
                     throwaway = input("any key to submit above note (control-c to cancel)...")
                 except KeyboardInterrupt:
