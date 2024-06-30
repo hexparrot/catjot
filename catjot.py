@@ -472,6 +472,7 @@ def main():
     parser.add_argument("-c", action="store_const", const="context", help="search notes by context / read pipe into context as amendment")
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument("-d", action="store_true", help="only return (date)/timestamps for match")
+    parser.add_argument("-gpt", action="store_true", help="create new note from gpt reply to pipe")
 
     args = parser.parse_args()
 
@@ -568,6 +569,70 @@ def main():
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
+    # gpt-related functionality
+    elif args.gpt:
+        if sys.stdin.isatty(): # interactive tty, no pipe!
+            # jot -gpt "what kind of cat is the best cat?"
+            piped_data = flatten_pipe(sys.stdin.readlines())
+            from os import getcwd
+
+            print("Sending prompt:")
+            print()
+            print(str(piped_data))
+            print(Note.LABEL_SEP)
+
+            try:
+                throwaway = input("any key to submit above note (control-c to cancel)...")
+            except KeyboardInterrupt:
+                exit(0)
+            else:
+                print()
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": CATGPT_ROLE,
+                },
+                {
+                    "role": "user",
+                    "content": str(piped_data),
+                }
+            ]
+
+            response = send_prompt_to_openai(messages)
+            if response:
+                retval = response['choices'][0]['message']['content']
+                print_ascii_cat_with_text(retval)
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
+        else: # yes pipe!
+            piped_data = flatten_pipe(sys.stdin.readlines())
+            from os import getcwd
+
+            print("Sending prompt:")
+            print()
+            print(str(piped_data))
+            print(Note.LABEL_SEP)
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": CATGPT_ROLE,
+                },
+                {
+                    "role": "user",
+                    "content": str(piped_data),
+                }
+            ]
+
+            response = send_prompt_to_openai(messages)
+            if response:
+                retval = response['choices'][0]['message']['content']
+                print_ascii_cat_with_text(retval)
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
