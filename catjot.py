@@ -571,10 +571,21 @@ def main():
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # gpt-related functionality
     elif args.gpt:
+        # this happens for interactive or not
+        params['tag'] = "catgpt"
+        piped_data = flatten_pipe(sys.stdin.readlines())
+        if len(piped_data) < 80:
+            params['context'] = piped_data
+        else:
+            params['context'] = f"piped data was {len(piped_data)} chars long"
+
+        if len(args.additional_args) and args.additional_args[0] in ['home']:
+            from os import environ
+            params['pwd'] = environ['HOME']
+
         if sys.stdin.isatty(): # interactive tty, no pipe!
-            # jot -gpt "what kind of cat is the best cat?"
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            from os import getcwd
+            # jot -gpt <enter>
+            # type freely, end with CTRL-D
 
             print("Sending prompt:")
             print()
@@ -600,6 +611,7 @@ def main():
             ]
 
             response = send_prompt_to_openai(messages)
+
             if response:
                 retval = response['choices'][0]['message']['content']
                 print_ascii_cat_with_text(retval)
@@ -607,13 +619,10 @@ def main():
             else:
                 print("Failed to get response from OpenAI API.")
         else: # yes pipe!
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            from os import getcwd
-
-            print("Sending prompt:")
-            print()
-            print(str(piped_data))
-            print(Note.LABEL_SEP)
+            # when piping a file, not asking for confirmation
+            # as the file might be huge and we dont need to replicate
+            # it in the note itself.
+            # better know what you're sending with this one!
 
             messages = [
                 {
