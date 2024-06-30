@@ -410,13 +410,13 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
         print(f"Error sending request: {e}")
         return None
 
-def print_ascii_cat_with_text(text):
+def print_ascii_cat_with_text(text, context):
     import textwrap
     cat = r""" /\_/\
 ( o.o )
  > ^ <
 """
-    wrapped_text = textwrap.wrap(text, 80)
+    wrapped_text = textwrap.wrap(context, 80)
 
     # Determine the height of the ASCII cat
     cat_height = cat.count('\n')
@@ -427,6 +427,8 @@ def print_ascii_cat_with_text(text):
         cat_line = cat_lines[i] if i < len(cat_lines) else " " * 8
         text_line = wrapped_text[i] if i < len(wrapped_text) else ""
         print(f"{cat_line:<8} {text_line}")
+
+    print(text)
 
 from enum import Enum, auto
 
@@ -538,15 +540,16 @@ def main():
         params['tag'] = "catgpt"
         piped_data = flatten_pipe(sys.stdin.readlines())
 
+        full_sendout = ""
         if args.c:
-            provided_context = args.additional_args[0]
-            params['context'] = provided_context
+            params['context'] = args.additional_args[0]
+            full_sendout = params['context'] + '\n' + str(piped_data)
         else:
             if len(piped_data) < 80:
                 params['context'] = piped_data
             else:
                 params['context'] = f"piped data was {len(piped_data)} chars long"
-        full_sendout = provided_context + '\n' + str(piped_data)
+            full_sendout = piped_data
 
         if len(args.additional_args) and args.additional_args[0] in ['home']:
             from os import environ
@@ -583,7 +586,7 @@ def main():
 
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval)
+                print_ascii_cat_with_text(retval, params['context'])
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
@@ -607,7 +610,7 @@ def main():
             response = send_prompt_to_openai(messages)
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval)
+                print_ascii_cat_with_text(retval, params['context'])
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
@@ -849,7 +852,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(response['choices'][0]['message']['content'])
+                    print_ascii_cat_with_text(response['choices'][0]['message']['content'], getcwd())
                 else:
                     print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
@@ -1072,6 +1075,7 @@ def main():
                 # submits the last note (in this dir) to an LLM-endpoint
                 # or alternatively, send it a prompt enclosed in quotes
                 full_msg = ""
+                flattened = ""
                 try:
                     flattened = int(args.additional_args[1])
                     if flattened: # if truthy, e.g., timestamp, use it for search
@@ -1106,7 +1110,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(response['choices'][0]['message']['content'])
+                    print_ascii_cat_with_text(response['choices'][0]['message']['content'], full_msg)
                 else:
                     print("Failed to get response from OpenAI API.")
 
