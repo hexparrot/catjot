@@ -532,8 +532,87 @@ def main():
             Note.commit(NOTEFILE)
         exit(0) # end logic for amending
 
+    # gpt-related functionality
+    if args.gpt:
+        # this happens for interactive or not
+        params['tag'] = "catgpt"
+        piped_data = flatten_pipe(sys.stdin.readlines())
+
+        if args.c:
+            provided_context = args.additional_args[0]
+            params['context'] = provided_context
+        else:
+            if len(piped_data) < 80:
+                params['context'] = piped_data
+            else:
+                params['context'] = f"piped data was {len(piped_data)} chars long"
+        full_sendout = provided_context + '\n' + str(piped_data)
+
+        if len(args.additional_args) and args.additional_args[0] in ['home']:
+            from os import environ
+            params['pwd'] = environ['HOME']
+
+        if sys.stdin.isatty(): # interactive tty, no pipe!
+            # jot -gpt <enter>
+            # type freely, end with CTRL-D
+
+            print("Sending prompt:")
+            print()
+            print(full_sendout)
+            print(Note.LABEL_SEP)
+
+            try:
+                throwaway = input("any key to submit above note (control-c to cancel)...")
+            except KeyboardInterrupt:
+                exit(0)
+            else:
+                print()
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": CATGPT_ROLE,
+                },
+                {
+                    "role": "user",
+                    "content": full_sendout,
+                }
+            ]
+
+            response = send_prompt_to_openai(messages)
+
+            if response:
+                retval = response['choices'][0]['message']['content']
+                print_ascii_cat_with_text(retval)
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
+        else: # yes pipe!
+            # when piping a file, not asking for confirmation
+            # as the file might be huge and we dont need to replicate
+            # it in the note itself.
+            # better know what you're sending with this one!
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": CATGPT_ROLE,
+                },
+                {
+                    "role": "user",
+                    "content": full_sendout,
+                }
+            ]
+
+            response = send_prompt_to_openai(messages)
+            if response:
+                retval = response['choices'][0]['message']['content']
+                print_ascii_cat_with_text(retval)
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
     # context-related functionality
-    if args.c:
+    elif args.c:
         if sys.stdin.isatty(): # interactive tty, no pipe!
             # jot -c observations
             # not intending to amend instead means match by context field
@@ -569,79 +648,6 @@ def main():
         else: # yes pipe!
             piped_data = flatten_pipe(sys.stdin.readlines())
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
-    # gpt-related functionality
-    elif args.gpt:
-        # this happens for interactive or not
-        params['tag'] = "catgpt"
-        piped_data = flatten_pipe(sys.stdin.readlines())
-        if len(piped_data) < 80:
-            params['context'] = piped_data
-        else:
-            params['context'] = f"piped data was {len(piped_data)} chars long"
-
-        if len(args.additional_args) and args.additional_args[0] in ['home']:
-            from os import environ
-            params['pwd'] = environ['HOME']
-
-        if sys.stdin.isatty(): # interactive tty, no pipe!
-            # jot -gpt <enter>
-            # type freely, end with CTRL-D
-
-            print("Sending prompt:")
-            print()
-            print(str(piped_data))
-            print(Note.LABEL_SEP)
-
-            try:
-                throwaway = input("any key to submit above note (control-c to cancel)...")
-            except KeyboardInterrupt:
-                exit(0)
-            else:
-                print()
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": CATGPT_ROLE,
-                },
-                {
-                    "role": "user",
-                    "content": str(piped_data),
-                }
-            ]
-
-            response = send_prompt_to_openai(messages)
-
-            if response:
-                retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval)
-                Note.append(NOTEFILE, Note.jot(retval, **params))
-            else:
-                print("Failed to get response from OpenAI API.")
-        else: # yes pipe!
-            # when piping a file, not asking for confirmation
-            # as the file might be huge and we dont need to replicate
-            # it in the note itself.
-            # better know what you're sending with this one!
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": CATGPT_ROLE,
-                },
-                {
-                    "role": "user",
-                    "content": str(piped_data),
-                }
-            ]
-
-            response = send_prompt_to_openai(messages)
-            if response:
-                retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval)
-                Note.append(NOTEFILE, Note.jot(retval, **params))
-            else:
-                print("Failed to get response from OpenAI API.")
     else:
         # for all other cases where no argparse argument is provided
         SHORTCUTS = {
