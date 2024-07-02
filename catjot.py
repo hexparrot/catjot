@@ -7,6 +7,7 @@ __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
 from os import environ, getcwd
+from enum import Enum, auto
 
 class Note(object):
     # Label Name | Default pattern shown at runtime:
@@ -61,6 +62,8 @@ class Note(object):
 
     # Filepath to save to, saves in $HOME
     NOTEFILE = f"{environ['HOME']}/.catjot"
+    # Use colorization if terminal supports
+    USE_COLORIZATION = True
 
     def __init__(self, values_dict={}):
         from time import time
@@ -77,6 +80,8 @@ class Note(object):
         if self.message.startswith(Note.LABEL_ARG):
             self.message = self.message[len(Note.LABEL_ARG):]
 
+        self.supports_color = self.USE_COLORIZATION and supports_color()
+
     def __str__(self):
         """ Returns the string representation of a note.
             This representation does not need to reflect the format
@@ -86,18 +91,29 @@ class Note(object):
         friendly_date = dt.strftime(Note.DATE_FORMAT)
 
         tagline = ''
-        if self.tag:
-            tagline = f"[{self.tag}]\n"
-
         context = ""
-        if self.context:
-            context = f"% {self.context}\n"
 
-        return f"{Note.LABEL_DIR}{self.pwd}\n" + \
-               f"{Note.LABEL_DATE}{friendly_date}\n" + \
-               tagline + \
-               context + \
-               f"{Note.LABEL_DATA}{self.message}"
+        if self.supports_color:
+            if self.context:
+                context = f"{AnsiColor.GREEN.value}% {self.context}{AnsiColor.RESET.value}\n"
+            if self.tag:
+                tagline = f"[{AnsiColor.YELLOW.value}{self.tag}{AnsiColor.RESET.value}]\n"
+
+            return f"{AnsiColor.CYAN.value}{Note.LABEL_DIR}{self.pwd}{AnsiColor.RESET.value}\n" + \
+                   f"{AnsiColor.RED.value}{Note.LABEL_DATE}{friendly_date}{AnsiColor.RESET.value}\n" + \
+                   tagline + \
+                   context + \
+                   f"{Note.LABEL_DATA}{self.message}"
+        else:
+            if self.context:
+                context = f"% {self.context}\n"
+            if self.tag:
+                tagline = f"[{self.tag}]\n"
+            return f"{Note.LABEL_DIR}{self.pwd}\n" + \
+                   f"{Note.LABEL_DATE}{friendly_date}\n" + \
+                   tagline + \
+                   context + \
+                   f"{Note.LABEL_DATA}{self.message}"
 
     def __eq__(self, other):
         """ Equality test for notes should:
@@ -423,6 +439,14 @@ def is_binary_string(data):
 
     return len(non_text_chars) / len(data) > 0.3
 
+def supports_color():
+    import os
+    import sys
+
+    supported_platform = os.name != 'nt' or 'ANSICON' in os.environ or 'WT_SESSION' in os.environ
+    is_a_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+    return supported_platform and is_a_tty
+
 def print_ascii_cat_with_text(context, text):
     import textwrap
     cat = r""" /\_/\
@@ -443,8 +467,6 @@ def print_ascii_cat_with_text(context, text):
 
     print(text)
 
-from enum import Enum, auto
-
 class SearchType(Enum):
     ALL = auto()
     TAG = auto()
@@ -455,6 +477,19 @@ class SearchType(Enum):
     TIMESTAMP = auto()
     DIRECTORY = auto()
     TREE = auto()
+
+class AnsiColor(Enum):
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
 
 class NoteContext:
     def __init__(self, notefile, search_criteria):
