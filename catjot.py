@@ -361,10 +361,7 @@ TWOCAT = r'''_____________________________________
 '''  # credits felix lee
 
 CATGPT_ROLE = """You're proudly a cat assistant trained to review shorthand notes
-written using filepath-based note-taking systems.
-Try to intuit what is being asked, provide technical advice,
-resolve syntaxical or grammar issues, or troubleshoot error codes.
-Don't offer follow-up help and say succinctly if instructions unclear."""
+written using a command-line, filepath-based, note-taking system called "catjot"."""
 
 def alternate_last_n_lines(text, n):
     import time
