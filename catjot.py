@@ -9,6 +9,27 @@ __status__ = "Development"
 from os import environ, getcwd
 from enum import Enum, auto
 
+def supports_color():
+    import os
+    import sys
+
+    supported_platform = os.name != 'nt' or 'ANSICON' in os.environ or 'WT_SESSION' in os.environ
+    is_a_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+    return supported_platform and is_a_tty
+
+class AnsiColor(Enum):
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+
 class Note(object):
     # Label Name | Default pattern shown at runtime:
     #------------|----------------------------------
@@ -63,7 +84,7 @@ class Note(object):
     # Filepath to save to, saves in $HOME
     NOTEFILE = f"{environ['HOME']}/.catjot"
     # Use colorization if terminal supports
-    USE_COLORIZATION = True
+    USE_COLORIZATION = True and supports_color()
 
     def __init__(self, values_dict={}):
         from time import time
@@ -80,8 +101,6 @@ class Note(object):
         if self.message.startswith(Note.LABEL_ARG):
             self.message = self.message[len(Note.LABEL_ARG):]
 
-        self.supports_color = self.USE_COLORIZATION and supports_color()
-
     def __str__(self):
         """ Returns the string representation of a note.
             This representation does not need to reflect the format
@@ -93,7 +112,7 @@ class Note(object):
         tagline = ""
         context = ""
 
-        if self.supports_color:
+        if Note.USE_COLORIZATION:
             if self.context:
                 context = f"{AnsiColor.GREEN.value}% {self.context}{AnsiColor.RESET.value}\n"
             if self.tag:
@@ -440,14 +459,6 @@ def is_binary_string(data):
 
     return len(non_text_chars) / len(data) > 0.3
 
-def supports_color():
-    import os
-    import sys
-
-    supported_platform = os.name != 'nt' or 'ANSICON' in os.environ or 'WT_SESSION' in os.environ
-    is_a_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
-    return supported_platform and is_a_tty
-
 def print_ascii_cat_with_text(context, text):
     import textwrap
     cat = r""" /\_/\
@@ -464,7 +475,10 @@ def print_ascii_cat_with_text(context, text):
     for i in range(max(len(cat_lines), len(wrapped_text))):
         cat_line = cat_lines[i] if i < len(cat_lines) else " " * 8
         text_line = wrapped_text[i] if i < len(wrapped_text) else ""
-        print(f"{cat_line:<8} {text_line}")
+        if Note.USE_COLORIZATION:
+            print(f"{cat_line:<8} {AnsiColor.GREEN.value}{text_line}{AnsiColor.RESET.value}")
+        else:
+            print(f"{cat_line:<8} {text_line}")
 
     print(text)
 
@@ -478,19 +492,6 @@ class SearchType(Enum):
     TIMESTAMP = auto()
     DIRECTORY = auto()
     TREE = auto()
-
-class AnsiColor(Enum):
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    BLACK = '\033[30m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
-    CYAN = '\033[36m'
-    WHITE = '\033[37m'
 
 class NoteContext:
     def __init__(self, notefile, search_criteria):
