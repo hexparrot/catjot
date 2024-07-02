@@ -426,7 +426,7 @@ def is_binary_string(data):
 
     return len(non_text_chars) / len(data) > 0.3
 
-def print_ascii_cat_with_text(text, context):
+def print_ascii_cat_with_text(context, text):
     import textwrap
     cat = r""" /\_/\
 ( o.o )
@@ -602,7 +602,7 @@ def main():
 
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval, params['context'])
+                print_ascii_cat_with_text(params['context'], retval)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
@@ -631,7 +631,7 @@ def main():
             response = send_prompt_to_openai(messages)
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(retval, params['context'])
+                print_ascii_cat_with_text(params['context'], retval)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
@@ -873,7 +873,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(response['choices'][0]['message']['content'], getcwd())
+                    print_ascii_cat_with_text(getcwd(), response['choices'][0]['message']['content'])
                 else:
                     print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
@@ -1131,7 +1131,7 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(response['choices'][0]['message']['content'], full_msg)
+                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'])
                 else:
                     print("Failed to get response from OpenAI API.")
 
