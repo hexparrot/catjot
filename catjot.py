@@ -410,6 +410,22 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
         print(f"Error sending request: {e}")
         return None
 
+def is_binary_string(data):
+    """
+    Determine if a string is binary or text by checking for non-text characters.
+
+    :param data: A string to be checked
+    :return: True if the string is binary, False if it is text
+    """
+    if '\x00' in data:
+        return True
+
+    # Heuristic: if more than 30% of the characters are non-text characters, it's binary
+    text_characters = ''.join(map(chr, range(32, 127))) + '\n\r\t\b'
+    non_text_chars = ''.join([char for char in data if char not in text_characters])
+
+    return len(non_text_chars) / len(data) > 0.3
+
 def print_ascii_cat_with_text(text, context):
     import textwrap
     cat = r""" /\_/\
@@ -595,6 +611,11 @@ def main():
             # as the file might be huge and we dont need to replicate
             # it in the note itself.
             # better know what you're sending with this one!
+
+            if is_binary_string(piped_data):
+                print_ascii_cat_with_text("Try again with a text-based file",
+                                          "Piped data appears to be binary; -gpt accepts only text input")
+                exit(1)
 
             messages = [
                 {
