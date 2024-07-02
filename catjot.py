@@ -90,7 +90,7 @@ class Note(object):
         dt = datetime.fromtimestamp(self.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
 
-        tagline = ''
+        tagline = ""
         context = ""
 
         if self.supports_color:
@@ -109,6 +109,7 @@ class Note(object):
                 context = f"% {self.context}\n"
             if self.tag:
                 tagline = f"[{self.tag}]\n"
+
             return f"{Note.LABEL_DIR}{self.pwd}\n" + \
                    f"{Note.LABEL_DATE}{friendly_date}\n" + \
                    tagline + \
