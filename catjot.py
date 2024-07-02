@@ -612,9 +612,13 @@ def main():
             # it in the note itself.
             # better know what you're sending with this one!
 
-            if is_binary_string(piped_data):
-                print_ascii_cat_with_text("Try again with a text-based file",
-                                          "Piped data appears to be binary; -gpt accepts only text input")
+            if is_binary_string(full_sendout):
+                print_ascii_cat_with_text("Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
+                                          "Try another file that is text-based, instead.", "")
+                exit(1)
+            elif len(full_sendout.encode('utf-8')) > 16384:
+                print_ascii_cat_with_text("Uh oh, the pipe I received seems to have too much data. "
+                                          f"It has exceeded the 16384 character context limit (data size: {len(piped_data)})", "")
                 exit(1)
 
             messages = [
