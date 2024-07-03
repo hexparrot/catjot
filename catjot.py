@@ -458,7 +458,7 @@ def is_binary_string(data):
 
     return len(non_text_chars) / len(data) > 0.3
 
-def print_ascii_cat_with_text(context, text):
+def print_ascii_cat_with_text(context, text, endtext="END"):
     import textwrap
     cat = r""" /\_/\
 ( o.o )
@@ -480,7 +480,7 @@ def print_ascii_cat_with_text(context, text):
             print(f"{cat_line:<8} {text_line}")
 
     print(text)
-    print(f"{AnsiColor.MAGENTA.value}END{AnsiColor.RESET.value}")
+    print(f"{AnsiColor.MAGENTA.value}{endtext}{AnsiColor.RESET.value}")
 
 class SearchType(Enum):
     ALL = auto()
@@ -642,7 +642,11 @@ def main():
 
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(params['context'], retval)
+                prompt_tokens = response['usage']['prompt_tokens']
+                output_tokens = response['usage']['prompt_tokens']
+                engine = response['model']
+                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={engine})"
+                print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
@@ -675,7 +679,11 @@ def main():
             response = send_prompt_to_openai(messages)
             if response:
                 retval = response['choices'][0]['message']['content']
-                print_ascii_cat_with_text(params['context'], retval)
+                prompt_tokens = response['usage']['prompt_tokens']
+                output_tokens = response['usage']['prompt_tokens']
+                engine = response['model']
+                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={engine})"
+                print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
