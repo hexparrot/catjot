@@ -442,6 +442,14 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
         print(f"Error sending request: {e}")
         return None
 
+def return_footer(gpt_reply):
+    # receives the jSON object from a successful gpt call
+    # returns technical details of token usage/model
+    prompt_tokens = gpt_reply['usage']['prompt_tokens']
+    output_tokens = gpt_reply['usage']['completion_tokens']
+    model_name = gpt_reply['model']
+    return f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
+
 def is_binary_string(data):
     """
     Determine if a string is binary or text by checking for non-text characters.
@@ -646,10 +654,7 @@ def main():
 
             if response:
                 retval = response['choices'][0]['message']['content']
-                prompt_tokens = response['usage']['prompt_tokens']
-                output_tokens = response['usage']['completion_tokens']
-                model_name = response['model']
-                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
+                endline = return_footer(response)
                 print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
@@ -687,10 +692,7 @@ def main():
 
             if response:
                 retval = response['choices'][0]['message']['content']
-                prompt_tokens = response['usage']['prompt_tokens']
-                output_tokens = response['usage']['completion_tokens']
-                model_name = response['model']
-                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
+                endline = return_footer(response)
                 print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
@@ -939,7 +941,8 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(getcwd(), response['choices'][0]['message']['content'])
+                    endline = return_footer(response)
+                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'], endline)
                 else:
                     print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
@@ -1203,7 +1206,8 @@ def main():
 
                 response = send_prompt_to_openai(messages)
                 if response:
-                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'])
+                    endline = return_footer(response)
+                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'], endline)
                 else:
                     print("Failed to get response from OpenAI API.")
 
