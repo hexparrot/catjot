@@ -679,7 +679,7 @@ def main():
             #               intro='tell me about this file',
             #               text=note,
             # 7- cat requests | jot chat
-            #               intro=requests (see bug desc below),
+            #               intro=requests
             #               text=,
             # 8- cat requests | jot chat 1719967764
             #               intro=requests,
@@ -690,45 +690,26 @@ def main():
 
             intro = ""
             txt = ""
-            txtlen = ""
 
-            if sys.stdin.isatty(): # interactive tty, no pipe!
-                # routes 1,2,3,4
-                try:
-                    timestamp_tgt = int(args.additional_args[1])
-                except IndexError:
-                    # route 1
-                    intro = flatten_pipe(sys.stdin.readlines())
-                except ValueError:
-                    # route 4
-                    intro = ' '.join(args.additional_args[1:])
-                else:
-                    # route 2 & 3
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
-                        txt = f"\n\n".join([str(inst) for inst in nc])
+            all_args = list(args.additional_args)
+            all_args.pop(0)
+            timestamp_tgt = all_args[0] if all_args else ''
 
-                    intro = ' '.join(args.additional_args[2:])
-            else:
-                # routes 5,6,7,8,9
-                try:
-                    timestamp_tgt = int(args.additional_args[1])
-                except IndexError:
-                    # route 5 & 7
-                    # inconsistent assignment to vars since 5&7 are identical
-                    # but their meaningful input are reversed
-                    # thus 5 is working and 7 is reversed and cannot be 'fixed'
-                    # but considering the immediate prompt submission,
-                    # this is considered a non-issue
+            if timestamp_tgt.isdigit():
+                all_args.pop(0)
+                timestamp_tgt = int(timestamp_tgt)
+                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
+                    txt = f"\n\n".join([str(inst) for inst in nc])
+            intro = ' '.join(all_args) # join together everything after 'chat'
+
+            if not sys.stdin.isatty(): # not interactive tty, all pipe!
+                # routes 5,6,7,8,9: fill in the blank, pref intro
+                if not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
-                except ValueError:
-                    # route 9
-                    intro = ' '.join(args.additional_args[1:])
+                elif txt and not intro:
+                    intro = flatten_pipe(sys.stdin.readlines())
+                elif not txt and intro:
                     txt = flatten_pipe(sys.stdin.readlines())
-                else:
-                    # route 6 & 8
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
-                        txt = f"\n\n".join([str(inst) for inst in nc])
-                    intro = flatten_pipe(sys.stdin.readlines())
 
             params['tag'] = "catgpt"
             full_sendout = f"{intro}\n\n{txt}"
