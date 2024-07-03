@@ -648,10 +648,14 @@ def main():
             'SIDE_BY_SIDE': ['sidebyside', 'sbs', 'rewrite', 'transcribe'],
             'SLEEPING_CAT': ['zzz'],
             'CHAT': ['chat', 'catgpt', 'c'],
+            'CONVO': ['convo', 'talk', 'conv'],
         }
+
         IS_CHAT = False
+        IS_CONVO = False # continuing conversation mode
         try:
             IS_CHAT = args.additional_args[0] in SHORTCUTS['CHAT']
+            IS_CONVO = args.additional_args[0] in SHORTCUTS['CONVO']
         except IndexError: #because no args were provided
             pass
 
@@ -760,6 +764,43 @@ def main():
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
                 print("Failed to get response from OpenAI API.")
+        elif IS_CONVO:
+            SYS_ROLE_TRIGGER = "SYSTEM:"
+            print_ascii_cat_with_text("Hi, what can I help you with today? ",
+                                      "Enter your prompt and hit Control-D to submit. \n" + \
+                                      f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'")
+
+            messages = []
+            user_input = ''
+            while True:
+                try:
+                    user_input = flatten_pipe(sys.stdin.readlines())
+                except KeyboardInterrupt:
+                    return
+                if not user_input:
+                    return
+                if user_input.startswith(SYS_ROLE_TRIGGER):
+                    messages.append({
+                            "role": "system",
+                            "content": user_input[len(SYS_ROLE_TRIGGER):]
+                    })
+                    print(user_input[len(SYS_ROLE_TRIGGER):])
+                else:
+                    messages.append({
+                            "role": "user",
+                            "content": user_input
+                    })
+
+                MODEL_TO_USE = 'gpt-4' if args.gpt4 else 'gpt-3.5-turbo'
+                response = send_prompt_to_openai(messages, model_name=MODEL_TO_USE)
+
+                if response:
+                    retval = response['choices'][0]['message']['content']
+                    endline = return_footer(response)
+                    print_ascii_cat_with_text(user_input, retval, endline)
+                    Note.append(NOTEFILE, Note.jot(retval, **params))
+                else:
+                    print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 0:
             # show all notes originating from this PWD
