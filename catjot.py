@@ -480,6 +480,7 @@ def print_ascii_cat_with_text(context, text):
             print(f"{cat_line:<8} {text_line}")
 
     print(text)
+    print(f"{AnsiColor.MAGENTA.value}END{AnsiColor.RESET.value}")
 
 class SearchType(Enum):
     ALL = auto()
@@ -608,10 +609,16 @@ def main():
             # jot -gpt <enter>
             # type freely, end with CTRL-D
 
-            print("Sending prompt:")
+            if Note.USE_COLORIZATION:
+                print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
+            else:
+                print("Sending prompt:")
             print()
             print(full_sendout)
-            print(Note.LABEL_SEP)
+            if Note.USE_COLORIZATION:
+                print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
+            else:
+                print(Note.LABEL_SEP)
 
             try:
                 throwaway = input("any key to submit above note (control-c to cancel)...")
@@ -885,10 +892,16 @@ def main():
                     for inst in nc:
                         last_note = inst
                     else:
-                        print("Sending prompt:")
+                        if Note.USE_COLORIZATION:
+                            print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
+                        else:
+                            print("Sending prompt:")
                         print()
-                        print(str(last_note))
-                        print(Note.LABEL_SEP)
+                        printout(last_note)
+                        if Note.USE_COLORIZATION:
+                            print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
+                        else:
+                            print(Note.LABEL_SEP)
 
                 try:
                     throwaway = input("any key to submit above note (control-c to cancel)...")
@@ -1143,10 +1156,16 @@ def main():
                 except ValueError:
                     # if not a timestamp, just send it directly as is
                     full_msg = args.additional_args[1]
-                    print("Sending prompt:")
+                    if Note.USE_COLORIZATION:
+                        print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
+                    else:
+                        print("Sending prompt:")
                     print()
-                    print(full_msg)
-                    print(Note.LABEL_SEP)
+                    printout(full_msg)
+                    if Note.USE_COLORIZATION:
+                        print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
+                    else:
+                        print(Note.LABEL_SEP)
 
                 try:
                     throwaway = input("any key to submit above note (control-c to cancel)...")
