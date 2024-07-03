@@ -705,7 +705,10 @@ def main():
                     txt = f"\n\n".join([str(inst) for inst in nc])
             intro = ' '.join(all_args) # join together everything after 'chat'
 
-            if not sys.stdin.isatty(): # not interactive tty, all pipe!
+            if sys.stdin.isatty(): # interactive tty, no pipe!
+                if not txt and not intro:
+                    intro = flatten_pipe(sys.stdin.readlines())
+            elif not sys.stdin.isatty(): # not interactive tty, all pipe!
                 # routes 5,6,7,8,9,10: fill in the blank, pref intro
                 if not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
