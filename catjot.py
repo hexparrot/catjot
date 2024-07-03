@@ -475,7 +475,7 @@ def print_ascii_cat_with_text(context, text):
         cat_line = cat_lines[i] if i < len(cat_lines) else " " * 8
         text_line = wrapped_text[i] if i < len(wrapped_text) else ""
         if Note.USE_COLORIZATION:
-            print(f"{cat_line:<8} {AnsiColor.GREEN.value}{text_line}{AnsiColor.RESET.value}")
+            print(f"{AnsiColor.YELLOW.value}{cat_line:<8} {AnsiColor.GREEN.value}{text_line}{AnsiColor.RESET.value}")
         else:
             print(f"{cat_line:<8} {text_line}")
 
