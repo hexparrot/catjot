@@ -765,6 +765,9 @@ def main():
             else:
                 print("Failed to get response from OpenAI API.")
         elif IS_CONVO:
+            from time import time
+            now = int(time())
+
             SYS_ROLE_TRIGGER = "SYSTEM:"
             print_ascii_cat_with_text("Hi, what can I help you with today? ",
                                       "Enter your prompt and hit Control-D to submit. \n" + \
@@ -775,10 +778,11 @@ def main():
             while True:
                 try:
                     user_input = flatten_pipe(sys.stdin.readlines())
+                    if not user_input:
+                        return
                 except KeyboardInterrupt:
                     return
-                if not user_input:
-                    return
+
                 if user_input.startswith(SYS_ROLE_TRIGGER):
                     messages.append({
                             "role": "system",
@@ -797,6 +801,8 @@ def main():
                     retval = response['choices'][0]['message']['content']
                     endline = return_footer(response)
                     print_ascii_cat_with_text(user_input, retval, endline)
+                    params['context'] = user_input
+                    params['tag'] = f"convo-{now}"
                     Note.append(NOTEFILE, Note.jot(retval, **params))
                 else:
                     print("Failed to get response from OpenAI API.")
