@@ -700,13 +700,16 @@ def main():
 
             if timestamp_tgt.isdigit():
                 all_args.pop(0)
-                timestamp_tgt = int(timestamp_tgt)
-                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
+                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, int(timestamp_tgt))) as nc:
                     txt = f"\n\n".join([str(inst) for inst in nc])
             intro = ' '.join(all_args) # join together everything after 'chat'
 
             if sys.stdin.isatty(): # interactive tty, no pipe!
-                if not txt and not intro:
+                if timestamp_tgt.isdigit() and not txt: # requested note but wasnt found
+                    print_ascii_cat_with_text("Uh oh, you requested a timestamp with no matching note. "
+                                              "Try another timestamp and try again.", "")
+                    sys.exit(1)
+                elif not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
             elif not sys.stdin.isatty(): # not interactive tty, all pipe!
                 # routes 5,6,7,8,9,10: fill in the blank, pref intro
