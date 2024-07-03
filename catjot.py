@@ -687,6 +687,9 @@ def main():
             # 9- cat broken.jot | jot chat how many notes are there?
             #               intro='how many notes...',
             #               text=broken.jot,
+            #10- cat broken.jot | jot chat 1719967764 how many notes are there?
+            #               intro='how many notes...',
+            #               text=note+broken.jot,
 
             intro = ""
             txt = ""
@@ -703,13 +706,16 @@ def main():
             intro = ' '.join(all_args) # join together everything after 'chat'
 
             if not sys.stdin.isatty(): # not interactive tty, all pipe!
-                # routes 5,6,7,8,9: fill in the blank, pref intro
+                # routes 5,6,7,8,9,10: fill in the blank, pref intro
                 if not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
                 elif txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
                 elif not txt and intro:
                     txt = flatten_pipe(sys.stdin.readlines())
+                elif txt and intro:
+                    txt_append = flatten_pipe(sys.stdin.readlines())
+                    txt = '### FILE 1 ###' + '\n\n' + txt + '\n\n### FILE 2 ###\n\n' + txt_append
 
             params['tag'] = "catgpt"
             full_sendout = f"{intro}\n\n{txt}"
