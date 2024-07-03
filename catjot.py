@@ -784,7 +784,6 @@ def main():
                             "role": "system",
                             "content": user_input[len(SYS_ROLE_TRIGGER):]
                     })
-                    print(user_input[len(SYS_ROLE_TRIGGER):])
                 else:
                     messages.append({
                             "role": "user",
