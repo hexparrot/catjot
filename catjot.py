@@ -752,7 +752,7 @@ def main():
                 exit(1)
             elif len(full_sendout.encode('utf-8')) > 16384:
                 print_ascii_cat_with_text("Uh oh, the pipe I received seems to have too much data. "
-                                          f"It has exceeded the 16384 character context limit (data size: {len(piped_data)})", "")
+                                          f"It has exceeded the 16384 character context limit (data size: {len(full_sendout)})", "")
                 exit(1)
 
             messages = [
