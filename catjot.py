@@ -466,13 +466,13 @@ def is_binary_string(data):
 
     return len(non_text_chars) / len(data) > 0.3
 
-def print_ascii_cat_with_text(context, text, endtext="END"):
+def print_ascii_cat_with_text(intro, text, endtext="END"):
     import textwrap
     cat = r""" /\_/\
 ( o.o )
  > ^ <
 """
-    wrapped_text = textwrap.wrap(context, 80)
+    wrapped_text = textwrap.wrap(intro, 80)
 
     # Determine the height of the ASCII cat
     cat_height = cat.count('\n')
@@ -532,8 +532,7 @@ def main():
     parser.add_argument("-c", action="store_const", const="context", help="search notes by context / read pipe into context as amendment")
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument("-d", action="store_true", help="only return (date)/timestamps for match")
-    parser.add_argument("-gpt", action="store_true", help="create new note from gpt-3.5")
-    parser.add_argument("-gpt4", action="store_true", help="create new note from gpt-4")
+    parser.add_argument("-gpt4", action="store_true", help="use gpt-4 for CHAT functionality")
 
     args = parser.parse_args()
 
@@ -592,111 +591,6 @@ def main():
             Note.amend(NOTEFILE, **params)
             Note.commit(NOTEFILE)
         exit(0) # end logic for amending
-
-    # gpt-related functionality
-    if args.gpt or args.gpt4:
-        # this happens for interactive or not
-        params['tag'] = "catgpt"
-        piped_data = flatten_pipe(sys.stdin.readlines())
-
-        full_sendout = ""
-        if args.c:
-            params['context'] = args.additional_args[0]
-            full_sendout = params['context'] + '\n' + str(piped_data)
-        else:
-            if len(piped_data) < 80:
-                params['context'] = piped_data
-            else:
-                params['context'] = f"piped data was {len(piped_data)} chars long"
-            full_sendout = piped_data
-
-        if len(args.additional_args) and args.additional_args[0] in ['home']:
-            from os import environ
-            params['pwd'] = environ['HOME']
-
-        if sys.stdin.isatty(): # interactive tty, no pipe!
-            # jot -gpt <enter>
-            # type freely, end with CTRL-D
-
-            if Note.USE_COLORIZATION:
-                print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
-            else:
-                print("Sending prompt:")
-            print()
-            print(full_sendout)
-            if Note.USE_COLORIZATION:
-                print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
-            else:
-                print(Note.LABEL_SEP)
-
-            try:
-                throwaway = input("any key to submit above note (control-c to cancel)...")
-            except KeyboardInterrupt:
-                exit(0)
-            else:
-                print()
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": CATGPT_ROLE,
-                },
-                {
-                    "role": "user",
-                    "content": full_sendout,
-                }
-            ]
-
-            if args.gpt4:
-                response = send_prompt_to_openai(messages, model_name='gpt-4')
-            else:
-                response = send_prompt_to_openai(messages)
-
-            if response:
-                retval = response['choices'][0]['message']['content']
-                endline = return_footer(response)
-                print_ascii_cat_with_text(params['context'], retval, endline)
-                Note.append(NOTEFILE, Note.jot(retval, **params))
-            else:
-                print("Failed to get response from OpenAI API.")
-        else: # yes pipe!
-            # when piping a file, not asking for confirmation
-            # as the file might be huge and we dont need to replicate
-            # it in the note itself.
-            # better know what you're sending with this one!
-
-            if is_binary_string(full_sendout):
-                print_ascii_cat_with_text("Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
-                                          "Try another file that is text-based, instead.", "")
-                exit(1)
-            elif len(full_sendout.encode('utf-8')) > 16384:
-                print_ascii_cat_with_text("Uh oh, the pipe I received seems to have too much data. "
-                                          f"It has exceeded the 16384 character context limit (data size: {len(piped_data)})", "")
-                exit(1)
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": CATGPT_ROLE,
-                },
-                {
-                    "role": "user",
-                    "content": full_sendout,
-                }
-            ]
-
-            if args.gpt4:
-                response = send_prompt_to_openai(messages, model_name='gpt-4')
-            else:
-                response = send_prompt_to_openai(messages)
-
-            if response:
-                retval = response['choices'][0]['message']['content']
-                endline = return_footer(response)
-                print_ascii_cat_with_text(params['context'], retval, endline)
-                Note.append(NOTEFILE, Note.jot(retval, **params))
-            else:
-                print("Failed to get response from OpenAI API.")
     # context-related functionality
     elif args.c:
         if sys.stdin.isatty(): # interactive tty, no pipe!
@@ -755,8 +649,135 @@ def main():
             'SLEEPING_CAT': ['zzz'],
             'CHAT': ['chat', 'catgpt', 'c'],
         }
+        IS_CHAT = False
+        try:
+            IS_CHAT = args.additional_args[0] in SHORTCUTS['CHAT']
+        except IndexError: #because no args were provided
+            pass
+
+        if IS_CHAT:
+            # gpt-related functionality
+            # INTRO AND TEXT are both are sent, in that order, to the GPT prompt.
+            # ChatGPT recommends asking the query (intro) before providing the data (message)
+            #
+            # 1- jot chat
+            #              (intro=<usertyped>,
+            #               text=,
+            #               msglen=msgsize)
+            # 2- jot chat 1719967764
+            #              (intro=,
+            #               text=note,
+            #               msglen=msgsize)
+            # 3- jot chat 1719967764 what is this about?
+            #              (intro='what is this about?',
+            #               text=note,
+            #               msglen=msgsize)
+            # 4- jot chat when is national take your cat to work day?
+            #              (intro='when is...',
+            #               text=,
+            #               msglen=0)
+            # 5- echo "tell me about national cat day" | jot chat
+            #              (intro='tell me about...',
+            #               text=,
+            #               msglen=msgsize)
+            # 6- echo "tell me about this file" | jot chat 1719967764
+            #              (intro='tell me about this file',
+            #               text=note,
+            #               msglen=)
+            # 7- cat requests | jot chat
+            #              (intro=requests (see bug desc below),
+            #               text=,
+            #               msglen=filesize)
+            # 8- cat requests | jot chat 1719967764
+            #              (intro=requests,
+            #               text=note,
+            #               msglen=)
+            # 9- cat broken.jot | jot chat how many notes are there?
+            #              (intro='how many notes...',
+            #               text=broken.jot,
+            #               msglen=msgsize)
+
+            intro = ""
+            txt = ""
+            txtlen = ""
+
+            if sys.stdin.isatty(): # interactive tty, no pipe!
+                # routes 1,2,3,4
+                try:
+                    timestamp_tgt = int(args.additional_args[1])
+                except IndexError:
+                    # route 1
+                    intro = flatten_pipe(sys.stdin.readlines())
+                except ValueError:
+                    # route 4
+                    intro = ' '.join(args.additional_args[1:])
+                else:
+                    # route 2 & 3
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
+                        txt = f"\n\n".join([str(inst) for inst in nc])
+
+                    intro = ' '.join(args.additional_args[2:])
+            else:
+                # routes 5,6,7,8,9
+                try:
+                    timestamp_tgt = int(args.additional_args[1])
+                except IndexError:
+                    # route 5 & 7
+                    # inconsistent assignment to vars since 5&7 are identical
+                    # but their meaningful input are reversed
+                    # thus 5 is working and 7 is reversed and cannot be 'fixed'
+                    # but considering the immediate prompt submission,
+                    # this is considered a non-issue
+                    intro = flatten_pipe(sys.stdin.readlines())
+                except ValueError:
+                    # route 9
+                    intro = ' '.join(args.additional_args[2:])
+                    txt = flatten_pipe(sys.stdin.readlines())
+                else:
+                    # route 6 & 8
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp_tgt)) as nc:
+                        txt = f"\n\n".join([str(inst) for inst in nc])
+                    intro = flatten_pipe(sys.stdin.readlines())
+
+            params['tag'] = "catgpt"
+            full_sendout = f"{intro}\n\n{txt}"
+
+            if len(args.additional_args) and args.additional_args[0] in ['home']:
+                from os import environ
+                params['pwd'] = environ['HOME']
+
+            if is_binary_string(full_sendout):
+                print_ascii_cat_with_text("Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
+                                          "Try another file that is text-based, instead.", "")
+                exit(1)
+            elif len(full_sendout.encode('utf-8')) > 16384:
+                print_ascii_cat_with_text("Uh oh, the pipe I received seems to have too much data. "
+                                          f"It has exceeded the 16384 character context limit (data size: {len(piped_data)})", "")
+                exit(1)
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": CATGPT_ROLE,
+                },
+                {
+                    "role": "user",
+                    "content": full_sendout,
+                }
+            ]
+
+            MODEL_TO_USE = 'gpt-4' if args.gpt4 else 'gpt-3.5-turbo'
+            response = send_prompt_to_openai(messages, model_name=MODEL_TO_USE)
+
+            if response:
+                retval = response['choices'][0]['message']['content']
+                endline = return_footer(response)
+                print_ascii_cat_with_text(intro, retval, endline)
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
-        if len(args.additional_args) == 0:
+        elif len(args.additional_args) == 0:
             # show all notes originating from this PWD
             from os import getcwd
             if sys.stdin.isatty():
@@ -901,50 +922,6 @@ def main():
                         print(f"{Note.LABEL_SEP}")
                         print(f"{matches} stray notes among")
                         print(f"{len(nc)} notes in total")
-            elif args.additional_args[0] in SHORTCUTS['CHAT']:
-                # submits the last note (in this dir) to an LLM-endpoint
-                from os import getcwd
-
-                last_note = "No notes to show.\n"
-                with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
-                    for inst in nc:
-                        last_note = inst
-                    else:
-                        if Note.USE_COLORIZATION:
-                            print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
-                        else:
-                            print("Sending prompt:")
-                        print()
-                        printout(last_note)
-                        if Note.USE_COLORIZATION:
-                            print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
-                        else:
-                            print(Note.LABEL_SEP)
-
-                try:
-                    throwaway = input("any key to submit above note (control-c to cancel)...")
-                except KeyboardInterrupt:
-                    exit(0)
-                else:
-                    print()
-
-                messages = [
-                    {
-                        "role": "system",
-                        "content": CATGPT_ROLE,
-                    },
-                    {
-                        "role": "user",
-                        "content": str(last_note),
-                    }
-                ]
-
-                response = send_prompt_to_openai(messages)
-                if response:
-                    endline = return_footer(response)
-                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'], endline)
-                else:
-                    print("Failed to get response from OpenAI API.")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS['MATCH_NOTE_NAIVE']:
@@ -1161,55 +1138,6 @@ def main():
                         printout(last_notes[-record_count_to_show])
                     except IndexError:
                         pass
-            elif args.additional_args[0] in SHORTCUTS['CHAT']:
-                # submits the last note (in this dir) to an LLM-endpoint
-                # or alternatively, send it a prompt enclosed in quotes
-                full_msg = ""
-                flattened = ""
-                try:
-                    flattened = int(args.additional_args[1])
-                    if flattened: # if truthy, e.g., timestamp, use it for search
-                        with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
-                            full_msg = f"\n\n".join([str(inst) for inst in nc])
-                            print(full_msg)
-                except ValueError:
-                    # if not a timestamp, just send it directly as is
-                    full_msg = args.additional_args[1]
-                    if Note.USE_COLORIZATION:
-                        print(f"{AnsiColor.MAGENTA.value}Sending prompt:{AnsiColor.RESET.value}")
-                    else:
-                        print("Sending prompt:")
-                    print()
-                    printout(full_msg)
-                    if Note.USE_COLORIZATION:
-                        print(f"{AnsiColor.MAGENTA.value}{Note.LABEL_SEP}{AnsiColor.RESET.value}")
-                    else:
-                        print(Note.LABEL_SEP)
-
-                try:
-                    throwaway = input("any key to submit above note (control-c to cancel)...")
-                except KeyboardInterrupt:
-                    exit(0)
-                else:
-                    print()
-
-                messages = [
-                    {
-                        "role": "system",
-                        "content": CATGPT_ROLE,
-                    },
-                    {
-                        "role": "user",
-                        "content": full_msg,
-                    }
-                ]
-
-                response = send_prompt_to_openai(messages)
-                if response:
-                    endline = return_footer(response)
-                    print_ascii_cat_with_text(full_msg, response['choices'][0]['message']['content'], endline)
-                else:
-                    print("Failed to get response from OpenAI API.")
 
 if __name__ == "__main__":
     main()
