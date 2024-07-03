@@ -524,7 +524,8 @@ def main():
     parser.add_argument("-c", action="store_const", const="context", help="search notes by context / read pipe into context as amendment")
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument("-d", action="store_true", help="only return (date)/timestamps for match")
-    parser.add_argument("-gpt", action="store_true", help="create new note from gpt reply to pipe")
+    parser.add_argument("-gpt", action="store_true", help="create new note from gpt-3.5")
+    parser.add_argument("-gpt4", action="store_true", help="create new note from gpt-4")
 
     args = parser.parse_args()
 
@@ -585,7 +586,7 @@ def main():
         exit(0) # end logic for amending
 
     # gpt-related functionality
-    if args.gpt:
+    if args.gpt or args.gpt4:
         # this happens for interactive or not
         params['tag'] = "catgpt"
         piped_data = flatten_pipe(sys.stdin.readlines())
@@ -638,14 +639,17 @@ def main():
                 }
             ]
 
-            response = send_prompt_to_openai(messages)
+            if args.gpt4:
+                response = send_prompt_to_openai(messages, model_name='gpt-4')
+            else:
+                response = send_prompt_to_openai(messages)
 
             if response:
                 retval = response['choices'][0]['message']['content']
                 prompt_tokens = response['usage']['prompt_tokens']
-                output_tokens = response['usage']['prompt_tokens']
-                engine = response['model']
-                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={engine})"
+                output_tokens = response['usage']['completion_tokens']
+                model_name = response['model']
+                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
                 print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
@@ -676,13 +680,17 @@ def main():
                 }
             ]
 
-            response = send_prompt_to_openai(messages)
+            if args.gpt4:
+                response = send_prompt_to_openai(messages, model_name='gpt-4')
+            else:
+                response = send_prompt_to_openai(messages)
+
             if response:
                 retval = response['choices'][0]['message']['content']
                 prompt_tokens = response['usage']['prompt_tokens']
-                output_tokens = response['usage']['prompt_tokens']
-                engine = response['model']
-                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={engine})"
+                output_tokens = response['usage']['completion_tokens']
+                model_name = response['model']
+                endline = f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
                 print_ascii_cat_with_text(params['context'], retval, endline)
                 Note.append(NOTEFILE, Note.jot(retval, **params))
             else:
