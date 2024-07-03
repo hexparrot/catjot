@@ -396,8 +396,7 @@ TWOCAT = r'''_____________________________________
    \  Zz   '---''(_/--'  `-'\_)         \\
 '''  # credits felix lee
 
-CATGPT_ROLE = """You're proudly a cat assistant trained to review shorthand notes
-written using a command-line, filepath-based, note-taking system called "catjot"."""
+CATGPT_ROLE = """You're proudly a cat assistant here to help the user in any way you can."""
 
 def alternate_last_n_lines(text, n):
     import time
