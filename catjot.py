@@ -740,11 +740,11 @@ def main():
             if is_binary_string(full_sendout):
                 print_ascii_cat_with_text("Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
                                           "Try another file that is text-based, instead.", "")
-                exit(1)
+                sys.exit(1)
             elif len(full_sendout.encode('utf-8')) > 16384:
                 print_ascii_cat_with_text("Uh oh, the pipe I received seems to have too much data. "
                                           f"It has exceeded the 16384 character context limit (data size: {len(full_sendout)})", "")
-                exit(1)
+                sys.exit(1)
 
             messages = [
                 {
