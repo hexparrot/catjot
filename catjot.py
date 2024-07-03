@@ -661,41 +661,32 @@ def main():
             # ChatGPT recommends asking the query (intro) before providing the data (message)
             #
             # 1- jot chat
-            #              (intro=<usertyped>,
+            #               intro=<usertyped>,
             #               text=,
-            #               msglen=msgsize)
             # 2- jot chat 1719967764
-            #              (intro=,
+            #               intro=,
             #               text=note,
-            #               msglen=msgsize)
             # 3- jot chat 1719967764 what is this about?
-            #              (intro='what is this about?',
+            #               intro='what is this about?',
             #               text=note,
-            #               msglen=msgsize)
             # 4- jot chat when is national take your cat to work day?
-            #              (intro='when is...',
+            #               intro='when is...',
             #               text=,
-            #               msglen=0)
             # 5- echo "tell me about national cat day" | jot chat
-            #              (intro='tell me about...',
+            #               intro='tell me about...',
             #               text=,
-            #               msglen=msgsize)
             # 6- echo "tell me about this file" | jot chat 1719967764
-            #              (intro='tell me about this file',
+            #               intro='tell me about this file',
             #               text=note,
-            #               msglen=)
             # 7- cat requests | jot chat
-            #              (intro=requests (see bug desc below),
+            #               intro=requests (see bug desc below),
             #               text=,
-            #               msglen=filesize)
             # 8- cat requests | jot chat 1719967764
-            #              (intro=requests,
+            #               intro=requests,
             #               text=note,
-            #               msglen=)
             # 9- cat broken.jot | jot chat how many notes are there?
-            #              (intro='how many notes...',
+            #               intro='how many notes...',
             #               text=broken.jot,
-            #               msglen=msgsize)
 
             intro = ""
             txt = ""
@@ -731,7 +722,7 @@ def main():
                     intro = flatten_pipe(sys.stdin.readlines())
                 except ValueError:
                     # route 9
-                    intro = ' '.join(args.additional_args[2:])
+                    intro = ' '.join(args.additional_args[1:])
                     txt = flatten_pipe(sys.stdin.readlines())
                 else:
                     # route 6 & 8
