@@ -15,6 +15,12 @@ from os import getcwd, remove, environ
 TMP_CATNOTE=".catjot"
 FIXED_CATNOTE="example.jot"
 
+
+def strip_ansi_codes(text):
+    import re
+    ansi_escape = re.compile(r'\x1b\[([0-9]+)(;[0-9]+)*m')
+    return ansi_escape.sub('', text)
+
 class TestTaker(unittest.TestCase):
     def setup(self):
         pass
@@ -196,7 +202,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.TREE, getcwd())))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
@@ -204,7 +210,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.TREE, getcwd())))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string(self):
         thenote = "notes can sometimes\ntake two lines"
@@ -212,7 +218,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "take")))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string_with_empty_lines(self):
         thenote = "notes can sometimes\n\n\n\ntake many lines"
@@ -220,7 +226,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "many")))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string_insensitive(self):
         thenote = "notes can sometimes\nTAKE two lines"
@@ -228,7 +234,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "take")))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string_with_empty_lines_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
@@ -236,7 +242,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "MANY")))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_search_multi_line_string_with_split_words_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
@@ -244,7 +250,7 @@ class TestTaker(unittest.TestCase):
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "MANY")))
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n")
 
     def test_creating_label(self):
         thenote = "notes take labels now"
@@ -253,7 +259,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.tag, "secret")
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[secret]\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n[secret]\n{thenote}\n")
 
     def test_adding_context(self):
         thenote = ".bash_profile"
@@ -262,7 +268,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.context, "ls /home/user")
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n% ls /home/user\n{thenote}\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n% ls /home/user\n{thenote}\n")
 
         multi = Note.iterate(FIXED_CATNOTE)
         inst = next(multi)
@@ -450,9 +456,9 @@ class TestTaker(unittest.TestCase):
 
         dt = datetime.fromtimestamp(inst.now)
         friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\n% adoption\nhello\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n[project1]\n% adoption\nhello\n")
         inst.tag = "blamo"
-        self.assertEqual(str(inst), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\n% adoption\nhello\n")
+        self.assertEqual(strip_ansi_codes(str(inst)), f"> cd {inst.pwd}\n# date {friendly_date}\n[blamo]\n% adoption\nhello\n")
 
     def test_show_only_tagged_by(self):
         iters = 0
