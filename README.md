@@ -257,6 +257,8 @@ $ jot -d match なまえ
 $
 ```
 
+## Added Functionalities
+
 ### Line-by-Line Transcribing, Side-by-Side Layout
 
 Line-by-line transcribing creates a new note while while feeding you each line from an existing note. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
@@ -285,4 +287,64 @@ terminal_width : 138
 ```
 
 * Text revision - Output from `tesseract` optical-character recognition software for linux produces plain-text files easily digestible and rewritten for proofing of documents.
+
+
+### CATGPT, endpoint-based GPT plugin
+
+Currently designed around OpenAI's ChatGPT Platform API, for use with GPT 3.5 and 4.0.
+Set the variable `openai_api_key`; example for bash-shell below:
+
+export openai_api_key=sk-proj-...BEEF"
+
+There are two different GPT-enhanced functionalities, CHAT and CONVO:
+
+#### jot chat syntax 
+
+Quick reference guide for most usable chat functionality (see catjoy.py for full list).
+
+```
+$ jot chat <enter>
+         # allows you to freetype a prompt to send to chatgpt
+
+$ jot chat 1719967764 rewrite this for me in python3
+         # Good use case! accompany the note with a direct prompt
+
+$ jot chat when is national take your cat to work day?
+         # submit a context-free prompt
+
+$ echo "tell me about national cat day" | jot chat
+         # submit a context-free prompt
+
+$ cat README.md | how do i tag notes?
+         # Good use case! accompany the note with a direct prompt
+
+$ cat expenses.csv | jot chat 1719967764 how much is this costing me a month?
+         # Good use case! accompany the csv+note with a direct prompt
+```
+
+Example Output 1: Request gpt review a file with your provided prompt
+
+```
+$ cat README.md | jot chat how do i tag notes?
+ /\_/\   how do i tag notes?
+( o.o )  
+ > ^ <   
+         
+To tag notes in the `cat|jot` application, you can use the `-at` flag followed by the tag you want to assign to the note. Here's how you can tag notes using different scenarios:
+...snipped...
+END (prompt tokens=2949, output_tokens=290, model=gpt-3.5-turbo-0125)
+```
+
+Example Output 2: Pass -gpt4 to enable the 4.0 model with increased capability and cost. 
+
+```
+$ cat README.md | jot -gpt4 chat summarize what this application can do
+ /\_/\   summarize what this application can do
+( o.o )  
+ > ^ <   
+         
+This application, affectionately known as `catjot`, is a cat-themed note-taking command-line app. Below are the main functionalities and features of the app:
+...snipped...
+END (prompt tokens=2949, output_tokens=465, model=gpt-4-0613)
+```
 
