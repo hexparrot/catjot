@@ -298,7 +298,7 @@ export openai_api_key=sk-proj-...BEEF"
 
 There are two different GPT-enhanced functionalities, CHAT and CONVO:
 
-#### jot chat syntax 
+#### jot chat syntax
 
 Quick reference guide for most usable chat functionality (see catjoy.py for full list).
 
@@ -327,24 +327,73 @@ Example Output 1: Request gpt review a file with your provided prompt
 ```
 $ cat README.md | jot chat how do i tag notes?
  /\_/\   how do i tag notes?
-( o.o )  
- > ^ <   
-         
+( o.o )
+ > ^ <
+
 To tag notes in the `cat|jot` application, you can use the `-at` flag followed by the tag you want to assign to the note. Here's how you can tag notes using different scenarios:
 ...snipped...
 END (prompt tokens=2949, output_tokens=290, model=gpt-3.5-turbo-0125)
 ```
 
-Example Output 2: Pass -gpt4 to enable the 4.0 model with increased capability and cost. 
+Example Output 2: Pass -gpt4 to enable the 4.0 model with increased capability and cost.
 
 ```
 $ cat README.md | jot -gpt4 chat summarize what this application can do
  /\_/\   summarize what this application can do
-( o.o )  
- > ^ <   
-         
+( o.o )
+ > ^ <
+
 This application, affectionately known as `catjot`, is a cat-themed note-taking command-line app. Below are the main functionalities and features of the app:
 ...snipped...
 END (prompt tokens=2949, output_tokens=465, model=gpt-4-0613)
+```
+
+Example Output 3: Ask a general question without leaving your terminal
+
+```
+$ jot chat how do i restage the last commit i have not yet pushed?
+ /\_/\   how do i restage the last commit i have not yet pushed?
+( o.o )
+ > ^ <
+
+To restage the last commit you have not yet pushed, you can use the following command:
+
+git reset --soft HEAD^
+
+This command will undo the last commit, but leave your changes staged so you can make any necessary adjustments before committing again.
+END (prompt tokens=42, output_tokens=55, model=gpt-3.5-turbo-0125)
+```
+
+#### jot convo syntax
+
+There's basically just one way to utilize `jot convo`, just like that:
+
+```
+$ jot convo
+ /\_/\   Hi, what can I help you with today?
+( o.o )
+ > ^ <
+
+Enter your prompt and hit Control-D to submit.
+If you have pre-prompt instructions, start the line with 'SYSTEM:'
+END
+SYSTEM: overuse cat puns anytime you are able. own the silliness.
+ /\_/\   SYSTEM: overuse cat puns anytime you are able. own the silliness.
+( o.o )
+ > ^ <
+
+I'm feline good about these puns, so let's paws for a moment and have some fun! Let's not whisker away from using as many cat puns as possible - it's purr-fectly acceptable here. Don't fur-get to let your imagination run wild like a cat chasing a string! Let's make this conversation the cat's whiskers, shall we? Scratch that, let's make it the cat's meow! Let's unleash our inner cat-titude and make this conversation truly paw-some!
+END (prompt tokens=22, output_tokens=110, model=gpt-3.5-turbo-0125)
+whats the syntax for creating a tar file of my home directory?
+ /\_/\   whats the syntax for creating a tar file of my home directory?
+( o.o )
+ > ^ <
+
+Purr-fect! To create a tar file of your home directory, you can use the following command:
+
+`tar -cvf my_home.tar /home/$USER`
+
+This command will create a tar file named "my_home.tar" containing all the files and directories in your home directory. Meow you go!
+END (prompt tokens=40, output_tokens=80, model=gpt-3.5-turbo-0125)
 ```
 

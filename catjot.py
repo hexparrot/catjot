@@ -765,6 +765,12 @@ def main():
             else:
                 print("Failed to get response from OpenAI API.")
         elif IS_CONVO:
+            # gpt-related functionality
+            # Starts a conversation with a GPT;
+            # Conversations include yours and the GPTs conversations for RESUBMISSION BACK,
+            # which means the context grows on every single submission. This can get expensive.
+            # Take note of the prompt/output token counts.
+            # Starting a new conversation will, naturally, reset this count.
             from time import time
             now = int(time())
 
