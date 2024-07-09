@@ -422,20 +422,23 @@ def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
     from os import getenv
 
     api_key = getenv('openai_api_key')
+    api_url = getenv('openai_api_url', 'https://api.openai.com/v1/chat/completions')
     # set this key in your shell, e.g., this line in your ~/.bash_profile:
     #export openai_api_key="sk-proj...8EEF"
-    url = 'https://api.openai.com/v1/chat/completions'
     headers = {
-        'Authorization': f'Bearer {api_key}',
         'Content-Type': 'application/json'
     }
+
+    if api_url.startswith('https://api.openai.com'):
+        headers['Authorization'] = f'Bearer {api_key}'
+
     data = {
         "model": model_name,
         "messages": messages
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(api_url, headers=headers, json=data)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
