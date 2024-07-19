@@ -826,10 +826,13 @@ def main():
                     "",
                 )
                 sys.exit(1)
-            elif len(full_sendout.encode("utf-8")) > 16384:
+            elif len(full_sendout.encode("utf-8")) > 512000:
+                # 512000 bytes is an estimation of 128000 tokens * 4 bytes
+                # a real tokenizer might be better, but this approximation
+                # should be sufficient and cost-proTECtive ($0.15/million tokens)
                 print_ascii_cat_with_text(
                     "Uh oh, the pipe I received seems to have too much data. "
-                    f"It has exceeded the 16384 character context limit (data size: {len(full_sendout)})",
+                    f"It has exceeded the 512000 character context limit (data size: {len(full_sendout)})",
                     "",
                 )
                 sys.exit(1)
