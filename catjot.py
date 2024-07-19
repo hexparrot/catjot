@@ -453,7 +453,7 @@ def alternate_last_n_lines(text, n):
             print(" " * len(lines[i]), end="\r")
 
 
-def send_prompt_to_openai(messages, model_name="gpt-3.5-turbo"):
+def send_prompt_to_openai(messages, model_name="gpt-4o-mini"):
     # sends a prompt and receives the response in a json object
     # from the openai gpt completion api
     import requests
@@ -596,7 +596,9 @@ def main():
         "-d", action="store_true", help="only return (date)/timestamps for match"
     )
     parser.add_argument(
-        "-gpt4", action="store_true", help="use gpt-4 for CHAT functionality"
+        "-gpt4",
+        action="store_true",
+        help="use gpt-4o (not mini) for CHAT functionality",
     )
 
     args = parser.parse_args()
@@ -843,7 +845,7 @@ def main():
                 },
             ]
 
-            MODEL_TO_USE = "gpt-4" if args.gpt4 else "gpt-3.5-turbo"
+            MODEL_TO_USE = "gpt-4o" if args.gpt4 else "gpt-4o-mini"
             response = send_prompt_to_openai(messages, model_name=MODEL_TO_USE)
 
             if response:
