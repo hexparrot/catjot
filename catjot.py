@@ -462,6 +462,7 @@ def send_prompt_to_openai(messages, model_name="gpt-4o-mini"):
 
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url", "https://api.openai.com/v1/chat/completions")
+    api_model = getenv("openai_api_model", model_name)
     # set this key in your shell, e.g., this line in your ~/.bash_profile:
     # export openai_api_key="sk-proj...8EEF"
     headers = {"Content-Type": "application/json"}
@@ -469,7 +470,7 @@ def send_prompt_to_openai(messages, model_name="gpt-4o-mini"):
     if api_url.startswith("https://api.openai.com"):
         headers["Authorization"] = f"Bearer {api_key}"
 
-    data = {"model": model_name, "messages": messages}
+    data = {"model": api_model, "messages": messages}
 
     try:
         response = requests.post(api_url, headers=headers, json=data)
