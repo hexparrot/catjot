@@ -453,7 +453,7 @@ def alternate_last_n_lines(text, n):
             print(" " * len(lines[i]), end="\r")
 
 
-def send_prompt_to_openai(messages, model_name="gpt-4o-mini"):
+def send_prompt_to_openai(messages, model_name):
     # sends a prompt and receives the response in a json object
     # from the openai gpt completion api
     import requests
@@ -587,6 +587,9 @@ def main():
         "-p", type=str, help="search notes by pwd / set pwd when amending"
     )
     parser.add_argument(
+        "-m", type=str, default="gpt-4o-mini", help="LLM model to engage"
+    )
+    parser.add_argument(
         "-c",
         action="store_const",
         const="context",
@@ -595,11 +598,6 @@ def main():
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument(
         "-d", action="store_true", help="only return (date)/timestamps for match"
-    )
-    parser.add_argument(
-        "-gpt4",
-        action="store_true",
-        help="use gpt-4o (not mini) for CHAT functionality",
     )
 
     args = parser.parse_args()
@@ -849,8 +847,7 @@ def main():
                 },
             ]
 
-            MODEL_TO_USE = "gpt-4o" if args.gpt4 else "gpt-4o-mini"
-            response = send_prompt_to_openai(messages, model_name=MODEL_TO_USE)
+            response = send_prompt_to_openai(messages, model_name=args.m)
 
             if response:
                 retval = response["choices"][0]["message"]["content"]
@@ -897,8 +894,7 @@ def main():
                 else:
                     messages.append({"role": "user", "content": user_input})
 
-                MODEL_TO_USE = "gpt-4" if args.gpt4 else "gpt-3.5-turbo"
-                response = send_prompt_to_openai(messages, model_name=MODEL_TO_USE)
+                response = send_prompt_to_openai(messages, model_name=args.m)
 
                 if response:
                     retval = response["choices"][0]["message"]["content"]
