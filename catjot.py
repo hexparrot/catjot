@@ -902,6 +902,7 @@ def main():
 
                 if response:
                     retval = response["choices"][0]["message"]["content"]
+                    messages.append({"role": "assistant", "content": retval})
                     endline = return_footer(response)
                     print_ascii_cat_with_text(user_input, retval, endline)
                     params["context"] = user_input
