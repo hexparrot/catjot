@@ -675,7 +675,10 @@ def main():
             piped_data = flatten_pipe(sys.stdin.readlines())
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
-    elif args.t:
+    elif args.t and "continue" not in args.additional_args:
+        # special case "continue" allows dropping past this specific elif
+        # and allows evaluation below for IS_CONVO
+        # continue only works with [tags]
         if sys.stdin.isatty():  # interactive tty, no pipe!
             # jot -t project2
             # not intending to amend instead means match by tag field
@@ -718,7 +721,7 @@ def main():
             "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
             "SLEEPING_CAT": ["zzz"],
             "CHAT": ["chat", "catgpt", "c"],
-            "CONVO": ["convo", "talk", "conv"],
+            "CONVO": ["convo", "talk", "conv", "continue"],
         }
 
         IS_CHAT = False
@@ -876,6 +879,14 @@ def main():
 
             messages = []
             user_input = ""
+
+            if args.t and "continue" in args.additional_args:
+                with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                    for inst in nc:
+                        # prefill messages with the user and assistant content previously written
+                        messages.append({"role": "user", "content": inst.context})
+                        messages.append({"role": "assistance", "content": inst.message})
+
             while True:
                 try:
                     user_input = flatten_pipe(sys.stdin.readlines())
