@@ -576,7 +576,40 @@ class NoteContext:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="cat|jot notetaker")
+    parser = argparse.ArgumentParser(
+        description="cat|jot notetaker",
+        epilog="additional usage examples-\n"
+        "the abbreviated and (parenthesized) forms are both acceptable:\n\n"
+        "  jot c 16952...   (catgpt)/send note matching timestamp to openai endpoint.\n"
+        "  jot d            (dump)/show all notes from all time, everywhere\n"
+        "  jot h            show note (head)--show the last 1 note written, among all notes\n"
+        "  jot h 3          show note (head)--show the last n notes written, among all notes\n"
+        "  jot h ~3         show note (head)--show n-th from last note, among all notes\n"
+        "  jot home         show (home)notes (shorthand to your home dir, like a catch-all)\n"
+        "  jot l            show (last) written note from this directory only\n"
+        "  jot l 3          show (last) n written notes from this directory only\n"
+        "  jot l ~3         show n-th to (last) written note, from this directory only\n"
+        "  jot m Milo       (match) case-sensitive <term> within message payload\n"
+        "  jot p            (pop)/delete the last-written note in this pwd\n"
+        "  jot pl           show last-written note, message (payload) only, omitting headers\n"
+        "  jot pl 16952...  show note matching timestamp/s, concatenated, message (payload) only\n\n"
+        "  jot r 16952...   (remove) note/s matching timestamp value\n"
+        "  jot s tabby      (search) case-insensitive <term> within message payload\n"
+        "  jot scoop        (scoop) list all notes in $EDITOR, allowing bulk deleting of records\n"
+        "  jot stray        display all (strays) which are notes whose pwd no longer exist in this filesystem\n"
+        "  jot ts 16952...  search all notes, filtering by (timestamp)\n\n"
+        "  jot chat xxxx    (chat) with catgpt, sending a single line/jot/pipe to an openai api endpoint.\n"
+        "                   you can also pipe to it: `cat myfile | jot chat summarize this for me`\n"
+        "  jot convo        (convo) have an extended conversation, where each user prompt and gpt reply\n"
+        "                   is accumulated and resubmitted as complete context.\n"
+        "                   you can also continue a conversation using the tagging system:\n"
+        "  jot -t convo-1695220591 continue\n"
+        "                   'continue'/start a new convo with the all notes matching <tag> supplied as context.\n"
+        "  jot zzz          take a nap with a kitten...\n"
+        "  jot sbs 16952..  side-by-side transcription practice mode\n"
+        "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     parser.add_argument(
         "-a", action="store_true", help="amend last note instead of creating new note"
     )
