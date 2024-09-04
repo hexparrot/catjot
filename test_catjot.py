@@ -499,6 +499,23 @@ class TestTaker(unittest.TestCase):
         with self.assertRaises(StopIteration):
             inst = next(multi)
 
+    def test_handle_jotting_into_self(self):
+        multi = Note.iterate("broken2.jot")
+        inst = next(multi)  # ^-^ data case
+        self.assertEqual(inst.now, 1725412377)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertTrue(inst.message.endswith("What would you like to do?\n"))
+
+        # here is a second note, that should NOT be parsed
+
+        inst = next(multi)
+        self.assertEqual(inst.now, 1725412481)
+        self.assertEqual(inst.pwd, "/home/user")
+        self.assertEqual(inst.message, "This should be captured\n")
+
+        with self.assertRaises(StopIteration):
+            inst = next(multi)
+
     def test_tag_header(self):
         inst = next(Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")))
         self.assertEqual(inst.tag, "project1")

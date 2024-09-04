@@ -1,0 +1,25 @@
+^-^
+Directory:/home/user
+Date:1725412377
+Tag:convo-1725412375
+Context:^-^
+> cd /home/user
+# date 2024-09-03 18:06:33 (1725411993)
+[convo-1725411988]
+% SYSTEM: you are a helpful AI
+I'm happy to assist you. What would you like to do?
+
+^-^
+> cd /home/user
+# date 2024-09-03 18:06:46 (1725412006)
+[convo-1725411988]
+% i need help understanding python
+Sure, what can I help you with specifically?
+
+^-^
+Directory:/home/user
+Date:1725412481
+Tag:convo-1725412408
+Context:
+Message:This should be captured
+

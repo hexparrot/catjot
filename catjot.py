@@ -319,12 +319,20 @@ class Note(object):
                 else:
                     if current_record and Note.LABEL_PWD not in current_record[0]:
                         # if its reading a line, but the first of this record
-                        current_record = last_record[0:3]  # pwd, now, tag
-                        current_record.append(
-                            f"{Note.LABEL_CTX}Unexpected new-record line found in data.\n"
-                            + f"Salvaging remaining note into this new note.\n"
-                            + f"Ignore this line up to and including Date above, to restore original form."
-                        )
+                        try:
+                            current_record = last_record[0:3]  # pwd, now, tag
+                        except TypeError:
+                            # faulty jot in file, such as record separator
+                            # being piped in from jot into jot
+                            current_record = []
+                            last_line = ""
+                            continue
+                        else:
+                            current_record.append(
+                                f"{Note.LABEL_CTX}Unexpected new-record line found in data.\n"
+                                + f"Salvaging remaining note into this new note.\n"
+                                + f"Ignore this line up to and including Date above, to restore original form."
+                            )
                         # Adding context to this new note about why it now exists
 
                     current_record.append(line)
