@@ -926,7 +926,11 @@ def main():
             if args.t and "continue" in args.additional_args:
                 provided_args = list(args.additional_args)
                 provided_args.remove("continue")
-                timestamp = int(provided_args[0]) if provided_args[0].isdigit() else 0
+                timestamp = (
+                    int(provided_args[0])
+                    if len(provided_args) and provided_args[0].isdigit()
+                    else 0
+                )
 
                 with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
                     value_matched = False
