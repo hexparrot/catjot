@@ -613,6 +613,8 @@ def main():
         "                   you can also continue a conversation using the tagging system:\n"
         "  jot -t convo-1695220591 continue\n"
         "                   'continue'/start a new convo with the all notes matching <tag> supplied as context.\n"
+        "  jot -t convo-1695220591 continue 1695220600\n"
+        "                   'continue'/start a new convo using the tag chain including up and until <timestamp>\n"
         "  jot zzz          take a nap with a kitten...\n"
         "  jot sbs 16952..  side-by-side transcription practice mode\n"
         "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n",
@@ -922,8 +924,19 @@ def main():
             user_input = ""
 
             if args.t and "continue" in args.additional_args:
+                provided_args = list(args.additional_args)
+                provided_args.remove("continue")
+                timestamp = int(provided_args[0]) if provided_args[0].isdigit() else 0
+
                 with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                    value_matched = False
                     for inst in nc:
+                        if timestamp:
+                            if inst.now == timestamp:
+                                value_matched = True
+                                printout(inst)
+                            elif value_matched:
+                                break  # hits only after timestamp is hit AND all matching timestamps
                         # prefill messages with the user and assistant content previously written
                         messages.append({"role": "user", "content": inst.context})
                         messages.append({"role": "assistance", "content": inst.message})
