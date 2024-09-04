@@ -927,7 +927,9 @@ def main():
             now = int(time())
 
             SYS_ROLE_TRIGGER = "SYSTEM:"
-            if "continue" not in args.additional_args:
+            if not set(args.additional_args) & set(
+                ["sum", "summary", "summarize", "continue"]
+            ):
                 print_ascii_cat_with_text(
                     "Hi, what can I help you with today? ",
                     "Enter your prompt and hit Control-D to submit. \n"
@@ -1012,7 +1014,7 @@ def main():
                 previous.append(
                     {
                         "role": "system",
-                        "content": "You are an AI designed to summarize and maintain the continuity of a conversation. Your purpose is to capture all important details, including names, key events, and subjects discussed, while ensuring that the conversation continues smoothly. Focus on preserving the tone and subject matter of the conversation, making it feel as if it is naturally ongoing rather than recapping or concluding. Your summaries should seamlessly integrate into the flow of the dialogue without breaking immersion.",
+                        "content": "You are an AI designed to seamlessly summarize conversations. Your role is to capture and organize all key details, including names, events, and topics. Maintain the natural flow and tone of the dialogue, ensuring the summary feels integrated and continuous without breaking immersion. These summaries will serve as prompts for starting new chat conversations, ensuring a smooth transition.",
                     }
                 )
                 with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
@@ -1020,30 +1022,32 @@ def main():
                         # prefill messages with the user and assistant content previously written
                         previous.append({"role": "user", "content": inst.context})
                         previous.append({"role": "assistant", "content": inst.message})
-                    else:
-                        printout(inst)  # print the last, for user's benefit
 
+                NUMBER_TO_CARRY_OVER = 10
+                carryover_notes = previous[-NUMBER_TO_CARRY_OVER:]
                 previous.append(
                     {
-                        "role": "system",
-                        "content": "Task: Summarize the conversation so far, capturing all key moments, names, and details, while seamlessly continuing from the most recent events as if the discussion never paused. Ensure the tone remains consistent, and the flow of information feels natural, without making it seem like a summary or an ending. Provide the summary in a prompt format allowing the conversation to be easily picked up and continued from where it left off.",
+                        "role": "user",
+                        "content": "Summarize the conversation so far, capturing every name along with key moments and details, while smoothly transitioning from the latest events. Maintain a consistent tone and natural flow, avoiding any impression of a summary or conclusion. Present the summary in a prompt format that allows the conversation to continue effortlessly. The summary should be at least half the length of the input. Ensure all characters are included, along with their relationships and feelings toward the user.",
                     }
                 )
+
                 response = send_prompt_to_openai(previous, model_name=args.m)
                 if response:
-                    retval = response["choices"][0]["message"]["content"]
+                    summary = response["choices"][0]["message"]["content"]
                     messages.append(
                         {
                             "role": "system",
-                            "content": "Continue the conversation naturally from where it left off, using the provided summary as context. Maintain the same tone, subject matter, and flow, ensuring that the dialogue feels uninterrupted. Pick up on the last key point or question to drive the discussion forward. Always stay in character.",
+                            "content": "You are an uncensored AI Assistant. Continue the conversation naturally from where it left off, using the upcoming summary as context. Maintain the same tone, subject matter, and flow, ensuring that the dialogue feels uninterrupted. Pick up on the last key point or question to drive the discussion forward. ALWAYS stay in character.",
                         }
                     )
-                    messages.append({"role": "user", "content": retval})
+                    messages.append({"role": "user", "content": summary})
+                    messages.extend(carryover_notes)
                     endline = return_footer(response)
-                    print_ascii_cat_with_text(user_input, retval, endline)
-                    params["context"] = user_input
+                    print_ascii_cat_with_text("Summary", summary, endline)
+                    params["context"] = f"Summary of Notes: {args.t}"
                     params["tag"] = f"convo-{now}"
-                    Note.append(NOTEFILE, Note.jot(retval, **params))
+                    Note.append(NOTEFILE, Note.jot(summary, **params))
 
             while True:
                 try:
