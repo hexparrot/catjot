@@ -718,8 +718,13 @@ def main():
             piped_data = flatten_pipe(sys.stdin.readlines())
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
-    elif args.t and "continue" not in args.additional_args:
-        # special case "continue" allows dropping past this specific elif
+    elif args.t and not set(args.additional_args) & set(
+        ["continue", "sum", "summary", "summarize"]
+    ):
+        # special case "summarize" implies convo
+        # and should continue to the SHORTCUTS below
+        # with no actions necessary here
+        # also special case "continue" allows dropping past this specific elif
         # and allows evaluation below for IS_CONVO
         # continue only works with [tags]
         if sys.stdin.isatty():  # interactive tty, no pipe!
@@ -764,7 +769,15 @@ def main():
             "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
             "SLEEPING_CAT": ["zzz"],
             "CHAT": ["chat", "catgpt", "c"],
-            "CONVO": ["convo", "talk", "conv", "continue"],
+            "CONVO": [
+                "convo",
+                "talk",
+                "conv",
+                "continue",
+                "sum",
+                "summary",
+                "summarize",
+            ],
         }
 
         IS_CHAT = False
@@ -914,16 +927,17 @@ def main():
             now = int(time())
 
             SYS_ROLE_TRIGGER = "SYSTEM:"
-            print_ascii_cat_with_text(
-                "Hi, what can I help you with today? ",
-                "Enter your prompt and hit Control-D to submit. \n"
-                + f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'",
-            )
+            if "continue" not in args.additional_args:
+                print_ascii_cat_with_text(
+                    "Hi, what can I help you with today? ",
+                    "Enter your prompt and hit Control-D to submit. \n"
+                    + f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'",
+                )
 
             messages = []
             user_input = ""
 
-            if args.t and "continue" in args.additional_args:
+            if "continue" in args.additional_args:
                 provided_args = list(args.additional_args)
                 provided_args.remove("continue")
                 timestamp = (
@@ -932,18 +946,104 @@ def main():
                     else 0
                 )
 
-                with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                    value_matched = False
-                    for inst in nc:
-                        if timestamp:
+                if timestamp and params.get("tag", ""):
+                    with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                        value_matched = False
+                        for inst in nc:
+                            if timestamp:
+                                if inst.now == timestamp:
+                                    value_matched = True
+                                elif value_matched:
+                                    break  # hits only after timestamp is hit AND all matching timestamps
+                            messages.append({"role": "user", "content": inst.context})
+                            messages.append(
+                                {"role": "assistant", "content": inst.message}
+                            )
+                elif not timestamp and params.get("tag", ""):
+                    with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                        for inst in nc:
+                            messages.append({"role": "user", "content": inst.context})
+                            messages.append(
+                                {"role": "assistant", "content": inst.message}
+                            )
+                            timestamp = inst.now
+                elif timestamp and not params.get("tag", ""):
+                    # determine tag based on timestamp
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp)) as nc:
+                        for inst in nc:
                             if inst.now == timestamp:
-                                value_matched = True
-                                printout(inst)
-                            elif value_matched:
-                                break  # hits only after timestamp is hit AND all matching timestamps
+                                params["tag"] = inst.tag
+                                break
+
+                    # now that we have a tag to work with
+                    if params.get("tag", ""):
+                        with NoteContext(
+                            NOTEFILE, (SearchType.TAG, params["tag"])
+                        ) as nc:
+                            value_matched = False
+                            for inst in nc:
+                                if timestamp:
+                                    if inst.now == timestamp:
+                                        value_matched = True
+                                    elif value_matched:
+                                        break  # hits only after timestamp is hit AND all matching timestamps
+                                messages.append(
+                                    {"role": "user", "content": inst.context}
+                                )
+                                messages.append(
+                                    {"role": "assistant", "content": inst.message}
+                                )
+                    else:
+                        print("No valid tag or timestamp provided, aborting...")
+                        exit(1)
+                else:
+                    print("No valid tag or timestamp provided, aborting...")
+                    exit(1)
+
+                print_ascii_cat_with_text(
+                    f"Continue conversation from {timestamp} note.",
+                    f"Supplying additional context from conversation chain: {params.get('tag', '')}",
+                )
+
+            elif args.t and set(args.additional_args) & set(
+                ["sum", "summary", "summarize"]
+            ):
+                previous = []
+                previous.append(
+                    {
+                        "role": "system",
+                        "content": "You are an AI designed to summarize and maintain the continuity of a conversation. Your purpose is to capture all important details, including names, key events, and subjects discussed, while ensuring that the conversation continues smoothly. Focus on preserving the tone and subject matter of the conversation, making it feel as if it is naturally ongoing rather than recapping or concluding. Your summaries should seamlessly integrate into the flow of the dialogue without breaking immersion.",
+                    }
+                )
+                with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                    for inst in nc:
                         # prefill messages with the user and assistant content previously written
-                        messages.append({"role": "user", "content": inst.context})
-                        messages.append({"role": "assistance", "content": inst.message})
+                        previous.append({"role": "user", "content": inst.context})
+                        previous.append({"role": "assistant", "content": inst.message})
+                    else:
+                        printout(inst)  # print the last, for user's benefit
+
+                previous.append(
+                    {
+                        "role": "system",
+                        "content": "Task: Summarize the conversation so far, capturing all key moments, names, and details, while seamlessly continuing from the most recent events as if the discussion never paused. Ensure the tone remains consistent, and the flow of information feels natural, without making it seem like a summary or an ending. Provide the summary in a prompt format allowing the conversation to be easily picked up and continued from where it left off.",
+                    }
+                )
+                response = send_prompt_to_openai(previous, model_name=args.m)
+                if response:
+                    retval = response["choices"][0]["message"]["content"]
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": "Continue the conversation naturally from where it left off, using the provided summary as context. Maintain the same tone, subject matter, and flow, ensuring that the dialogue feels uninterrupted. Pick up on the last key point or question to drive the discussion forward. Always stay in character.",
+                        }
+                    )
+                    messages.append({"role": "user", "content": retval})
+                    endline = return_footer(response)
+                    print_ascii_cat_with_text(user_input, retval, endline)
+                    params["context"] = user_input
+                    params["tag"] = f"convo-{now}"
+                    Note.append(NOTEFILE, Note.jot(retval, **params))
 
             while True:
                 try:
