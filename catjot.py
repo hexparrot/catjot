@@ -719,7 +719,7 @@ def main():
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
     elif args.t and not set(args.additional_args) & set(
-        ["continue", "sum", "summary", "summarize"]
+        ["continue", "sum", "summary", "summarize", "convo", "conv", "talk"]
     ):
         # special case "summarize" implies convo
         # and should continue to the SHORTCUTS below
@@ -1103,7 +1103,7 @@ def main():
                     endline = return_footer(response)
                     print_ascii_cat_with_text(user_input, retval, endline)
                     params["context"] = user_input
-                    params["tag"] = f"convo-{now}"
+                    params["tag"] = params.get("tag", f"convo-{now}")
                     Note.append(NOTEFILE, Note.jot(retval, **params))
                 else:
                     print("Failed to get response from OpenAI API.")
