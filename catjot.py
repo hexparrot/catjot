@@ -936,6 +936,8 @@ def main():
                     + f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'",
                 )
 
+            note_count = 0
+            notable_notes = []  # first and last note for reference
             messages = []
             user_input = ""
 
@@ -949,27 +951,42 @@ def main():
                 )
 
                 if timestamp and params.get("tag", ""):
+                    # INPUT: timestamp and a tag
+                    # OUTPUT: select by tag, include up to timestamp, truncate after
+                    # jot -t convo-1234567 continue 2345678
                     with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
                         value_matched = False
+                        notable_notes.append(nc[0])
                         for inst in nc:
                             if timestamp:
                                 if inst.now == timestamp:
                                     value_matched = True
+                                    notable_notes.append(inst)
                                 elif value_matched:
                                     break  # hits only after timestamp is hit AND all matching timestamps
                             messages.append({"role": "user", "content": inst.context})
                             messages.append(
                                 {"role": "assistant", "content": inst.message}
                             )
+                            note_count += 1
                 elif not timestamp and params.get("tag", ""):
+                    # INPUT: accept a tag and NOT a timestamp
+                    # OUTPUT: select by tag
+                    # jot -t convo-1234567 continue
                     with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                        notable_notes.append(nc[0])
+                        notable_notes.append(nc[-1])
                         for inst in nc:
                             messages.append({"role": "user", "content": inst.context})
                             messages.append(
                                 {"role": "assistant", "content": inst.message}
                             )
                             timestamp = inst.now
+                            note_count += 1
                 elif timestamp and not params.get("tag", ""):
+                    # INPUT: accepting a timestamp and NOT a tag
+                    # OUTPUT: select by tag, include up to timestamp, truncate after
+                    # jot continue 2345678
                     # determine tag based on timestamp
                     with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp)) as nc:
                         for inst in nc:
@@ -978,33 +995,44 @@ def main():
                                 break
 
                     # now that we have a tag to work with
-                    if params.get("tag", ""):
+                    if not params.get("tag", ""):
+                        print("No valid tag or timestamp provided, aborting...")
+                        exit(1)
+                    else:
                         with NoteContext(
                             NOTEFILE, (SearchType.TAG, params["tag"])
                         ) as nc:
                             value_matched = False
+                            notable_notes.append(nc[0])
                             for inst in nc:
-                                if timestamp:
-                                    if inst.now == timestamp:
-                                        value_matched = True
-                                    elif value_matched:
-                                        break  # hits only after timestamp is hit AND all matching timestamps
+                                if inst.now == timestamp:
+                                    notable_notes.append(inst)
+                                    value_matched = True
+                                elif value_matched:
+                                    break  # hits only after timestamp is hit AND all matching timestamps
                                 messages.append(
                                     {"role": "user", "content": inst.context}
                                 )
                                 messages.append(
                                     {"role": "assistant", "content": inst.message}
                                 )
-                    else:
-                        print("No valid tag or timestamp provided, aborting...")
-                        exit(1)
+                                note_count += 1
                 else:
                     print("No valid tag or timestamp provided, aborting...")
                     exit(1)
 
+                composite_string = (
+                    "timestamp | context (30)                 | message (30)\n"
+                    "----------|------------------------------|------------------------------\n"
+                )
+                for nn in notable_notes:
+                    composite_string += (
+                        f"{nn.now}|{nn.context[:30]:<30}|{nn.message[:30]}\n"
+                    )
+
                 print_ascii_cat_with_text(
-                    f"Continue conversation from {timestamp} note.",
-                    f"Supplying additional context from conversation chain: {params.get('tag', '')}",
+                    f"{note_count} notes included as context from conversation chain: {params.get('tag', '')}",
+                    composite_string,
                 )
 
             elif args.t and set(args.additional_args) & set(
