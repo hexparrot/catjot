@@ -397,3 +397,14 @@ This command will create a tar file named "my_home.tar" containing all the files
 END (prompt tokens=40, output_tokens=80, model=gpt-3.5-turbo-0125)
 ```
 
+But you can continue conversations from where you left off in multiple ways:
+
+$ jot -t convo-1719967764 continue
+         # Use all of matches for tag-* as context and be prompted for the next user role input
+
+$ jot -t convo-1719967764 continue 1696727387
+         # Using the provided timestamp, select all matching the note's the convo-* tag, and truncate notes after the provided timestamp
+
+$ jot continue 1696727387
+         # Using the provided timestamp, auto-match the convo-* tag, and truncate notes after the provided timestamp
+
