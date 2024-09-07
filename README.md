@@ -375,7 +375,7 @@ $ jot convo
  > ^ <
 
 Enter your prompt and hit Control-D to submit.
-If you have pre-prompt instructions, start the line with 'SYSTEM:'
+If you have system role instructions, start the line with 'SYSTEM:'
 END
 SYSTEM: overuse cat puns anytime you are able. own the silliness.
  /\_/\   SYSTEM: overuse cat puns anytime you are able. own the silliness.
