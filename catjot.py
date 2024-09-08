@@ -589,6 +589,7 @@ def main():
         epilog="additional usage examples-\n"
         "the abbreviated and (parenthesized) forms are both acceptable:\n\n"
         "  jot c 16952...   (catgpt)/send note matching timestamp to openai endpoint.\n"
+        "  jot cat a1 b2 .. (catenate) all notes matching each of the provided tags to a convo\n"
         "  jot d            (dump)/show all notes from all time, everywhere\n"
         "  jot h            show note (head)--show the last 1 note written, among all notes\n"
         "  jot h 3          show note (head)--show the last n notes written, among all notes\n"
@@ -770,10 +771,11 @@ def main():
             "SLEEPING_CAT": ["zzz"],
             "CHAT": ["chat", "catgpt", "c"],
             "CONVO": [
+                "cat",
+                "catenate",
                 "convo",
-                "talk",
-                "conv",
                 "continue",
+                "talk",
                 "sum",
                 "summary",
                 "summarize",
@@ -1026,9 +1028,7 @@ def main():
                     "----------|------------------------------|------------------------------\n"
                 )
                 for nn in notable_notes:
-                    composite_string += (
-                        f"{nn.now}|{nn.context[:30]:<30}|{nn.message[:30]}\n"
-                    )
+                    composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
 
                 print_ascii_cat_with_text(
                     f"{note_count} notes included as context from conversation chain: {params.get('tag', '')}",
@@ -1076,6 +1076,37 @@ def main():
                     params["context"] = f"Summary of Notes: {args.t}"
                     params["tag"] = f"convo-{now}"
                     Note.append(NOTEFILE, Note.jot(summary, **params))
+
+            elif set(args.additional_args) & set(["cat", "catenate"]):
+                notes_from_tag = {}
+                for tag in args.additional_args[1:]:
+                    note_count = 0
+                    with NoteContext(NOTEFILE, (SearchType.TAG, tag)) as nc:
+                        notable_notes.append(nc[0])
+                        notable_notes.append(nc[-1])
+                        for inst in nc:
+                            # prefill messages with the user and assistant content previously written
+                            messages.append({"role": "user", "content": inst.context})
+                            messages.append(
+                                {"role": "assistant", "content": inst.message}
+                            )
+                            note_count += 1
+                        notes_from_tag[tag] = note_count
+
+                for tag, count in notes_from_tag.items():
+                    print(f"{count} notes from tag [{tag}]")
+
+                composite_string = (
+                    "timestamp | context (30)                 | message (30)\n"
+                    "----------|------------------------------|------------------------------\n"
+                )
+                for nn in notable_notes:
+                    composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
+
+                print_ascii_cat_with_text(
+                    f"{sum(notes_from_tag.values())} notes included as context from conversation chain: {' '.join([f'[{arg}]' for arg in args.additional_args[1:]])}",
+                    composite_string,
+                )
 
             while True:
                 try:
