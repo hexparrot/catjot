@@ -720,7 +720,7 @@ def main():
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
     elif args.t and not set(args.additional_args) & set(
-        ["continue", "sum", "summary", "summarize", "convo", "conv", "talk"]
+        ["continue", "sum", "summary", "summarize", "convo", "chat"]
     ):
         # special case "summarize" implies convo
         # and should continue to the SHORTCUTS below
@@ -871,7 +871,8 @@ def main():
                         + txt_append
                     )
 
-            params["tag"] = "catgpt"
+            params["tag"] = params.get("tag", "catgpt")
+
             full_sendout = f"{intro}\n\n{txt}"
 
             if len(args.additional_args) and args.additional_args[0] in ["home"]:
