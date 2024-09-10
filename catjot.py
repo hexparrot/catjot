@@ -469,6 +469,12 @@ def send_prompt_to_openai(messages, model_name, mode="full"):
     - messages: List of messages to send to the API.
     - model_name: The name of the model to use.
     - mode: "stream" for character-by-character streaming, "full" for collecting the full response.
+
+    Returns:
+    - In "stream" mode: A generator that yields characters as they are streamed.
+    - In "full" mode: A tuple (full_response, last_token_obj), where:
+      - full_response: The full response string.
+      - last_token_obj: The last JSON object received, containing metadata like token count.
     """
     import requests
     import json
@@ -488,11 +494,11 @@ def send_prompt_to_openai(messages, model_name, mode="full"):
         "messages": messages,
         "stream": True,  # Enable streaming
     }
+
     token_count = 0
-    last_token_obj = None
+    last_token_obj = {}
 
     def stream_response():
-        # Local function to stream the response character by character
         nonlocal token_count
         nonlocal last_token_obj
         last_line = None
@@ -519,9 +525,9 @@ def send_prompt_to_openai(messages, model_name, mode="full"):
                                         token_count += 1
                                         for char in text:
                                             yield char
+                                    last_line = content
                                 except json.JSONDecodeError:
                                     print("Error decoding JSON:", decoded_line)
-                                last_line = content
                             else:
                                 last_token_obj = last_line
         except requests.exceptions.RequestException as e:
@@ -529,13 +535,17 @@ def send_prompt_to_openai(messages, model_name, mode="full"):
             yield "[Error]"  # Yield an error message in case of a failure
 
     def collect_full_response():
-        # Local function to collect the full response
+        nonlocal last_token_obj
         full_response = ""
         for char in stream_response():
             full_response += char
 
-        last_token_obj["token_count"] = token_count
-        return (full_response, last_token_obj)
+        if last_token_obj is not None:
+            last_token_obj["token_count"] = token_count
+        else:
+            last_token_obj = {"token_count": token_count}
+
+        return full_response, last_token_obj
 
     if mode == "stream":
         return stream_response()  # Return the generator for streaming
