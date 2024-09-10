@@ -696,6 +696,9 @@ def main():
         "-m", type=str, default="gpt-4o-mini", help="LLM model to engage"
     )
     parser.add_argument(
+        "-w", action="store_true", help="wall-of-text rather than stream"
+    )
+    parser.add_argument(
         "-c",
         action="store_const",
         const="context",
@@ -971,16 +974,39 @@ def main():
                 },
             ]
 
-            (response, obj_info) = send_prompt_to_openai(
-                messages, model_name=args.m, mode="full"
-            )
+            response = ""
+            obj_info = {
+                "choices": [{"finish_reason": "unk"}],
+                "token_count": "-",
+                "model": "",
+            }
+            if args.w:  # wall of text preferred
+                (response, obj_info) = send_prompt_to_openai(
+                    messages, model_name=args.m, mode="full"
+                )
 
-            if response:
-                endline = return_footer(obj_info)
-                print_ascii_cat_with_text(intro, response, endline)
-                Note.append(NOTEFILE, Note.jot(response, **params))
+                if response:
+                    endline = return_footer(obj_info)
+                    print_ascii_cat_with_text(intro, response, endline)
+                    Note.append(NOTEFILE, Note.jot(response, **params))
+                else:
+                    print("Failed to get response from OpenAI API.")
             else:
-                print("Failed to get response from OpenAI API.")
+                print_ascii_cat_with_text(intro, "", "")
+
+                response_generator = send_prompt_to_openai(
+                    messages, model_name=args.m, mode="stream"
+                )
+                for char in response_generator:
+                    print(char, end="", flush=True)
+                    response += char
+                else:
+                    print()
+
+                if response:
+                    Note.append(NOTEFILE, Note.jot(response, **params))
+                else:
+                    print("Failed to get response from OpenAI API.")
         elif IS_CONVO:
             # gpt-related functionality
             # Starts a conversation with a GPT;
