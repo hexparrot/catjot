@@ -461,7 +461,7 @@ def alternate_last_n_lines(text, n):
             print(" " * len(lines[i]), end="\r")
 
 
-def send_prompt_to_openai(messages, model_name, mode="full"):
+def send_prompt_to_openai(messages, model_name, mode):
     """
     Sends a prompt to the OpenAI GPT completion API and handles the response.
 
@@ -971,7 +971,9 @@ def main():
                 },
             ]
 
-            (response, obj_info) = send_prompt_to_openai(messages, model_name=args.m)
+            (response, obj_info) = send_prompt_to_openai(
+                messages, model_name=args.m, mode="full"
+            )
 
             if response:
                 endline = return_footer(obj_info)
@@ -1122,7 +1124,9 @@ def main():
                     }
                 )
 
-                (summary, obj_info) = send_prompt_to_openai(previous, model_name=args.m)
+                (summary, obj_info) = send_prompt_to_openai(
+                    previous, model_name=args.m, mode="full"
+                )
                 if summary:
                     messages.append(
                         {
@@ -1188,7 +1192,7 @@ def main():
                     messages.append({"role": "user", "content": user_input})
 
                 (response, obj_info) = send_prompt_to_openai(
-                    messages, model_name=args.m
+                    messages, model_name=args.m, mode="full"
                 )
 
                 if response:
