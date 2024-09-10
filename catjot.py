@@ -997,9 +997,12 @@ def main():
                 response_generator = send_prompt_to_openai(
                     messages, model_name=args.m, mode="stream"
                 )
+                import time
+
                 for char in response_generator:
                     print(char, end="", flush=True)
                     response += char
+                    time.sleep(0.01)
                 else:
                     print()
 
@@ -1240,12 +1243,15 @@ def main():
                 else:
                     print_ascii_cat_with_text(user_input, "", "")
 
+                    import time
+
                     response_generator = send_prompt_to_openai(
                         messages, model_name=args.m, mode="stream"
                     )
                     for char in response_generator:
                         print(char, end="", flush=True)
                         response += char
+                        time.sleep(0.01)
                     else:
                         print()
 
