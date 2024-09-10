@@ -1252,6 +1252,13 @@ def main():
                         params["context"] = user_input
                         params["tag"] = params.get("tag", f"convo-{now}")
                         Note.append(NOTEFILE, Note.jot(response, **params))
+
+                        if Note.USE_COLORIZATION:
+                            print(
+                                f"{AnsiColor.MAGENTA.value}stop.{AnsiColor.RESET.value}"
+                            )
+                        else:
+                            print(f"stop.")
                     else:
                         print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
