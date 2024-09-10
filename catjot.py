@@ -461,9 +461,15 @@ def alternate_last_n_lines(text, n):
             print(" " * len(lines[i]), end="\r")
 
 
-def send_prompt_to_openai(messages, model_name):
-    # sends a prompt and receives the response in a json object
-    # from the openai gpt completion api
+def send_prompt_to_openai(messages, model_name, mode="full"):
+    """
+    Sends a prompt to the OpenAI GPT completion API and handles the response.
+
+    Parameters:
+    - messages: List of messages to send to the API.
+    - model_name: The name of the model to use.
+    - mode: "stream" for character-by-character streaming, "full" for collecting the full response.
+    """
     import requests
     import json
     from os import getenv
@@ -471,31 +477,77 @@ def send_prompt_to_openai(messages, model_name):
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url", "https://api.openai.com/v1/chat/completions")
     api_model = getenv("openai_api_model", model_name)
-    # set this key in your shell, e.g., this line in your ~/.bash_profile:
-    # export openai_api_key="sk-proj...8EEF"
+
     headers = {"Content-Type": "application/json"}
 
     if api_url.startswith("https://api.openai.com"):
         headers["Authorization"] = f"Bearer {api_key}"
 
-    data = {"model": api_model, "messages": messages}
+    data = {
+        "model": api_model,
+        "messages": messages,
+        "stream": True,  # Enable streaming
+    }
+    token_count = 0
+    last_token_obj = None
 
-    try:
-        response = requests.post(api_url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending request: {e}")
-        return None
+    def stream_response():
+        # Local function to stream the response character by character
+        nonlocal token_count
+        nonlocal last_token_obj
+        last_line = None
+
+        try:
+            with requests.post(
+                api_url, headers=headers, json=data, stream=True
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if line:  # Filter out keep-alive new lines
+                        decoded_line = line.decode("utf-8")
+                        if decoded_line.startswith("data: "):
+                            decoded_line = decoded_line[
+                                6:
+                            ]  # Remove the "data: " prefix
+                            if decoded_line != "[DONE]":
+                                try:
+                                    content = json.loads(decoded_line)
+                                    if "choices" in content:
+                                        text = content["choices"][0]["delta"].get(
+                                            "content", ""
+                                        )
+                                        token_count += 1
+                                        for char in text:
+                                            yield char
+                                except json.JSONDecodeError:
+                                    print("Error decoding JSON:", decoded_line)
+                                last_line = content
+                            else:
+                                last_token_obj = last_line
+        except requests.exceptions.RequestException as e:
+            print(f"Error sending request: {e}")
+            yield "[Error]"  # Yield an error message in case of a failure
+
+    def collect_full_response():
+        # Local function to collect the full response
+        full_response = ""
+        for char in stream_response():
+            full_response += char
+
+        last_token_obj["token_count"] = token_count
+        return (full_response, last_token_obj)
+
+    if mode == "stream":
+        return stream_response()  # Return the generator for streaming
+    elif mode == "full":
+        return collect_full_response()  # Return the full response string
 
 
 def return_footer(gpt_reply):
     # receives the jSON object from a successful gpt call
     # returns technical details of token usage/model
-    prompt_tokens = gpt_reply["usage"]["prompt_tokens"]
-    output_tokens = gpt_reply["usage"]["completion_tokens"]
-    model_name = gpt_reply["model"]
-    return f"END (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
+    finish_reason = gpt_reply["choices"][0].get("finish_reason", "END")
+    return f"{finish_reason}. (token_count={gpt_reply['token_count']}, model={gpt_reply['model']})"
 
 
 def is_binary_string(data):
@@ -909,13 +961,12 @@ def main():
                 },
             ]
 
-            response = send_prompt_to_openai(messages, model_name=args.m)
+            (response, obj_info) = send_prompt_to_openai(messages, model_name=args.m)
 
             if response:
-                retval = response["choices"][0]["message"]["content"]
-                endline = return_footer(response)
-                print_ascii_cat_with_text(intro, retval, endline)
-                Note.append(NOTEFILE, Note.jot(retval, **params))
+                endline = return_footer(obj_info)
+                print_ascii_cat_with_text(intro, response, endline)
+                Note.append(NOTEFILE, Note.jot(response, **params))
             else:
                 print("Failed to get response from OpenAI API.")
         elif IS_CONVO:
@@ -1061,9 +1112,8 @@ def main():
                     }
                 )
 
-                response = send_prompt_to_openai(previous, model_name=args.m)
-                if response:
-                    summary = response["choices"][0]["message"]["content"]
+                (summary, obj_info) = send_prompt_to_openai(previous, model_name=args.m)
+                if summary:
                     messages.append(
                         {
                             "role": "system",
@@ -1072,7 +1122,7 @@ def main():
                     )
                     messages.append({"role": "user", "content": summary})
                     messages.extend(carryover_notes)
-                    endline = return_footer(response)
+                    endline = return_footer(obj_info)
                     print_ascii_cat_with_text("Summary", summary, endline)
                     params["context"] = f"Summary of Notes: {args.t}"
                     params["tag"] = f"convo-{now}"
@@ -1127,16 +1177,17 @@ def main():
                 else:
                     messages.append({"role": "user", "content": user_input})
 
-                response = send_prompt_to_openai(messages, model_name=args.m)
+                (response, obj_info) = send_prompt_to_openai(
+                    messages, model_name=args.m
+                )
 
                 if response:
-                    retval = response["choices"][0]["message"]["content"]
-                    messages.append({"role": "assistant", "content": retval})
-                    endline = return_footer(response)
-                    print_ascii_cat_with_text(user_input, retval, endline)
+                    messages.append({"role": "assistant", "content": response})
+                    endline = return_footer(obj_info)
+                    print_ascii_cat_with_text(user_input, response, endline)
                     params["context"] = user_input
                     params["tag"] = params.get("tag", f"convo-{now}")
-                    Note.append(NOTEFILE, Note.jot(retval, **params))
+                    Note.append(NOTEFILE, Note.jot(response, **params))
                 else:
                     print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
