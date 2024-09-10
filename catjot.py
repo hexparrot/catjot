@@ -1123,6 +1123,7 @@ def main():
                 print_ascii_cat_with_text(
                     f"{note_count} notes included as context from conversation chain: {params.get('tag', '')}",
                     composite_string,
+                    "PROMPT:",
                 )
 
             elif args.t and set(args.additional_args) & set(
