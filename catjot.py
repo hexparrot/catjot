@@ -1217,19 +1217,43 @@ def main():
                 else:
                     messages.append({"role": "user", "content": user_input})
 
-                (response, obj_info) = send_prompt_to_openai(
-                    messages, model_name=args.m, mode="full"
-                )
+                response = ""
+                obj_info = {
+                    "choices": [{"finish_reason": "unk"}],
+                    "token_count": "-",
+                    "model": "",
+                }
+                if args.w:  # wall of text preferred
+                    (response, obj_info) = send_prompt_to_openai(
+                        messages, model_name=args.m, mode="full"
+                    )
 
-                if response:
-                    messages.append({"role": "assistant", "content": response})
-                    endline = return_footer(obj_info)
-                    print_ascii_cat_with_text(user_input, response, endline)
-                    params["context"] = user_input
-                    params["tag"] = params.get("tag", f"convo-{now}")
-                    Note.append(NOTEFILE, Note.jot(response, **params))
+                    if response:
+                        endline = return_footer(obj_info)
+                        print_ascii_cat_with_text(user_input, response, endline)
+                        params["context"] = user_input
+                        params["tag"] = params.get("tag", f"convo-{now}")
+                        Note.append(NOTEFILE, Note.jot(response, **params))
+                    else:
+                        print("Failed to get response from OpenAI API.")
                 else:
-                    print("Failed to get response from OpenAI API.")
+                    print_ascii_cat_with_text(user_input, "", "")
+
+                    response_generator = send_prompt_to_openai(
+                        messages, model_name=args.m, mode="stream"
+                    )
+                    for char in response_generator:
+                        print(char, end="", flush=True)
+                        response += char
+                    else:
+                        print()
+
+                    if response:
+                        params["context"] = user_input
+                        params["tag"] = params.get("tag", f"convo-{now}")
+                        Note.append(NOTEFILE, Note.jot(response, **params))
+                    else:
+                        print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 0:
             # show all notes originating from this PWD
