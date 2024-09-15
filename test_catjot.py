@@ -7,13 +7,22 @@ __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
 import unittest
-from catjot import Note, NoteContext, SearchType
+import sys
+import os
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
 
-TMP_CATNOTE = ".catjot"
-FIXED_CATNOTE = "example.jot"
+# Add parent directory to sys.path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+sys.path.insert(0, parent_dir)
+
+# Import classes from catjot.py
+from catjot import Note, NoteContext, SearchType
+
+TMP_CATNOTE = "tests/.catjot"
+FIXED_CATNOTE = "tests/example.jot"
 
 
 def strip_ansi_codes(text):
@@ -463,7 +472,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.message, "^-^\n")
 
     def test_handle_record_separator_note_invalidation(self):
-        multi = Note.iterate("broken.jot")
+        multi = Note.iterate("tests/broken.jot")
         inst = next(multi)  # ^-^ data case
         self.assertEqual(inst.now, 1394443232)
         self.assertEqual(inst.pwd, "/home/user")
@@ -500,7 +509,7 @@ class TestTaker(unittest.TestCase):
             inst = next(multi)
 
     def test_handle_jotting_into_self(self):
-        multi = Note.iterate("broken2.jot")
+        multi = Note.iterate("tests/broken2.jot")
         inst = next(multi)  # ^-^ data case
         self.assertEqual(inst.now, 1725412377)
         self.assertEqual(inst.pwd, "/home/user")
@@ -682,7 +691,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(iters, 1)
 
     def test_separator_in_data_detectable(self):
-        NOTEFILE = "edgecase.jot"
+        NOTEFILE = "tests/edgecase.jot"
         multi = Note.iterate(NOTEFILE)
         inst = next(multi)
         self.assertEqual(inst.pwd, "/home/user")
