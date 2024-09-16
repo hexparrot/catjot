@@ -149,6 +149,9 @@ class Note(object):
                 + f"{Note.LABEL_DATA}{self.message}"
             )
 
+    def __repr__(self):
+        return f"Note(context='{self.context}', message='{self.message}')"
+
     def __eq__(self, other):
         """Equality test for notes should:
         Return true if strip()'ed and flattened values match."""

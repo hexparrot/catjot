@@ -1137,6 +1137,31 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(matches[5], 1695184544)
         self.assertEqual(matches[6], 1694955555)
 
+    def test_note_repr(self):
+        # Create a Note object with specific context and message
+        note = Note({"context": "Context1", "message": "Message1"})
+
+        # Define the expected repr string
+        expected_repr = "Note(context='Context1', message='Message1')"
+
+        # Assert that the repr of the note matches the expected string
+        self.assertEqual(repr(note), expected_repr)
+
+    def test_note_repr_with_special_characters(self):
+        # Create a Note object with context and message containing special characters
+        note = Note(
+            {
+                "context": "Special & Context",
+                "message": "Message with 'quotes' and \"double quotes\"",
+            }
+        )
+
+        # Define the expected repr string
+        expected_repr = "Note(context='Special & Context', message='Message with 'quotes' and \"double quotes\"')"
+
+        # Assert that the repr of the note matches the expected string
+        self.assertEqual(repr(note), expected_repr)
+
 
 if __name__ == "__main__":
     unittest.main()
