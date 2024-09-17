@@ -297,6 +297,33 @@ class TestRpjot(unittest.TestCase):
         self.assertEqual(len(ctx2), 1)
         self.assertEqual(len(ctx3), 7)
 
+    def test_nonoverlapping_bundle(self):
+        ctx1 = ContextBundle("/story/character")
+        ctx2 = ContextBundle("luna")
+
+        self.assertIn("luna", ctx1.active_tags)
+        self.assertIn("luna", ctx2.active_tags)
+        self.assertIn("luna_bellvue", ctx1.active_tags)
+        self.assertIn("luna_bellvue", ctx2.active_tags)
+
+        ctx3 = ctx1 - ctx2
+
+        self.assertIsNot(ctx3, ctx1)
+        self.assertIsNot(ctx3, ctx2)
+
+        self.assertEqual(len(ctx3), 5)  # 6 chars-1 subtracted
+        self.assertIn("luna", ctx3.blocks["tag"])  # the return string
+
+        ctx4 = ctx3 - ContextBundle(
+            1725999624
+        )  # the previous size 5 subtracting evie by timestamp
+        self.assertIn(1725999624, ctx4.blocks["timestamp"])
+        self.assertEqual(len(ctx4), 4)
+
+        ctx5 = ctx4 - ContextBundle("/story/character")
+        self.assertIn("/story/character", ctx5.blocks["directory"])
+        self.assertEqual(len(ctx5), 0)
+
     def test_return_str(self):
         ctx = ContextBundle(1726009504)
         self.assertEqual(

@@ -10,6 +10,13 @@ NOTEFILE = "bellvue.jot"
 
 class ContextBundle(object):
     def __init__(self, tags_dirs_ts):
+        """Holds a set of correlated notes, distinguished by:
+        Tags, dirs, and timestamps. The NOTEFILE is iterated and any matching
+        notes are copied into the `.notes` list.
+
+        This object also can suppress tags/dirs/ts, which leaves the notes
+        intact in the context, but inaccessible on iteration of the context.
+        This enables wholesale blocking out of memories."""
         self.tags = set()
         self.dirs = set()
         self.ts = set()
@@ -23,6 +30,8 @@ class ContextBundle(object):
             self += tags_dirs_ts
 
     def __str__(self):
+        """Returns a string of `context' and `message' separated by two newlines.
+        Iterates through all available visible notes--notes not suppressed."""
         combined_str = ""
         for note in self._visible_notes():
             combined_str += (
@@ -39,50 +48,48 @@ class ContextBundle(object):
         )
 
     def __iter__(self):
+        """Iterate through visible notes--ones not suppressed"""
         for n in self._visible_notes():
             yield n
 
     def __add__(self, item):
-        # Create a deep copy of the current instance
+        """Combines the matching terms of two contexts, effectively combining them.
+        Suppressions are not copied from either ContextBundle."""
         import copy
 
+        # Create a deep copy of the current instance
         new_obj = copy.deepcopy(self)
 
-        # Adds notes if not existing
-        if isinstance(item, int):
-            if item not in new_obj.ts:
-                new_obj.ts.add(item)
-        elif isinstance(item, str) and item.startswith("/"):
-            if item not in new_obj.dirs:
-                new_obj.dirs.add(item)
-        elif isinstance(item, str) and item not in new_obj.tags:
-            new_obj.tags.add(item)
-        elif isinstance(item, ContextBundle):
+        if isinstance(item, ContextBundle):
+            # returned object has values from both a + b
             new_obj.tags.update(item.tags)
             new_obj.dirs.update(item.dirs)
             new_obj.ts.update(item.ts)
+        else:
+            new_obj += item
 
-        # Regenerate notes for the new object
+        # Reread file on disk and repopulate self.notes list
         new_obj._regen_notes()
 
         return new_obj
 
     def __iadd__(self, item):
+        """Add 'matching' term to the object via +="""
         # adds notes if not existing
         if isinstance(item, int):
-            if item not in self.ts:
-                self.ts.add(item)
+            self.ts.add(item)
         elif item.startswith("/"):
-            if item not in self.dirs:
-                self.dirs.add(item)
-        elif item not in self.tags:
+            self.dirs.add(item)
+        else:
             self.tags.add(item)
 
+        # Reread file on disk and repopulate self.notes list
         self._regen_notes()
 
         return self
 
     def __isub__(self, item):
+        """Remove 'matching' term to the object via -="""
         # identifies and removes matching notes
         if isinstance(item, int):
             if item in self.ts:
@@ -93,28 +100,38 @@ class ContextBundle(object):
         elif item in self.tags:
             self.tags.remove(item)
 
+        # Reread file on disk and repopulate self.notes list
         self._regen_notes()
 
         return self
 
     def __sub__(self, item):
-        # Create a deep copy of the current instance
+        """Either remove a 'matching' term, or if subtracting a ContextBundle:
+        Suppress all b's 'matching' terms from obj a."""
         import copy
 
+        # Create a deep copy of the current instance
         new_obj = copy.deepcopy(self)
 
-        # Identifies and removes matching notes
-        new_obj -= item
+        if isinstance(item, ContextBundle):
+            [new_obj.suppress(t) for t in item.tags]
+            [new_obj.suppress(t) for t in item.ts]
+            [new_obj.suppress(t) for t in item.dirs]
+        else:
+            # Identifies and removes matching notes
+            new_obj -= item
 
-        # Regenerate notes for the new object
-        new_obj._regen_notes()
+            # Reread file on disk and repopulate self.notes list
+            new_obj._regen_notes()
 
         return new_obj
 
     def __len__(self):
+        """Return the amount of notes not suppressed."""
         return len(list(self._visible_notes()))
 
     def _visible_notes(self):
+        """Helper function to return the list of notes, impacted by suppression"""
         seen = []
 
         def iterate_notes(search_type, values):
@@ -136,6 +153,7 @@ class ContextBundle(object):
         yield from iterate_notes(SearchType.DIRECTORY, self.dirs)
 
     def _regen_notes(self):
+        """Reads disk and iterates all notes, adding notes that match on 'matching' terms"""
         self.notes = []
 
         def add_notes(search_type, values):
@@ -152,12 +170,14 @@ class ContextBundle(object):
 
     @property
     def active_tags(self):
+        """Returns a list of all tags present in all available notes, not impacted by suppression"""
         all_tags = set()
         for n in self.notes:
             all_tags.update(n.tag.split())
         return all_tags
 
     def suppress(self, item):
+        """Accepts a 'matching' term and adds it to the blocklist, so it will be hidden from iteration"""
         if isinstance(item, int):
             self.blocks["timestamp"].add(item)
         elif item.startswith("/"):
@@ -166,6 +186,7 @@ class ContextBundle(object):
             self.blocks["tag"].add(item)
 
     def unsuppress(self, item):
+        """Reverses suppression--ensures notes matching the terms still are iterable"""
         try:
             if isinstance(item, int):
                 self.blocks["timestamp"].remove(item)
