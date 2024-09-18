@@ -12,13 +12,6 @@ import os
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
-
-# Add parent directory to sys.path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
-sys.path.insert(0, parent_dir)
-
-# Import classes from catjot.py
 from catjot import Note, NoteContext, SearchType
 
 TMP_CATNOTE = "tests/.catjot"
