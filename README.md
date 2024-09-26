@@ -291,7 +291,7 @@ terminal_width : 138
 
 ### CATGPT, endpoint-based GPT plugin
 
-Currently designed around OpenAI's ChatGPT Platform API, for use with GPT 3.5 and 4.0.
+Currently designed around OpenAI's ChatGPT Platform API, for use with openai api-compatible endpoints.
 Set the variable `openai_api_key`; example for bash-shell below:
 
 export openai_api_key=sk-proj-...BEEF"
@@ -315,7 +315,7 @@ $ jot chat when is national take your cat to work day?
 $ echo "tell me about national cat day" | jot chat
          # submit a context-free prompt
 
-$ cat README.md | how do i tag notes?
+$ cat README.md | jot chat how do i tag notes?
          # Good use case! accompany the note with a direct prompt
 
 $ cat expenses.csv | jot chat 1719967764 how much is this costing me a month?
@@ -332,23 +332,10 @@ $ cat README.md | jot chat how do i tag notes?
 
 To tag notes in the `cat|jot` application, you can use the `-at` flag followed by the tag you want to assign to the note. Here's how you can tag notes using different scenarios:
 ...snipped...
-END (prompt tokens=2949, output_tokens=290, model=gpt-3.5-turbo-0125)
+stop.
 ```
 
-Example Output 2: Pass -gpt4 to enable the 4.0 model with increased capability and cost.
-
-```
-$ cat README.md | jot -gpt4 chat summarize what this application can do
- /\_/\   summarize what this application can do
-( o.o )
- > ^ <
-
-This application, affectionately known as `catjot`, is a cat-themed note-taking command-line app. Below are the main functionalities and features of the app:
-...snipped...
-END (prompt tokens=2949, output_tokens=465, model=gpt-4-0613)
-```
-
-Example Output 3: Ask a general question without leaving your terminal
+Example Output 2: Ask a general question without leaving your terminal
 
 ```
 $ jot chat how do i restage the last commit i have not yet pushed?
@@ -361,7 +348,7 @@ To restage the last commit you have not yet pushed, you can use the following co
 git reset --soft HEAD^
 
 This command will undo the last commit, but leave your changes staged so you can make any necessary adjustments before committing again.
-END (prompt tokens=42, output_tokens=55, model=gpt-3.5-turbo-0125)
+stop.
 ```
 
 #### jot convo syntax
@@ -376,14 +363,14 @@ $ jot convo
 
 Enter your prompt and hit Control-D to submit.
 If you have system role instructions, start the line with 'SYSTEM:'
-END
+stop.
 SYSTEM: overuse cat puns anytime you are able. own the silliness.
  /\_/\   SYSTEM: overuse cat puns anytime you are able. own the silliness.
 ( o.o )
  > ^ <
 
 I'm feline good about these puns, so let's paws for a moment and have some fun! Let's not whisker away from using as many cat puns as possible - it's purr-fectly acceptable here. Don't fur-get to let your imagination run wild like a cat chasing a string! Let's make this conversation the cat's whiskers, shall we? Scratch that, let's make it the cat's meow! Let's unleash our inner cat-titude and make this conversation truly paw-some!
-END (prompt tokens=22, output_tokens=110, model=gpt-3.5-turbo-0125)
+stop.
 whats the syntax for creating a tar file of my home directory?
  /\_/\   whats the syntax for creating a tar file of my home directory?
 ( o.o )
@@ -394,7 +381,7 @@ Purr-fect! To create a tar file of your home directory, you can use the followin
 `tar -cvf my_home.tar /home/$USER`
 
 This command will create a tar file named "my_home.tar" containing all the files and directories in your home directory. Meow you go!
-END (prompt tokens=40, output_tokens=80, model=gpt-3.5-turbo-0125)
+stop.
 ```
 
 But you can continue conversations from where you left off in multiple ways:
