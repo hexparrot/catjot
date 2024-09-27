@@ -420,6 +420,7 @@ class Note(object):
                             yield inst
                         break
 
+
 class ContextBundle(object):
     def __init__(self, tags_dirs_ts):
         """Holds a set of correlated notes, distinguished by:
@@ -570,7 +571,7 @@ class ContextBundle(object):
 
         def add_notes(search_type, values):
             for value in values:
-                with NoteContext(NOTEFILE, (search_type, value)) as notes:
+                with NoteContext(Note.NOTEFILE, (search_type, value)) as notes:
                     for n in notes:
                         if n not in self.notes:
                             self.notes.append(n)
@@ -608,6 +609,7 @@ class ContextBundle(object):
                 self.blocks["tag"].remove(item)
         except KeyError:
             pass
+
 
 NEWCAT = r"""-------------------------------------
      ("`-/")_.-'"``-._
@@ -976,7 +978,7 @@ def main():
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     # tagging-related functionality
     elif args.t and not set(args.additional_args) & set(
-        ["continue", "sum", "summary", "summarize", "convo", "chat"]
+        ["continue", "sum", "summary", "summarize", "convo", "chat", "scoop"]
     ):
         # special case "summarize" implies convo
         # and should continue to the SHORTCUTS below
@@ -1014,7 +1016,7 @@ def main():
             "MATCH_NOTE_NAIVE": ["match", "m"],
             "MATCH_NOTE_NAIVE_I": ["search", "s", "mi"],
             "DELETE_MOST_RECENT_PWD": ["pop", "p"],
-            "BULK_DELETE_NOTES": ["scoop"],
+            "BULK_MANAGE_NOTES": ["scoop", "cherry-pick"],
             "NOTES_REFERENCING_ABSENT_DIRS": ["str", "stra", "stray", "strays"],
             "SHOW_ALL": ["dump", "display", "d"],
             "MATCH_TIMESTAMP": ["timestamp", "ts"],
@@ -1330,11 +1332,39 @@ def main():
                         "content": "You are an AI designed to seamlessly summarize conversations. Your role is to capture and organize all key details, including names, events, and topics. Maintain the natural flow and tone of the dialogue, ensuring the summary feels integrated and continuous without breaking immersion. These summaries will serve as prompts for starting new chat conversations, ensuring a smooth transition.",
                     }
                 )
+
+                bundle_info = ""
                 with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                    for inst in nc:
-                        # prefill messages with the user and assistant content previously written
-                        previous.append({"role": "user", "content": inst.context})
-                        previous.append({"role": "assistant", "content": inst.message})
+                    if nc and nc[0]:
+                        if nc[0].context.startswith(
+                            "bundled notes"
+                        ) or args.t.startswith("bundle-"):
+                            bundle_info = [
+                                int(x)
+                                for x in nc[0].message.split("\n")
+                                if x.strip().isdigit()
+                            ]
+
+                            contexts = ContextBundle(bundle_info[0])
+                            for each_cont in bundle_info[1:]:
+                                contexts += each_cont
+
+                            for inst in contexts:  # iterate each note now
+                                previous.append(
+                                    {"role": "user", "content": inst.context}
+                                )
+                                previous.append(
+                                    {"role": "assistant", "content": inst.message}
+                                )
+                        else:
+                            for inst in nc:
+                                # prefill messages with the user and assistant content previously written
+                                previous.append(
+                                    {"role": "user", "content": inst.context}
+                                )
+                                previous.append(
+                                    {"role": "assistant", "content": inst.message}
+                                )
 
                 NUMBER_TO_CARRY_OVER = 10
                 carryover_notes = previous[-NUMBER_TO_CARRY_OVER:]
@@ -1362,7 +1392,6 @@ def main():
                     params["context"] = f"Summary of Notes: {args.t}"
                     params["tag"] = f"convo-{now}"
                     Note.append(NOTEFILE, Note.jot(summary, **params))
-
             elif set(args.additional_args) & set(["cat", "catenate"]):
                 notes_from_tag = {}
                 for tag in args.additional_args[1:]:
@@ -1561,7 +1590,7 @@ def main():
                         printout(last_note, message_only=True)
             elif args.additional_args[0] in SHORTCUTS["SLEEPING_CAT"]:
                 alternate_last_n_lines(TWOCAT, 5)
-            elif args.additional_args[0] in SHORTCUTS["BULK_DELETE_NOTES"]:
+            elif args.additional_args[0] in SHORTCUTS["BULK_MANAGE_NOTES"]:
                 import tempfile
                 import subprocess
                 import os
@@ -1580,7 +1609,8 @@ def main():
 
                 with tempfile.NamedTemporaryFile(mode="w+t", delete=False) as f:
                     f.write(
-                        f"# Prefix any timestamp with 'd' or 's' to delete all notes matching this timestamp\n"
+                        f"# Prefix any timestamp with 'd' to delete all notes matching this timestamp\n"
+                        f"# Prefix any timestamp with 'c' or 'p' to catenate / cherry-pick notes matching this timestamp\n"
                     )
                     for record in records:
                         f.write(f"{record[0]}\t{record[1]}\t{record[2]}\n")
@@ -1592,16 +1622,24 @@ def main():
                 subprocess.run([preferred_editor, temp_file_name])
 
                 to_delete = []
+                to_cat = []
                 with open(temp_file_name, "r") as f:
                     lines = f.readlines()
                     for line in lines:
-                        if line.startswith("d") or line.startswith("s"):
-                            try:
+                        try:
+                            if line.startswith("d"):
                                 to_delete.append(int(line[1:].split("\t")[0].strip()))
-                            except ValueError:
-                                pass  # if instruction line is delete, or too much of the line (not retaining timestamp)
+                            elif line.startswith("c") or line.startswith("p"):
+                                to_cat.append(int(line[1:].split("\t")[0].strip()))
+                        except ValueError:
+                            pass  # if instruction line is delete, or too much of the line (not retaining timestamp)
 
                 os.unlink(temp_file_name)
+
+                ret_notes = []
+                for record_ts in to_cat:
+                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
+                        ret_notes.extend(nc)
 
                 for record_ts in to_delete:
                     with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
@@ -1609,6 +1647,16 @@ def main():
                             print(f"Removing records matching timestamp: {record_ts}")
                             Note.delete(NOTEFILE, record_ts)
                             Note.commit(NOTEFILE)
+
+                # return at the end a space-separated list of the picked notes
+                from time import time
+
+                retval = "\n".join(str(n.now) for n in ret_notes)
+                params["now"] = int(time())
+                params["tag"] = params.get("tag", f"bundle-{params['now']}")
+                params["context"] = "bundled notes from jot scoop"
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+
             elif args.additional_args[0] in SHORTCUTS["NOTES_REFERENCING_ABSENT_DIRS"]:
                 import os
 
