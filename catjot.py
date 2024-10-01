@@ -1442,6 +1442,9 @@ def main():
                     messages.append({"role": "user", "content": user_input})
 
                 response = ""
+                params["context"] = user_input
+                params["tag"] = params.get("tag", f"convo-{now}")
+
                 if args.w:  # wall of text preferred
                     response = send_prompt_to_endpoint(
                         messages, model_name=args.m, mode="full"
