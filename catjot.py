@@ -1372,10 +1372,13 @@ def main():
                     }
                 )
 
-                (summary, obj_info) = send_prompt_to_openai(
+                response = send_prompt_to_endpoint(
                     previous, model_name=args.m, mode="full"
                 )
-                if summary:
+                if response:
+                    summary = response["choices"][0]["message"]["content"]
+                    endline = return_footer(response)
+
                     messages.append(
                         {
                             "role": "system",
@@ -1384,7 +1387,7 @@ def main():
                     )
                     messages.append({"role": "user", "content": summary})
                     messages.extend(carryover_notes)
-                    endline = return_footer(obj_info)
+
                     print_ascii_cat_with_text("Summary", summary, endline)
                     params["context"] = f"Summary of Notes: {args.t}"
                     params["tag"] = f"convo-{now}"
