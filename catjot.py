@@ -1452,6 +1452,7 @@ def main():
 
                     if response:
                         retval = response["choices"][0]["message"]["content"]
+                        messages.append({"role": "assistant", "content": retval})
                         endline = return_footer(response)
                         print_ascii_cat_with_text(user_input, retval, endline)
                         Note.append(NOTEFILE, Note.jot(retval, **params))
@@ -1474,6 +1475,7 @@ def main():
                         print()
 
                     if response:
+                        messages.append({"role": "assistant", "content": response})
                         Note.append(NOTEFILE, Note.jot(response, **params))
 
                         if Note.USE_COLORIZATION:
