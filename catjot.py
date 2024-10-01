@@ -700,9 +700,6 @@ def send_prompt_to_endpoint(messages, model_name, mode):
             "stream": True,  # Enable streaming
         }
 
-        token_count = 0
-        last_token_obj = {}
-
         def stream_response():
             try:
                 with requests.post(
@@ -746,6 +743,42 @@ def return_footer(gpt_reply):
         print(gpt_reply)
         finish_reason = gpt_reply["choices"][0].get("finish_reason", "stop")
         return f"{finish_reason}. (token_count={gpt_reply['token_count']}, model={gpt_reply['model']})"
+
+
+def count_tokens(string):
+    from os import environ
+
+    # Get model card from environment variable
+    # use this model card to determine the tokenization scheme
+    model_card = environ.get("openai_api_modelcard")
+    # export openai_api_modelcard="meta-llama/Llama-3.1-8B-Instruct"
+
+    # Return 0 if model card is not provided
+    if not model_card:
+        return 0
+
+    try:
+        # Import necessary libraries
+        from transformers import AutoTokenizer
+        from huggingface_hub.errors import HFValidationError
+
+        # Load the tokenizer from the specified model card
+        tokenizer = AutoTokenizer.from_pretrained(model_card)
+
+        # Encode the string and return the token count
+        return len(tokenizer.encode(string))
+
+    except HFValidationError as e:
+        # Handle Hugging Face model repository validation errors
+        return 0
+
+    except ModuleNotFoundError as e:
+        # Handle cases where the transformers or huggingface_hub modules are not installed
+        return 0
+
+    except Exception as e:
+        # Catch any other unexpected errors (network issues, API failures, etc.)
+        return 0
 
 
 def is_binary_string(data):
@@ -1212,6 +1245,7 @@ def main():
             now = int(time())
 
             SYS_ROLE_TRIGGER = "SYSTEM:"
+            TOKENIZE_TRIGGER = "TOKENIZE:"
             if not set(args.additional_args) & set(
                 ["sum", "summary", "summarize", "continue"]
             ):
@@ -1423,6 +1457,7 @@ def main():
                     composite_string,
                 )
 
+            # SUMMARY / CAT ends here, begins normal convo loop
             while True:
                 try:
                     user_input = flatten_pipe(sys.stdin.readlines())
@@ -1436,10 +1471,42 @@ def main():
                         {
                             "role": "system",
                             "content": user_input[len(SYS_ROLE_TRIGGER) :],
+                            "tokens": count_tokens(user_input),
                         }
                     )
+                elif user_input.startswith(TOKENIZE_TRIGGER):
+                    for msg in messages:
+                        msg["tokens"] = count_tokens(
+                            msg["role"] + ": " + msg["content"]
+                        )
+                    else:
+                        count = 0
+                        skipped = 0
+                        print(
+                            f"Counting tokens used by previous {len(messages)} exchanges..."
+                        )
+                        for msg in messages:
+                            # The format of the message that LLaMA tokenizes: role and content
+                            num = msg.get("tokens", 0)
+                            if num:
+                                count += num
+                            else:
+                                skipped += 1
+                        else:
+                            print_ascii_cat_with_text(
+                                f"(token_count={count})",
+                                "",
+                                "PROMPT:",
+                            )
+                    continue
                 else:
-                    messages.append({"role": "user", "content": user_input})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": user_input,
+                            "tokens": count_tokens(user_input),
+                        }
+                    )
 
                 response = ""
                 params["context"] = user_input
@@ -1452,7 +1519,13 @@ def main():
 
                     if response:
                         retval = response["choices"][0]["message"]["content"]
-                        messages.append({"role": "assistant", "content": retval})
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": retval,
+                                "tokens": count_tokens(f"assistant: {retval}"),
+                            }
+                        )
                         endline = return_footer(response)
                         print_ascii_cat_with_text(user_input, retval, endline)
                         Note.append(NOTEFILE, Note.jot(retval, **params))
@@ -1475,15 +1548,41 @@ def main():
                         print()
 
                     if response:
-                        messages.append({"role": "assistant", "content": response})
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": response,
+                                "tokens": count_tokens(response),
+                            }
+                        )
                         Note.append(NOTEFILE, Note.jot(response, **params))
+
+                        count = 0
+                        skipped = 0
+                        for msg in messages:
+                            # The format of the message that LLaMA tokenizes: role and content
+                            num = msg.get("tokens", 0)
+                            if num:
+                                count += num
+                            else:
+                                skipped += 1
+
+                        token_str = ""
+                        if skipped:
+                            token_str = (
+                                f"(token_count={count}, uncounted={skipped})"
+                                if count or skipped
+                                else ""
+                            )
+                        else:
+                            token_str = f"(token_count={count})" if count else ""
 
                         if Note.USE_COLORIZATION:
                             print(
-                                f"{AnsiColor.MAGENTA.value}stop.{AnsiColor.RESET.value}"
+                                f"{AnsiColor.MAGENTA.value}stop. {token_str}{AnsiColor.RESET.value}"
                             )
                         else:
-                            print(f"stop.")
+                            print(f"stop. {token_str}")
                     else:
                         print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
