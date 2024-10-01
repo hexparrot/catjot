@@ -1745,14 +1745,15 @@ def main():
                             Note.delete(NOTEFILE, record_ts)
                             Note.commit(NOTEFILE)
 
-                # return at the end a space-separated list of the picked notes
-                from time import time
+                if len(ret_notes):
+                    # return at the end a space-separated list of the picked notes
+                    from time import time
 
-                retval = "\n".join(str(n.now) for n in ret_notes)
-                params["now"] = int(time())
-                params["tag"] = params.get("tag", f"bundle-{params['now']}")
-                params["context"] = "bundled notes from jot scoop"
-                Note.append(NOTEFILE, Note.jot(retval, **params))
+                    retval = "\n".join(str(n.now) for n in ret_notes)
+                    params["now"] = int(time())
+                    params["tag"] = params.get("tag", f"bundle-{params['now']}")
+                    params["context"] = "bundled notes from jot scoop"
+                    Note.append(NOTEFILE, Note.jot(retval, **params))
 
             elif args.additional_args[0] in SHORTCUTS["NOTES_REFERENCING_ABSENT_DIRS"]:
                 import os
