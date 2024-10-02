@@ -874,7 +874,8 @@ def return_footer(gpt_reply):
 
 
 def count_tokens(string):
-    from os import environ
+    import hashlib
+    import os
 
     # Get model card from environment variable
     # use this model card to determine the tokenization scheme
@@ -891,7 +892,22 @@ def count_tokens(string):
         from huggingface_hub.errors import HFValidationError
 
         # Load the tokenizer from the specified model card
-        tokenizer = AutoTokenizer.from_pretrained(model_card)
+        tokenizer_dir = os.path.join(
+            os.path.expanduser("~"), ".local", "share", "tokenizer"
+        )
+        # Create the directory
+        os.makedirs(tokenizer_dir, exist_ok=True)
+        # 8 char hash of the string that represents the model_card on hugging face
+        hashy = hashlib.sha256(model_card.encode()).hexdigest()[:8]
+        # full directory path containing the tokenizer files
+        tokenizer_path = os.path.join(tokenizer_dir, hashy)
+
+        if os.path.exists(tokenizer_path):
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        else:
+            # if not found locally, will reach out to internet
+            tokenizer = AutoTokenizer.from_pretrained(model_card)
+            tokenizer.save_pretrained(tokenizer_path)
 
         # Encode the string and return the token count
         return len(tokenizer.encode(string))
