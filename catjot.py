@@ -636,6 +636,134 @@ CATGPT_ROLE = (
 )
 
 
+class catjot_graphql(object):
+    """Implements a GraphQL interface allowing access to NOTEFILE.
+    A basic query filter runs in O(n) time."""
+
+    # Basic query means using any of the SearchType enums, case-insensitive.
+    QUERY = """
+    query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
+      notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
+        pwd
+        now
+        tag
+        context
+        message
+      }
+    }
+    """
+
+    def __init__(self, notefile=Note.NOTEFILE):
+        self.schema = self._create_schema()
+        self.NOTEFILE = notefile
+
+    def _create_schema(self):
+        from graphql import (
+            graphql_sync,
+            GraphQLSchema,
+            GraphQLObjectType,
+            GraphQLList,
+            GraphQLField,
+            GraphQLInt,
+            GraphQLString,
+        )
+
+        # Define the GraphQL schema for the Note type
+        NoteType = GraphQLObjectType(
+            name="Note",
+            fields={
+                "pwd": GraphQLField(GraphQLString),
+                "now": GraphQLField(GraphQLInt),
+                "tag": GraphQLField(GraphQLString),
+                "context": GraphQLField(GraphQLString),
+                "message": GraphQLField(GraphQLString),
+            },
+        )
+
+        # Update the root query type to allow filtering by context
+        QueryType = GraphQLObjectType(
+            name="Query",
+            fields={
+                "notes": GraphQLField(
+                    GraphQLList(NoteType),  # The query returns a list of Note objects
+                    args={  # Query arguments for filtering
+                        "pwd": GraphQLString,
+                        "now": GraphQLInt,
+                        "tag": GraphQLList(GraphQLString),
+                        "context": GraphQLString,
+                        "message": GraphQLString,
+                        "pwdtree": GraphQLString,
+                        "logic": GraphQLString,
+                    },
+                    resolve=self.resolve_notes,
+                ),
+            },
+        )
+
+        return GraphQLSchema(query=QueryType)
+
+    def execute_query(self, variables, query=QUERY):
+        """Return a list of Notes according to the criteria provided
+        as a dictionary applied to QUERY"""
+        # Example: Match each criteria with and/or logic
+        # from pprint import pprint
+        # pprint(catjot_graphql().execute_query(
+        # {
+        #    "tag": ["predator", "kitten"],
+        #    "context": "catgpt",
+        #    "message": "meow",
+        #    "logic": "and", # or "or"
+        # }).data)
+
+        # Example: print all notes
+        # pprint(catjot_graphql().execute_query({"pwdtree": "/"}).data)"""
+        from graphql import parse, execute_sync
+
+        parsed_query = parse(query)
+        result = execute_sync(self.schema, parsed_query, variable_values=variables)
+        return result
+
+    def resolve_notes(
+        self,
+        _,
+        info,
+        pwd=None,
+        now=None,
+        tag=None,
+        context=None,
+        message=None,
+        pwdtree=None,
+        logic="or",
+    ):
+        """Resolver for Note GraphQL datatype"""
+
+        criteria = []
+
+        if pwd:
+            criteria.append((SearchType.DIRECTORY, pwd))
+
+        if pwdtree:
+            criteria.append((SearchType.TREE, pwdtree))
+
+        if now:
+            criteria.append((SearchType.TIMESTAMP, now))
+
+        if tag:
+            if isinstance(tag, list):
+                for i in tag:
+                    criteria.append((SearchType.TAG, i))
+            else:
+                criteria.append((SearchType.TAG, tag))
+
+        if context:
+            criteria.append((SearchType.CONTEXT_I, context))
+
+        if message:
+            criteria.append((SearchType.MESSAGE_I, message))
+
+        return list(Note.match(self.NOTEFILE, criteria, logic))
+
+
 def alternate_last_n_lines(text, n):
     import time
 
