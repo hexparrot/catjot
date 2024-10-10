@@ -1183,6 +1183,7 @@ def main():
             "MESSAGE_ONLY": ["payload", "pl"],
             "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
             "SLEEPING_CAT": ["zzz"],
+            "GRAPHQL": ["graph", "graphql", "ql"],
             "CHAT": ["chat", "catgpt", "c"],
             "CONVO": [
                 "cat",
@@ -1897,6 +1898,39 @@ def main():
                         print(f"{Note.LABEL_SEP}")
                         print(f"{matches} stray notes among")
                         print(f"{len(nc)} notes in total")
+            elif args.additional_args[0] in SHORTCUTS["GRAPHQL"]:
+                # allow reading from "cat|jot ql" with k:v pairs space separated:
+                # pwd /home/willy
+                # -> {"pwd": "/home/willy"}
+                # when invoked without a pipe, e.g., "jot ql", it gives all notes+child notes of the pwd
+
+                QUERY = """
+                query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
+                  notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
+                    tag
+                    context
+                    message
+                  }
+                }
+                """
+                parsed_vars = {}
+                if sys.stdin.isatty():  # jot ql
+                    from os import getcwd
+
+                    parsed_vars = {"pwdtree": getcwd()}
+                else:  # cat | jot ql
+                    for line in sys.stdin:
+                        # Strip whitespace and split by a single space
+                        line = line.strip()
+                        if line:
+                            # Split only on the first space to allow spaces in values
+                            key, value = line.split(" ", 1)
+                            parsed_vars[key] = value
+
+                from pprint import pprint
+
+                pprint(parsed_vars)
+                pprint(catjot_graphql().execute_query(parsed_vars, query=QUERY).data)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
