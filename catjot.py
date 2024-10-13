@@ -9,6 +9,8 @@ __status__ = "Development"
 from os import environ, getcwd
 from enum import Enum, auto
 
+tokenizer = None
+
 
 def supports_color():
     import os
@@ -877,6 +879,8 @@ def count_tokens(string):
     import hashlib
     import os
 
+    global tokenizer
+
     # Get model card from environment variable
     # use this model card to determine the tokenization scheme
     model_card = environ.get("openai_api_modelcard")
@@ -902,7 +906,9 @@ def count_tokens(string):
         # full directory path containing the tokenizer files
         tokenizer_path = os.path.join(tokenizer_dir, hashy)
 
-        if os.path.exists(tokenizer_path):
+        if tokenizer:
+            pass  # use existing loaded tokenizer
+        elif os.path.exists(tokenizer_path):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         else:
             # if not found locally, will reach out to internet
