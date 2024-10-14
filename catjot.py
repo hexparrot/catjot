@@ -23,6 +23,9 @@ def supports_color():
     return supported_platform and is_a_tty
 
 
+# START: ENUM LISTS
+
+
 class AnsiColor(Enum):
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -35,6 +38,22 @@ class AnsiColor(Enum):
     MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
+
+
+class SearchType(Enum):
+    ALL = auto()
+    TAG = auto()
+    MESSAGE = auto()
+    MESSAGE_I = auto()
+    CONTEXT = auto()
+    CONTEXT_I = auto()
+    TIMESTAMP = auto()
+    DIRECTORY = auto()
+    TREE = auto()
+
+
+# END: ENUM LISTS
+# START: CLASSES
 
 
 class Note(object):
@@ -613,7 +632,8 @@ class ContextBundle(object):
             pass
 
 
-NEWCAT = r"""-------------------------------------
+class NoteContext:
+    NEWCAT = r"""-------------------------------------
      ("`-/")_.-'"``-._
       . . `; -._    )-;-,_`)
      (v_,)'  _  )`-.\  ``-'
@@ -622,20 +642,29 @@ NEWCAT = r"""-------------------------------------
    ((,-'    ((,|
 """  # credits felix lee
 
-TWOCAT = r"""_____________________________________
-\            |\      _,,,---,,_      \\
- \           /,`.-'`'    -.  ;-;;,_   \\
-  \         |,4-  ) )-,_..;\ (  `'-'   \\
-   \ ZzZ   '---''(_/--'  `-'\_)         \\
-   \ zZ    '---''(_/--'  `-'\_)         \\
-   \ Z     '---''(_/--'  `-'\_)         \\
-   \   Z   '---''(_/--'  `-'\_)         \\
-   \  Zz   '---''(_/--'  `-'\_)         \\
-"""  # credits felix lee
+    def __init__(self, notefile, search_criteria):
+        self.notefile = notefile
+        self.criteria = search_criteria
 
-CATGPT_ROLE = (
-    """You're proudly a cat assistant here to help the user in any way you can."""
-)
+    def __enter__(self):
+        import sys
+
+        try:
+            return list(Note.match(self.notefile, self.criteria))
+        except FileNotFoundError:
+            print(f"Waking up the cat at {self.notefile}. Now, try again.")
+            for line in NEWCAT.split("\n")[0:-2]:
+                print(line)
+            open(self.notefile, "a").close()
+            sys.exit(1)
+        except ValueError:
+            print(
+                f"Value provided does not match expected type, like having a character in an int."
+            )
+            sys.exit(3)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
 
 
 class catjot_graphql(object):
@@ -766,22 +795,8 @@ class catjot_graphql(object):
         return list(Note.match(self.NOTEFILE, criteria, logic))
 
 
-def alternate_last_n_lines(text, n):
-    import time
-
-    lines = text.strip().split("\n")
-    # Print all but the last 'n' lines
-    for line in lines[:-n]:
-        print(line)
-
-    while True:
-        for i in range(-n, 0):
-            # Print one of the last 'n' lines
-            print(lines[i], end="\r")
-            time.sleep(1)
-
-            # Clear the line
-            print(" " * len(lines[i]), end="\r")
+# END: CLASSES
+# START: LAST REMAINING UNSORTED FUNCTIONS
 
 
 def send_prompt_to_endpoint(messages, model_name, mode):
@@ -976,42 +991,8 @@ def print_ascii_cat_with_text(intro, text, endtext="stop."):
     print(f"{AnsiColor.MAGENTA.value}{endtext}{AnsiColor.RESET.value}")
 
 
-class SearchType(Enum):
-    ALL = auto()
-    TAG = auto()
-    MESSAGE = auto()
-    MESSAGE_I = auto()
-    CONTEXT = auto()
-    CONTEXT_I = auto()
-    TIMESTAMP = auto()
-    DIRECTORY = auto()
-    TREE = auto()
-
-
-class NoteContext:
-    def __init__(self, notefile, search_criteria):
-        self.notefile = notefile
-        self.criteria = search_criteria
-
-    def __enter__(self):
-        import sys
-
-        try:
-            return list(Note.match(self.notefile, self.criteria))
-        except FileNotFoundError:
-            print(f"Waking up the cat at {self.notefile}. Now, try again.")
-            for line in NEWCAT.split("\n")[0:-2]:
-                print(line)
-            open(self.notefile, "a").close()
-            sys.exit(1)
-        except ValueError:
-            print(
-                f"Value provided does not match expected type, like having a character in an int."
-            )
-            sys.exit(3)
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
+# END: LAST REMAINING UNSORTED FUNCTIONS
+# START: COMMAND LINE RUNTIME CODE
 
 
 def main():
@@ -1188,6 +1169,9 @@ def main():
             Note.append(NOTEFILE, Note.jot(piped_data, **params))
     else:
         # for all other cases where no argparse argument is provided
+        # START: USER-EDITABLE AREA
+        # this section can be freely customized for all strings
+        # in the right-hand side lists.
         SHORTCUTS = {
             "MOST_RECENTLY_WRITTEN_ALLTIME": ["HEAD", "head", "h"],
             "MOST_RECENTLY_WRITTEN_HERE": ["last", "l"],
@@ -1218,6 +1202,10 @@ def main():
                 "summarize",
             ],
         }
+
+        # Default prompt to start jot chat & jot convo with
+        CATGPT_ROLE = """You're proudly a cat assistant here to help the user in any way you can."""
+        # END: USER-EDITABLE AREA
 
         IS_CHAT = False
         IS_CONVO = False  # continuing conversation mode
@@ -1837,6 +1825,35 @@ def main():
                     else:
                         printout(last_note, message_only=True)
             elif args.additional_args[0] in SHORTCUTS["SLEEPING_CAT"]:
+
+                def alternate_last_n_lines(text, n):
+                    import time
+
+                    lines = text.strip().split("\n")
+                    # Print all but the last 'n' lines
+                    for line in lines[:-n]:
+                        print(line)
+
+                    while True:
+                        for i in range(-n, 0):
+                            # Print one of the last 'n' lines
+                            print(lines[i], end="\r")
+                            time.sleep(1)
+
+                            # Clear the line
+                            print(" " * len(lines[i]), end="\r")
+
+                TWOCAT = r"""_____________________________________
+\            |\      _,,,---,,_      \\
+ \           /,`.-'`'    -.  ;-;;,_   \\
+  \         |,4-  ) )-,_..;\ (  `'-'   \\
+   \ ZzZ   '---''(_/--'  `-'\_)         \\
+   \ zZ    '---''(_/--'  `-'\_)         \\
+   \ Z     '---''(_/--'  `-'\_)         \\
+   \   Z   '---''(_/--'  `-'\_)         \\
+   \  Zz   '---''(_/--'  `-'\_)         \\
+"""  # credits felix lee
+
                 alternate_last_n_lines(TWOCAT, 5)
             elif args.additional_args[0] in SHORTCUTS["BULK_MANAGE_NOTES"]:
                 import tempfile
