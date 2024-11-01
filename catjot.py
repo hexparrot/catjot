@@ -1975,7 +1975,13 @@ def main():
                 pprint(parsed_vars)
                 pprint(catjot_graphql().execute_query(parsed_vars, query=QUERY).data)
             elif args.additional_args[0] in SHORTCUTS["CREATE_SPACED_REPETITION"]:
-                pass
+                print("Enter note prompt/hint:")
+                prompt = flatten_pipe(sys.stdin.readlines())  # this matches context
+                print("Enter answer:")
+                answer = flatten_pipe(sys.stdin.readlines())
+                Note.append(
+                    NOTEFILE, Note.jot(answer, context=prompt, pwd="/spaced_repetition")
+                )
             elif args.additional_args[0] in SHORTCUTS["ITERATE_SPACED_REPETITIONS"]:
                 from datetime import datetime, timedelta
 
