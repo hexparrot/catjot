@@ -2041,7 +2041,7 @@ def main():
                         try:
                             current_interval = int(inst.pwd.split("/")[-1])
                         except ValueError:
-                            current_interval = 0
+                            current_interval = 1
 
                         try:
                             print_ascii_cat_with_text(inst.context, "", "type below:")
