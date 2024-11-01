@@ -1032,7 +1032,9 @@ def main():
         "                   'continue'/start a new convo using the tag chain including up and until <timestamp>\n"
         "  jot zzz          take a nap with a kitten...\n"
         "  jot sbs 16952..  side-by-side transcription practice mode\n"
-        "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n",
+        "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n"
+        "  jot newsr        create a new note designed for spaced repetition practice\n"
+        "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -1190,6 +1192,8 @@ def main():
             "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
             "SLEEPING_CAT": ["zzz"],
             "GRAPHQL": ["graph", "graphql", "ql"],
+            "CREATE_SPACED_REPETITION": ["newsr"],
+            "ITERATE_SPACED_REPETITIONS": ["sr"],
             "CHAT": ["chat", "catgpt", "c"],
             "CONVO": [
                 "cat",
@@ -1970,6 +1974,109 @@ def main():
 
                 pprint(parsed_vars)
                 pprint(catjot_graphql().execute_query(parsed_vars, query=QUERY).data)
+            elif args.additional_args[0] in SHORTCUTS["CREATE_SPACED_REPETITION"]:
+                pass
+            elif args.additional_args[0] in SHORTCUTS["ITERATE_SPACED_REPETITIONS"]:
+                from datetime import datetime, timedelta
+
+                def next_interval(number, intervals=[1, 2, 4, 7, 12]):
+                    """Finds the next interval based on the input number and a sorted intervals list."""
+                    # Check if the number is greater than or equal to the largest interval
+                    if number >= intervals[-1]:
+                        return intervals[-1]
+
+                    # Loop through intervals to find the next interval
+                    for i in range(len(intervals)):
+                        if intervals[i] == number:
+                            # Return the next interval if it exists
+                            return (
+                                intervals[i + 1]
+                                if i + 1 < len(intervals)
+                                else intervals[-1]
+                            )
+                        elif intervals[i] > number:
+                            # Return the first interval greater than the input number
+                            return intervals[i]
+
+                    # Fallback, though we expect to return within the loop
+                    return intervals[0]
+
+                def calculate_next_review(current_timestamp, days_until_next):
+                    """Calculate the next review timestamp based on the current timestamp, review level, and interval list.
+
+                    Args:
+                    current_timestamp (int): The current timestamp in epoch format.
+                    review_level (int): The level of days to adjust timestamp for
+
+                    Returns:
+                    int: The next scheduled review timestamp in epoch format.
+                    """
+                    # Calculate the next review date by adding the interval in days to the current date
+                    next_review_date = datetime.fromtimestamp(
+                        current_timestamp
+                    ) + timedelta(days=days_until_next)
+
+                    # Return the timestamp for the next review
+                    return int(next_review_date.timestamp())
+
+                import copy
+                from time import time
+                from datetime import datetime, timedelta
+
+                with NoteContext(
+                    NOTEFILE, (SearchType.TREE, "/spaced_repetition")
+                ) as nc:
+                    for inst in nc:
+                        if (
+                            time() < inst.now
+                        ):  # if current time has not yet reached note ts
+                            continue
+
+                        try:
+                            current_interval = int(inst.pwd.split("/")[-1])
+                        except ValueError:
+                            current_interval = 0
+
+                        try:
+                            print_ascii_cat_with_text(inst.context, "", "type below:")
+                            user_input = flatten_pipe(sys.stdin.readlines())
+                        except KeyboardInterrupt:
+                            break
+                        except IndexError:
+                            print("no notes remain for today")
+                        else:
+                            new_obj = copy.deepcopy(inst)
+
+                            date_time = datetime.fromtimestamp(time())
+                            start_of_day = datetime(
+                                date_time.year, date_time.month, date_time.day
+                            )
+                            start_of_day_ts = int(start_of_day.timestamp())
+
+                            if user_input.strip() == inst.message.strip():
+                                next_int = next_interval(current_interval)
+                                new_obj.now = calculate_next_review(
+                                    start_of_day_ts, next_int
+                                )
+                                new_obj.pwd = f"/spaced_repetition/{next_int}"
+                                print(
+                                    "✓ Next note appearance:",
+                                    datetime.fromtimestamp(new_obj.now),
+                                )
+                            else:
+                                new_obj.now = calculate_next_review(
+                                    start_of_day_ts, next_interval(0)
+                                )
+                                new_obj.pwd = f"/spaced_repetition/0"
+                                print(
+                                    "✗ Next note appearance:",
+                                    datetime.fromtimestamp(new_obj.now),
+                                )
+                            Note.append(NOTEFILE, new_obj)
+                            Note.delete(NOTEFILE, int(inst.now))
+                            Note.commit(NOTEFILE)
+                    else:  # at end of iterating notes
+                        print("Done for today")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
