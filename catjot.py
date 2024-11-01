@@ -2026,6 +2026,7 @@ def main():
                     return int(next_review_date.timestamp())
 
                 import copy
+                from random import randint
                 from time import time
                 from datetime import datetime, timedelta
 
@@ -2057,7 +2058,11 @@ def main():
                             start_of_day = datetime(
                                 date_time.year, date_time.month, date_time.day
                             )
-                            start_of_day_ts = int(start_of_day.timestamp())
+                            start_of_day_ts = int(start_of_day.timestamp()) + randint(
+                                1, 3600
+                            )
+                            # add up to an hour to reduce collisions but
+                            # still keep close to the new day.
 
                             if user_input.strip() == inst.message.strip():
                                 next_int = next_interval(current_interval)
