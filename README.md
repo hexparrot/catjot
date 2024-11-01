@@ -204,6 +204,10 @@ $ echo $DATA
 
 `jot s tabby`  : (search) case-insensitive <term> within message payload (*see m)
 
+`jot sr`     : go through all notes ready for (sr) spaced repetition
+
+`jot newsr`     : interactive prompt to create (newsr) new spaced repetition note. Where possible, prefer `echo "answer" | jot -c "hint" -p "/spaced_repetition"` in a script.
+
 `jot scoop`  : view list of all notes in $EDITOR, delete prefixing records with 's' or 'd'
 
 `jot stray`  : display all (strays), which are all notes whose pwd are absent on this system
@@ -294,9 +298,13 @@ terminal_width : 138
 Currently designed around OpenAI's ChatGPT Platform API, for use with openai api-compatible endpoints.
 Set the variable `openai_api_key`; example for bash-shell below:
 
-export openai_api_key=sk-proj-...BEEF"
+`export openai_api_key="sk-proj-...BEEF"`
 
-There are two different GPT-enhanced functionalities, CHAT and CONVO:
+You may also configure a local gpt with `openai_api_url`:
+
+`export openai_api_url=http://192.168.240.1:5001/v1/chat/completions`
+
+As for interactions, there are two different GPT-enhanced functionalities, CHAT and CONVO:
 
 #### jot chat syntax
 
@@ -386,6 +394,7 @@ stop.
 
 But you can continue conversations from where you left off in multiple ways:
 
+```
 $ jot -t convo-1719967764 continue
          # Use all of matches for tag-* as context and be prompted for the next user role input
 
@@ -394,4 +403,4 @@ $ jot -t convo-1719967764 continue 1696727387
 
 $ jot continue 1696727387
          # Using the provided timestamp, auto-match the convo-* tag, and truncate notes after the provided timestamp
-
+```
