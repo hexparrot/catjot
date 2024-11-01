@@ -2074,9 +2074,11 @@ def main():
                                     start_of_day_ts, next_interval(0)
                                 )
                                 new_obj.pwd = f"/spaced_repetition/0"
-                                print(
-                                    "✗ Next note appearance:",
-                                    datetime.fromtimestamp(new_obj.now),
+
+                                print_ascii_cat_with_text(
+                                    inst.message.strip(),
+                                    "is the correct answer",
+                                    f"✗ Next note appearance: {datetime.fromtimestamp(new_obj.now)}",
                                 )
                             Note.append(NOTEFILE, new_obj)
                             Note.delete(NOTEFILE, int(inst.now))
