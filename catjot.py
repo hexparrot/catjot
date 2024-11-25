@@ -890,7 +890,7 @@ def return_footer(gpt_reply):
         return f"{finish_reason}. (token_count={gpt_reply['token_count']}, model={gpt_reply['model']})"
 
 
-def count_tokens(string):
+def count_(string):
     import hashlib
     import os
 
@@ -1317,7 +1317,7 @@ def main():
                 )
                 sys.exit(1)
             elif len(full_sendout.encode("utf-8")) > 512000:
-                # 512000 bytes is an estimation of 128000 tokens * 4 bytes
+                # 512000 bytes is an estimation of 128000  * 4 bytes
                 # a real tokenizer might be better, but this approximation
                 # should be sufficient and cost-proTECtive ($0.15/million tokens)
                 print_ascii_cat_with_text(
@@ -1614,7 +1614,7 @@ def main():
                         {
                             "role": "system",
                             "content": user_input[len(SYS_ROLE_TRIGGER) :],
-                            "tokens": count_tokens(user_input),
+                            #"tokens": count_tokens(user_input),
                         }
                     )
                 elif user_input.startswith(TOKENIZE_TRIGGER):
@@ -1647,7 +1647,7 @@ def main():
                         {
                             "role": "user",
                             "content": user_input,
-                            "tokens": count_tokens(user_input),
+                            #"tokens": count_tokens(user_input),
                         }
                     )
 
@@ -1666,7 +1666,7 @@ def main():
                             {
                                 "role": "assistant",
                                 "content": retval,
-                                "tokens": count_tokens(f"assistant: {retval}"),
+                                #"tokens": count_tokens(f"assistant: {retval}"),
                             }
                         )
                         endline = return_footer(response)
@@ -1695,7 +1695,7 @@ def main():
                             {
                                 "role": "assistant",
                                 "content": response,
-                                "tokens": count_tokens(response),
+                                #"tokens": count_tokens(response),
                             }
                         )
                         Note.append(NOTEFILE, Note.jot(response, **params))
