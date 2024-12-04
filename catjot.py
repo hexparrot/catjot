@@ -9,9 +9,6 @@ __status__ = "Development"
 from os import environ, getcwd
 from enum import Enum, auto
 
-tokenizer = None
-
-
 def supports_color():
     import os
     import sys
@@ -879,71 +876,8 @@ def send_prompt_to_endpoint(messages, model_name, mode):
 def return_footer(gpt_reply):
     # receives the jSON object from a successful gpt call
     # returns technical details of token usage/model
-    if "usage" in gpt_reply:
-        prompt_tokens = gpt_reply["usage"]["prompt_tokens"]
-        output_tokens = gpt_reply["usage"]["completion_tokens"]
-        model_name = gpt_reply["model"]
-        return f"stop. (prompt tokens={prompt_tokens}, output_tokens={output_tokens}, model={model_name})"
-    else:
-        print(gpt_reply)
-        finish_reason = gpt_reply["choices"][0].get("finish_reason", "stop")
-        return f"{finish_reason}. (token_count={gpt_reply['token_count']}, model={gpt_reply['model']})"
-
-
-def count_(string):
-    import hashlib
-    import os
-
-    global tokenizer
-
-    # Get model card from environment variable
-    # use this model card to determine the tokenization scheme
-    model_card = environ.get("openai_api_modelcard")
-    # export openai_api_modelcard="meta-llama/Llama-3.1-8B-Instruct"
-
-    # Return 0 if model card is not provided
-    if not model_card:
-        return 0
-
-    try:
-        # Import necessary libraries
-        from transformers import AutoTokenizer
-        from huggingface_hub.errors import HFValidationError
-
-        # Load the tokenizer from the specified model card
-        tokenizer_dir = os.path.join(
-            os.path.expanduser("~"), ".local", "share", "tokenizer"
-        )
-        # Create the directory
-        os.makedirs(tokenizer_dir, exist_ok=True)
-        # 8 char hash of the string that represents the model_card on hugging face
-        hashy = hashlib.sha256(model_card.encode()).hexdigest()[:8]
-        # full directory path containing the tokenizer files
-        tokenizer_path = os.path.join(tokenizer_dir, hashy)
-
-        if tokenizer:
-            pass  # use existing loaded tokenizer
-        elif os.path.exists(tokenizer_path):
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        else:
-            # if not found locally, will reach out to internet
-            tokenizer = AutoTokenizer.from_pretrained(model_card)
-            tokenizer.save_pretrained(tokenizer_path)
-
-        # Encode the string and return the token count
-        return len(tokenizer.encode(string))
-
-    except HFValidationError as e:
-        # Handle Hugging Face model repository validation errors
-        return 0
-
-    except ModuleNotFoundError as e:
-        # Handle cases where the transformers or huggingface_hub modules are not installed
-        return 0
-
-    except Exception as e:
-        # Catch any other unexpected errors (network issues, API failures, etc.)
-        return 0
+    finish_reason = gpt_reply["choices"][0].get("finish_reason", "stop")
+    return f"{finish_reason}. model={gpt_reply['model']})"
 
 
 def is_binary_string(data):
@@ -1388,7 +1322,6 @@ def main():
             now = int(time())
 
             SYS_ROLE_TRIGGER = "SYSTEM:"
-            TOKENIZE_TRIGGER = "TOKENIZE:"
             if not set(args.additional_args) & set(
                 ["sum", "summary", "summarize", "continue"]
             ):
@@ -1614,40 +1547,13 @@ def main():
                         {
                             "role": "system",
                             "content": user_input[len(SYS_ROLE_TRIGGER) :],
-                            #"tokens": count_tokens(user_input),
                         }
                     )
-                elif user_input.startswith(TOKENIZE_TRIGGER):
-                    for msg in messages:
-                        msg["tokens"] = count_tokens(
-                            msg["role"] + ": " + msg["content"]
-                        )
-                    else:
-                        count = 0
-                        skipped = 0
-                        print(
-                            f"Counting tokens used by previous {len(messages)} exchanges..."
-                        )
-                        for msg in messages:
-                            # The format of the message that LLaMA tokenizes: role and content
-                            num = msg.get("tokens", 0)
-                            if num:
-                                count += num
-                            else:
-                                skipped += 1
-                        else:
-                            print_ascii_cat_with_text(
-                                f"(token_count={count})",
-                                "",
-                                "PROMPT:",
-                            )
-                    continue
                 else:
                     messages.append(
                         {
                             "role": "user",
                             "content": user_input,
-                            #"tokens": count_tokens(user_input),
                         }
                     )
 
@@ -1666,7 +1572,6 @@ def main():
                             {
                                 "role": "assistant",
                                 "content": retval,
-                                #"tokens": count_tokens(f"assistant: {retval}"),
                             }
                         )
                         endline = return_footer(response)
@@ -1695,37 +1600,16 @@ def main():
                             {
                                 "role": "assistant",
                                 "content": response,
-                                #"tokens": count_tokens(response),
                             }
                         )
                         Note.append(NOTEFILE, Note.jot(response, **params))
 
-                        count = 0
-                        skipped = 0
-                        for msg in messages:
-                            # The format of the message that LLaMA tokenizes: role and content
-                            num = msg.get("tokens", 0)
-                            if num:
-                                count += num
-                            else:
-                                skipped += 1
-
-                        token_str = ""
-                        if skipped:
-                            token_str = (
-                                f"(token_count={count}, uncounted={skipped})"
-                                if count or skipped
-                                else ""
-                            )
-                        else:
-                            token_str = f"(token_count={count})" if count else ""
-
                         if Note.USE_COLORIZATION:
                             print(
-                                f"{AnsiColor.MAGENTA.value}stop. {token_str}{AnsiColor.RESET.value}"
+                                f"{AnsiColor.MAGENTA.value}stop. {AnsiColor.RESET.value}"
                             )
                         else:
-                            print(f"stop. {token_str}")
+                            print(f"stop.")
                     else:
                         print("Failed to get response from OpenAI API.")
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
