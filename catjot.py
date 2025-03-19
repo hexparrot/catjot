@@ -9,6 +9,7 @@ __status__ = "Development"
 from os import environ, getcwd
 from enum import Enum, auto
 
+
 def supports_color():
     import os
     import sys
@@ -650,7 +651,7 @@ class NoteContext:
             return list(Note.match(self.notefile, self.criteria))
         except FileNotFoundError:
             print(f"Waking up the cat at {self.notefile}. Now, try again.")
-            for line in NEWCAT.split("\n")[0:-2]:
+            for line in self.NEWCAT.split("\n")[0:-2]:
                 print(line)
             open(self.notefile, "a").close()
             sys.exit(1)
