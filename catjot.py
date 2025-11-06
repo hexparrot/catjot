@@ -817,7 +817,9 @@ def send_prompt_to_endpoint(messages, model_name, mode):
 
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url", "https://api.openai.com/v1/chat/completions")
-    api_model = getenv("openai_api_model", model_name)
+    api_model = getenv("openai_api_model")
+    if model_name: # -m MODEL shall take precedence
+        api_model = model_name
     # set this key in your shell, e.g., this line in your ~/.bash_profile:
     # export openai_api_key="sk-proj...8EEF"
     headers = {"Content-Type": "application/json"}
