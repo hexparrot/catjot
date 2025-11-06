@@ -824,6 +824,7 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     # export openai_api_key="sk-proj...8EEF"
     # export openai_api_url="https://example.com/v1/chat/completions"
     # export openai_api_model="catgpt-nano"
+    # export openai_api_sysrole="Overriding system role goes here"
     headers = {"Content-Type": "application/json"}
 
     if api_key:
@@ -1146,7 +1147,8 @@ def main():
         }
 
         # Default prompt to start jot chat & jot convo with
-        CATGPT_ROLE = """You're proudly a cat assistant here to help the user in any way you can."""
+        from os import getenv
+        CATGPT_ROLE = getenv("openai_api_sysrole", """You're proudly a cat assistant here to help the user in any way you can.""")
         # END: USER-EDITABLE AREA
 
         IS_CHAT = False
