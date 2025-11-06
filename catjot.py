@@ -816,7 +816,7 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     from os import getenv
 
     api_key = getenv("openai_api_key")
-    api_url = getenv("openai_api_url", "https://api.openai.com/v1/chat/completions")
+    api_url = getenv("openai_api_url")
     api_model = getenv("openai_api_model")
     if model_name: # -m MODEL shall take precedence
         api_model = model_name
@@ -826,8 +826,7 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     # export openai_api_model="catgpt-nano"
     headers = {"Content-Type": "application/json"}
 
-    if api_key and "openai" in api_url:
-        # only send key with openai in url so it is not leaked all the time
+    if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
     if mode == "full":
