@@ -820,8 +820,10 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     api_model = getenv("openai_api_model")
     if model_name: # -m MODEL shall take precedence
         api_model = model_name
-    # set this key in your shell, e.g., this line in your ~/.bash_profile:
+    # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
     # export openai_api_key="sk-proj...8EEF"
+    # export openai_api_url="https://example.com/v1/chat/completions"
+    # export openai_api_model="catgpt-nano"
     headers = {"Content-Type": "application/json"}
 
     if api_key and "openai" in api_url:
@@ -984,7 +986,7 @@ def main():
         "-p", type=str, help="search notes by pwd / set pwd when amending"
     )
     parser.add_argument(
-        "-m", type=str, default="gpt-4o-mini", help="LLM model to engage"
+        "-m", type=str, default="", help="LLM model to engage"
     )
     parser.add_argument(
         "-w", action="store_true", help="wall-of-text rather than stream"
