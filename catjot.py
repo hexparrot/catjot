@@ -822,7 +822,8 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     # export openai_api_key="sk-proj...8EEF"
     headers = {"Content-Type": "application/json"}
 
-    if api_url.startswith("https://api.openai.com"):
+    if api_key and "openai" in api_url:
+        # only send key with openai in url so it is not leaked all the time
         headers["Authorization"] = f"Bearer {api_key}"
 
     if mode == "full":
