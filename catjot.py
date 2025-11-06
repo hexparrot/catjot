@@ -816,13 +816,18 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     from os import getenv
 
     api_key = getenv("openai_api_key")
-    api_url = getenv("openai_api_url", "https://api.openai.com/v1/chat/completions")
-    api_model = getenv("openai_api_model", model_name)
-    # set this key in your shell, e.g., this line in your ~/.bash_profile:
+    api_url = getenv("openai_api_url")
+    api_model = getenv("openai_api_model")
+    if model_name: # -m MODEL shall take precedence
+        api_model = model_name
+    # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
     # export openai_api_key="sk-proj...8EEF"
+    # export openai_api_url="https://example.com/v1/chat/completions"
+    # export openai_api_model="catgpt-nano"
+    # export openai_api_sysrole="Overriding system role goes here"
     headers = {"Content-Type": "application/json"}
 
-    if api_url.startswith("https://api.openai.com"):
+    if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
     if mode == "full":
@@ -981,7 +986,7 @@ def main():
         "-p", type=str, help="search notes by pwd / set pwd when amending"
     )
     parser.add_argument(
-        "-m", type=str, default="gpt-4o-mini", help="LLM model to engage"
+        "-m", type=str, default="", help="LLM model to engage"
     )
     parser.add_argument(
         "-w", action="store_true", help="wall-of-text rather than stream"
@@ -1142,7 +1147,8 @@ def main():
         }
 
         # Default prompt to start jot chat & jot convo with
-        CATGPT_ROLE = """You're proudly a cat assistant here to help the user in any way you can."""
+        from os import getenv
+        CATGPT_ROLE = getenv("openai_api_sysrole", """You're proudly a cat assistant here to help the user in any way you can.""")
         # END: USER-EDITABLE AREA
 
         IS_CHAT = False
