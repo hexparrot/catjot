@@ -9,6 +9,7 @@ __status__ = "Development"
 from os import environ, getcwd
 from enum import Enum, auto
 
+
 def supports_color():
     import os
     import sys
@@ -818,7 +819,7 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url")
     api_model = getenv("openai_api_model")
-    if model_name: # -m MODEL shall take precedence
+    if model_name:  # -m MODEL shall take precedence
         api_model = model_name
     # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
     # export openai_api_key="sk-proj...8EEF"
@@ -985,9 +986,7 @@ def main():
     parser.add_argument(
         "-p", type=str, help="search notes by pwd / set pwd when amending"
     )
-    parser.add_argument(
-        "-m", type=str, default="", help="LLM model to engage"
-    )
+    parser.add_argument("-m", type=str, default="", help="LLM model to engage")
     parser.add_argument(
         "-w", action="store_true", help="wall-of-text rather than stream"
     )
@@ -1148,7 +1147,11 @@ def main():
 
         # Default prompt to start jot chat & jot convo with
         from os import getenv
-        CATGPT_ROLE = getenv("openai_api_sysrole", """You're proudly a cat assistant here to help the user in any way you can.""")
+
+        CATGPT_ROLE = getenv(
+            "openai_api_sysrole",
+            """You're proudly a cat assistant here to help the user in any way you can.""",
+        )
         # END: USER-EDITABLE AREA
 
         IS_CHAT = False
