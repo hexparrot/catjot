@@ -1945,8 +1945,8 @@ def main():
                     temp_file_name = f.name
 
                 preferred_editor = os.environ.get(
-                    "EDITOR", "vi"
-                )  # Default to nano if EDITOR is not set
+                    "EDITOR", "vim"
+                )  # Default to vim if EDITOR is not set
                 subprocess.run([preferred_editor, temp_file_name])
 
                 to_delete = []
