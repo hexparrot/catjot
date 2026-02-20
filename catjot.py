@@ -67,6 +67,13 @@ class SearchType(Enum):
     TREE = auto()
 
 
+class OutputColors(Enum):
+    IMG_CAT = AnsiColor.YELLOW.value
+    CHAT_ME = AnsiColor.CYAN.value
+    CHAT_CAT = AnsiColor.GREEN.value
+    CHAT_END = AnsiColor.MAGENTA.value
+
+
 # END: ENUM LISTS
 # START: CLASSES
 
@@ -1079,7 +1086,7 @@ def is_binary_string(data):
 
 
 def print_ascii_cat_with_text(
-    intro, text, endtext="stop.", intro_color=AnsiColor.GREEN
+    intro, text, endtext="stop.", intro_color=OutputColors.CHAT_CAT
 ):
     import textwrap
 
@@ -1099,13 +1106,13 @@ def print_ascii_cat_with_text(
         text_line = wrapped_text[i] if i < len(wrapped_text) else ""
         if Note.USE_COLORIZATION:
             print(
-                f"{AnsiColor.YELLOW.value}{cat_line:<8} {intro_color.value}{text_line}{AnsiColor.RESET.value}"
+                f"{OutputColors.IMG_CAT.value}{cat_line:<8} {intro_color.value}{text_line}{AnsiColor.RESET.value}"
             )
         else:
             print(f"{cat_line:<8} {text_line}")
 
     print(text)
-    print(f"{AnsiColor.MAGENTA.value}{endtext}{AnsiColor.RESET.value}")
+    print(f"{OutputColors.CHAT_END.value}{endtext}{AnsiColor.RESET.value}")
 
 
 # END: LAST REMAINING UNSORTED FUNCTIONS
@@ -1470,7 +1477,7 @@ def main():
                     retval = response["choices"][0]["message"]["content"]
                     endline = return_footer(response)
                     print_ascii_cat_with_text(
-                        intro, retval, endline, intro_color=AnsiColor.CYAN
+                        intro, retval, endline, intro_color=OutputColors.CHAT_ME
                     )
                     Note.append(NOTEFILE, Note.jot(retval, **params))
                 else:
@@ -1478,7 +1485,9 @@ def main():
             else:
                 import time
 
-                print_ascii_cat_with_text(intro, "", "", intro_color=AnsiColor.CYAN)
+                print_ascii_cat_with_text(
+                    intro, "", "", intro_color=OutputColors.CHAT_ME
+                )
 
                 response_generator = send_prompt_to_endpoint(
                     messages, model_name=args.m, mode="stream"
@@ -1495,7 +1504,9 @@ def main():
                     Note.append(NOTEFILE, Note.jot(response, **params))
 
                     if Note.USE_COLORIZATION:
-                        print(f"{AnsiColor.MAGENTA.value}stop.{AnsiColor.RESET.value}")
+                        print(
+                            f"{OutputColors.CHAT_END.value}stop.{AnsiColor.RESET.value}"
+                        )
                     else:
                         print(f"stop.")
                 else:
@@ -1766,7 +1777,10 @@ def main():
                         )
                         endline = return_footer(response)
                         print_ascii_cat_with_text(
-                            user_input, retval, endline, intro_color=AnsiColor.CYAN
+                            user_input,
+                            retval,
+                            endline,
+                            intro_color=OutputColors.CHAT_ME,
                         )
                         Note.append(NOTEFILE, Note.jot(retval, **params))
                     else:
@@ -1775,7 +1789,7 @@ def main():
                     import time
 
                     print_ascii_cat_with_text(
-                        user_input, "", "", intro_color=AnsiColor.CYAN
+                        user_input, "", "", intro_color=OutputColors.CHAT_ME
                     )
 
                     response_generator = send_prompt_to_endpoint(
@@ -1800,7 +1814,7 @@ def main():
 
                         if Note.USE_COLORIZATION:
                             print(
-                                f"{AnsiColor.MAGENTA.value}stop. {AnsiColor.RESET.value}"
+                                f"{OutputColors.CHAT_END.value}stop. {AnsiColor.RESET.value}"
                             )
                         else:
                             print(f"stop.")
@@ -2202,12 +2216,14 @@ def main():
                     else:
                         answer = run_tool_loop(query)
                         print_ascii_cat_with_text(
-                            query, answer, intro_color=AnsiColor.CYAN
+                            query, answer, intro_color=OutputColors.CHAT_ME
                         )
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
                     answer = run_tool_loop(query)
-                    print_ascii_cat_with_text(query, answer, intro_color=AnsiColor.CYAN)
+                    print_ascii_cat_with_text(
+                        query, answer, intro_color=OutputColors.CHAT_ME
+                    )
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
