@@ -6,8 +6,25 @@ __maintainer__ = "William Dizon"
 __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
-from os import environ, getcwd
+import requests
+import json
+from functools import partial
+from typing import Callable, List
+from os import environ, getcwd, getenv
 from enum import Enum, auto
+
+# START: ENVIRONMENT CONFIGURATION INSTRUCTIONS
+# set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
+#
+# BASH:
+# export CATJOT_FILE="/home/user/.myjot"  # defaults to $HOME/.catjot
+# export openai_api_key="sk-proj...8EEF"
+# export openai_api_url="https://localhost:5000/v1/chat/completions"
+# export openai_api_model="catgpt-nano"
+# export openai_api_sysrole="Overriding system role goes here"
+# NUSHELL:
+# with-env { openai_api_sysrole: "tell me everything you find" } { jot llm }
+# with-env { openai_api_sysrole: "tell me everything you find", CATJOT_FILE: "/home/user/.myjot" } { jot llm }
 
 
 def supports_color():
@@ -794,6 +811,169 @@ class catjot_graphql(object):
 
 
 # END: CLASSES
+# START: LLM/MCP FUNCTIONS
+
+
+def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
+    """Single LLM chat completion call. Returns the response message dict."""
+    api_key = getenv("openai_api_key")
+    api_url = getenv("openai_api_url")
+    api_model = getenv("openai_api_model")
+
+    payload = {
+        "model": api_model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    resp = requests.post(
+        api_url,
+        headers=headers,
+        json=payload,
+    )
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    msg = choice["message"]
+
+    # Some servers put tool_calls at the choice level, not inside message
+    if "tool_calls" not in msg and "tool_calls" in choice:
+        msg["tool_calls"] = choice["tool_calls"]
+
+    return msg
+
+
+# Maps tool name -> handler function
+TOOL_HANDLERS = {}
+
+# Maps tool name -> OpenAI-style tool schema (for the LLM)
+TOOL_SCHEMAS = []
+
+
+def register_tool(name, description, parameters, handler):
+    """Register a tool so the LLM can call it.
+
+    name:        string identifier
+    description: what the tool does (shown to LLM)
+    parameters:  JSON Schema dict for the tool's arguments
+    handler:     callable(kwargs) -> str  (returns result as string)
+    """
+    TOOL_HANDLERS[name] = handler
+    TOOL_SCHEMAS.append(
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        }
+    )
+
+
+def dispatch_tool_call(tool_name, arguments_json):
+    """Look up a tool by name and execute it. Returns result string."""
+    handler = TOOL_HANDLERS.get(tool_name)
+    if not handler:
+        return f"Error: unknown tool '{tool_name}'"
+
+    if isinstance(arguments_json, str):
+        args = json.loads(arguments_json)
+    else:
+        args = arguments_json
+
+    return handler(**args)
+
+
+def make_tool_handler(default_term: str):
+    term_map = {
+        "note": (SearchType.ALL, ""),
+        "tag": (SearchType.TAG, None),
+        "context": (SearchType.CONTEXT_I, None),
+        "message": (SearchType.MESSAGE_I, None),
+        "directory": (SearchType.DIRECTORY, None),
+    }
+
+    def handler(query: str, term: str = default_term) -> str:
+        results = []
+        stype, override = term_map[term.lower()]
+        query_used = override if override is not None else query
+
+        with NoteContext(Note.NOTEFILE, (stype, query_used)) as nc:
+            for note in nc:
+                results.append(
+                    {
+                        "tag": note.tag,
+                        "context": note.context,
+                        "message": note.message[:80],
+                    }
+                )
+
+        return json.dumps(results, indent=2)
+
+    return handler
+
+
+def run_tool_loop(user_query, max_iterations=10):
+    """Send user_query to the LLM with tools available.
+    The LLM may call tools multiple times in sequence.
+    Loop ends when the LLM responds with plain text (no tool calls)
+    or max_iterations is reached.
+    """
+    CATGPT_ROLE = getenv("openai_api_sysrole", "")
+
+    system_prompt = (
+        "You are a helpful cat assistant with access to a notetaking system called catjot. "
+        "Use the available tools to search notes as needed. "
+        "Work step by step and utilize all three search mechanisms if no comprehensive answer is yet found: search_tag, search_context, and search_message. "
+        f"{CATGPT_ROLE}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_query},
+    ]
+
+    for i in range(max_iterations):
+        response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice="auto")
+
+        # If no tool calls, we're done - return the text answer
+        tool_calls = response_msg.get("tool_calls")
+        if not tool_calls:
+            return response_msg.get("content", "")
+
+        # Append the assistant message (with tool_calls) to history
+        messages.append(response_msg)
+
+        # Execute each tool call and append results
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            fn_args = tc["function"]["arguments"]
+            tool_id = tc.get("id", fn_name)
+
+            print(f"  [step {i+1}] calling tool: {fn_name}")
+
+            result = dispatch_tool_call(fn_name, fn_args)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "content": str(result),
+                }
+            )
+
+    return "Max iterations reached without a final answer."
+
+
+# END: LLM/MPC FUNCTIONS
 # START: LAST REMAINING UNSORTED FUNCTIONS
 
 
@@ -812,20 +992,11 @@ def send_prompt_to_endpoint(messages, model_name, mode):
       - full_response: The full response string.
       - last_token_obj: The last JSON object received, containing metadata like token count.
     """
-    import requests
-    import json
-    from os import getenv
-
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url")
     api_model = getenv("openai_api_model")
     if model_name:  # -m MODEL shall take precedence
         api_model = model_name
-    # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
-    # export openai_api_key="sk-proj...8EEF"
-    # export openai_api_url="https://example.com/v1/chat/completions"
-    # export openai_api_model="catgpt-nano"
-    # export openai_api_sysrole="Overriding system role goes here"
     headers = {"Content-Type": "application/json"}
 
     if api_key:
@@ -974,7 +1145,8 @@ def main():
         "  jot sbs 16952..  side-by-side transcription practice mode\n"
         "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n"
         "  jot newsr        create a new note designed for spaced repetition practice\n"
-        "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n",
+        "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n"
+        "  jot llm          talk to a cat naturally to find information\n",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -1133,6 +1305,7 @@ def main():
             "CREATE_SPACED_REPETITION": ["newsr"],
             "ITERATE_SPACED_REPETITIONS": ["sr"],
             "CHAT": ["chat", "catgpt", "c"],
+            "LLM": ["llm"],
             "CONVO": [
                 "cat",
                 "catenate",
@@ -1779,8 +1952,8 @@ def main():
                     temp_file_name = f.name
 
                 preferred_editor = os.environ.get(
-                    "EDITOR", "vi"
-                )  # Default to nano if EDITOR is not set
+                    "EDITOR", "vim"
+                )  # Default to vim if EDITOR is not set
                 subprocess.run([preferred_editor, temp_file_name])
 
                 to_delete = []
@@ -1983,6 +2156,79 @@ def main():
                             Note.commit(NOTEFILE)
                     else:  # at end of iterating notes
                         print("Done for today")
+            elif args.additional_args[0] in SHORTCUTS["LLM"]:
+                search_tag = make_tool_handler(default_term="tag")
+                search_message = make_tool_handler(default_term="message")
+                search_context = make_tool_handler(default_term="context")
+
+                register_tool(
+                    name="search_tag",
+                    description="Search catjot notes by tag keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_tag,
+                )
+
+                register_tool(
+                    name="search_context",
+                    description="Search catjot notes by context keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_context,
+                )
+
+                register_tool(
+                    name="search_message",
+                    description="Search catjot notes by message keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_message,
+                )
+
+                if sys.stdin.isatty():  # jot llm
+                    print_ascii_cat_with_text(
+                        "Hi, what can I help you with today? ",
+                        "Enter your prompt and hit Control-D to submit. \n",
+                    )
+
+                    try:
+                        query = flatten_pipe(sys.stdin.readlines())
+                        if not query:
+                            return
+                    except KeyboardInterrupt:
+                        return
+                    else:
+                        answer = run_tool_loop(query)
+                        print(f"Answer: {answer}")
+                else:
+                    query = flatten_pipe(sys.stdin.readlines())
+                    print(f"Query: {query}\n")
+                    answer = run_tool_loop(query)
+                    print(f"Answer: {answer}")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
