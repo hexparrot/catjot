@@ -2193,12 +2193,11 @@ def main():
                         return
                     else:
                         answer = run_tool_loop(query)
-                        print(f"Answer: {answer}")
+                        print_ascii_cat_with_text(query, answer)
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
-                    print(f"Query: {query}\n")
                     answer = run_tool_loop(query)
-                    print(f"Answer: {answer}")
+                    print_ascii_cat_with_text(query, answer)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
