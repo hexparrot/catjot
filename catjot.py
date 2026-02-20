@@ -1145,7 +1145,8 @@ def main():
         "  jot sbs 16952..  side-by-side transcription practice mode\n"
         "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n"
         "  jot newsr        create a new note designed for spaced repetition practice\n"
-        "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n",
+        "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n"
+        "  jot llm          talk to a cat naturally to find information\n",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
