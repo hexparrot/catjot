@@ -1078,7 +1078,9 @@ def is_binary_string(data):
     return len(non_text_chars) / len(data) > 0.3
 
 
-def print_ascii_cat_with_text(intro, text, endtext="stop."):
+def print_ascii_cat_with_text(
+    intro, text, endtext="stop.", intro_color=AnsiColor.GREEN
+):
     import textwrap
 
     cat = r""" /\_/\
@@ -1097,7 +1099,7 @@ def print_ascii_cat_with_text(intro, text, endtext="stop."):
         text_line = wrapped_text[i] if i < len(wrapped_text) else ""
         if Note.USE_COLORIZATION:
             print(
-                f"{AnsiColor.YELLOW.value}{cat_line:<8} {AnsiColor.GREEN.value}{text_line}{AnsiColor.RESET.value}"
+                f"{AnsiColor.YELLOW.value}{cat_line:<8} {intro_color.value}{text_line}{AnsiColor.RESET.value}"
             )
         else:
             print(f"{cat_line:<8} {text_line}")
@@ -1467,14 +1469,16 @@ def main():
                 if response:
                     retval = response["choices"][0]["message"]["content"]
                     endline = return_footer(response)
-                    print_ascii_cat_with_text(intro, retval, endline)
+                    print_ascii_cat_with_text(
+                        intro, retval, endline, intro_color=AnsiColor.CYAN
+                    )
                     Note.append(NOTEFILE, Note.jot(retval, **params))
                 else:
                     print("Failed to get response from OpenAI API.")
             else:
                 import time
 
-                print_ascii_cat_with_text(intro, "", "")
+                print_ascii_cat_with_text(intro, "", "", intro_color=AnsiColor.CYAN)
 
                 response_generator = send_prompt_to_endpoint(
                     messages, model_name=args.m, mode="stream"
@@ -1761,14 +1765,18 @@ def main():
                             }
                         )
                         endline = return_footer(response)
-                        print_ascii_cat_with_text(user_input, retval, endline)
+                        print_ascii_cat_with_text(
+                            user_input, retval, endline, intro_color=AnsiColor.CYAN
+                        )
                         Note.append(NOTEFILE, Note.jot(retval, **params))
                     else:
                         print("Failed to get response from OpenAI API.")
                 else:
                     import time
 
-                    print_ascii_cat_with_text(user_input, "", "")
+                    print_ascii_cat_with_text(
+                        user_input, "", "", intro_color=AnsiColor.CYAN
+                    )
 
                     response_generator = send_prompt_to_endpoint(
                         messages, model_name=args.m, mode="stream"
@@ -2193,11 +2201,13 @@ def main():
                         return
                     else:
                         answer = run_tool_loop(query)
-                        print_ascii_cat_with_text(query, answer)
+                        print_ascii_cat_with_text(
+                            query, answer, intro_color=AnsiColor.CYAN
+                        )
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
                     answer = run_tool_loop(query)
-                    print_ascii_cat_with_text(query, answer)
+                    print_ascii_cat_with_text(query, answer, intro_color=AnsiColor.CYAN)
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
