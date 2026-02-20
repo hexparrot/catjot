@@ -13,6 +13,15 @@ from typing import Callable, List
 from os import environ, getcwd, getenv
 from enum import Enum, auto
 
+# START: ENVIRONMENT CONFIGURATION INSTRUCTIONS
+# set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
+#
+# export CATJOT_FILE="~/.myjot"  # defaults to ~/.catjot
+# export openai_api_key="sk-proj...8EEF"
+# export openai_api_url="https://localhost:5000/v1/chat/completions"
+# export openai_api_model="catgpt-nano"
+# export openai_api_sysrole="Overriding system role goes here"
+
 
 def supports_color():
     import os
@@ -982,11 +991,6 @@ def send_prompt_to_endpoint(messages, model_name, mode):
     api_model = getenv("openai_api_model")
     if model_name:  # -m MODEL shall take precedence
         api_model = model_name
-    # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
-    # export openai_api_key="sk-proj...8EEF"
-    # export openai_api_url="https://example.com/v1/chat/completions"
-    # export openai_api_model="catgpt-nano"
-    # export openai_api_sysrole="Overriding system role goes here"
     headers = {"Content-Type": "application/json"}
 
     if api_key:
