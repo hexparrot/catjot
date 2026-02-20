@@ -6,7 +6,9 @@ __maintainer__ = "William Dizon"
 __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
-from os import environ, getcwd
+import requests
+import json
+from os import environ, getcwd, getenv
 from enum import Enum, auto
 
 
@@ -794,6 +796,180 @@ class catjot_graphql(object):
 
 
 # END: CLASSES
+# START: LLM/MCP FUNCTIONS
+
+
+def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
+    """Single LLM chat completion call. Returns the response message dict."""
+    api_key = getenv("openai_api_key")
+    api_url = getenv("openai_api_url")
+    api_model = getenv("openai_api_model")
+
+    payload = {
+        "model": api_model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    resp = requests.post(
+        api_url,
+        headers=headers,
+        json=payload,
+    )
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+    msg = choice["message"]
+
+    # Some servers put tool_calls at the choice level, not inside message
+    if "tool_calls" not in msg and "tool_calls" in choice:
+        msg["tool_calls"] = choice["tool_calls"]
+
+    return msg
+
+
+# Maps tool name -> handler function
+TOOL_HANDLERS = {}
+
+# Maps tool name -> OpenAI-style tool schema (for the LLM)
+TOOL_SCHEMAS = []
+
+
+def register_tool(name, description, parameters, handler):
+    """Register a tool so the LLM can call it.
+
+    name:        string identifier
+    description: what the tool does (shown to LLM)
+    parameters:  JSON Schema dict for the tool's arguments
+    handler:     callable(kwargs) -> str  (returns result as string)
+    """
+    TOOL_HANDLERS[name] = handler
+    TOOL_SCHEMAS.append(
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            },
+        }
+    )
+
+
+def dispatch_tool_call(tool_name, arguments_json):
+    """Look up a tool by name and execute it. Returns result string."""
+    handler = TOOL_HANDLERS.get(tool_name)
+    if not handler:
+        return f"Error: unknown tool '{tool_name}'"
+
+    if isinstance(arguments_json, str):
+        args = json.loads(arguments_json)
+    else:
+        args = arguments_json
+
+    return handler(**args)
+
+
+def tool_search_tags(query, notefile=None):
+    """Search for notes whose tags contain the query string.
+    Returns a JSON list of {timestamp, tag, preview} dicts.
+    """
+    NOTEFILE = f"{environ['HOME']}/.catjot"
+    results = []
+
+    with NoteContext(NOTEFILE, (SearchType.TAG, query)) as nc:
+        for note in nc:
+            results.append(
+                {
+                    "timestamp": note.now,
+                    "tag": note.tag,
+                    "preview": note.message[:80],
+                }
+            )
+
+    return json.dumps(results, indent=2)
+
+
+register_tool(
+    name="search_tags",
+    description="Search catjot notes by tag keyword. Returns matching note timestamps and tags.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The tag keyword to search for",
+            },
+        },
+        "required": ["query"],
+    },
+    handler=tool_search_tags,
+)
+
+
+def run_tool_loop(user_query, system_prompt=None, max_iterations=10):
+    """Send user_query to the LLM with tools available.
+    The LLM may call tools multiple times in sequence.
+    Loop ends when the LLM responds with plain text (no tool calls)
+    or max_iterations is reached.
+    """
+    if system_prompt is None:
+        system_prompt = (
+            "You are a helpful cat assistant with access to a notetaking system called catjot. "
+            "Use the available tools to search notes as needed. "
+            "Work step by step: always search tags first. "
+        )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_query},
+    ]
+
+    for i in range(max_iterations):
+        if i == 0:
+            choice = {"type": "function", "function": {"name": "search_tags"}}
+        else:
+            choice = "auto"
+
+        response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice=choice)
+
+        # If no tool calls, we're done - return the text answer
+        tool_calls = response_msg.get("tool_calls")
+        if not tool_calls:
+            return response_msg.get("content", "")
+
+        # Append the assistant message (with tool_calls) to history
+        messages.append(response_msg)
+
+        # Execute each tool call and append results
+        for tc in tool_calls:
+            fn_name = tc["function"]["name"]
+            fn_args = tc["function"]["arguments"]
+            tool_id = tc.get("id", fn_name)
+
+            print(f"  [step {i+1}] calling tool: {fn_name}")
+
+            result = dispatch_tool_call(fn_name, fn_args)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "content": str(result),
+                }
+            )
+
+    return "Max iterations reached without a final answer."
+
+
+# END: LLM/MPC FUNCTIONS
 # START: LAST REMAINING UNSORTED FUNCTIONS
 
 
@@ -812,10 +988,6 @@ def send_prompt_to_endpoint(messages, model_name, mode):
       - full_response: The full response string.
       - last_token_obj: The last JSON object received, containing metadata like token count.
     """
-    import requests
-    import json
-    from os import getenv
-
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url")
     api_model = getenv("openai_api_model")
@@ -1133,6 +1305,7 @@ def main():
             "CREATE_SPACED_REPETITION": ["newsr"],
             "ITERATE_SPACED_REPETITIONS": ["sr"],
             "CHAT": ["chat", "catgpt", "c"],
+            "LLM": ["llm"],
             "CONVO": [
                 "cat",
                 "catenate",
@@ -1983,6 +2156,14 @@ def main():
                             Note.commit(NOTEFILE)
                     else:  # at end of iterating notes
                         print("Done for today")
+            elif args.additional_args[0] in SHORTCUTS["LLM"]:
+                if sys.stdin.isatty():  # jot llm
+                    print(f"Pipe your query to catjot.")
+                else:
+                    query = flatten_pipe(sys.stdin.readlines())
+                    print(f"Query: {query}\n")
+                    answer = run_tool_loop(query)
+                    print(f"Answer: {answer}")
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
