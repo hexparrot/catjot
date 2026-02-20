@@ -16,11 +16,15 @@ from enum import Enum, auto
 # START: ENVIRONMENT CONFIGURATION INSTRUCTIONS
 # set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
 #
-# export CATJOT_FILE="~/.myjot"  # defaults to ~/.catjot
+# BASH:
+# export CATJOT_FILE="/home/user/.myjot"  # defaults to $HOME/.catjot
 # export openai_api_key="sk-proj...8EEF"
 # export openai_api_url="https://localhost:5000/v1/chat/completions"
 # export openai_api_model="catgpt-nano"
 # export openai_api_sysrole="Overriding system role goes here"
+# NUSHELL:
+# with-env { openai_api_sysrole: "tell me everything you find" } { jot llm }
+# with-env { openai_api_sysrole: "tell me everything you find", CATJOT_FILE: "/home/user/.myjot" } { jot llm }
 
 
 def supports_color():
@@ -917,18 +921,20 @@ def make_tool_handler(default_term: str):
     return handler
 
 
-def run_tool_loop(user_query, system_prompt=None, max_iterations=10):
+def run_tool_loop(user_query, max_iterations=10):
     """Send user_query to the LLM with tools available.
     The LLM may call tools multiple times in sequence.
     Loop ends when the LLM responds with plain text (no tool calls)
     or max_iterations is reached.
     """
-    if system_prompt is None:
-        system_prompt = (
-            "You are a helpful cat assistant with access to a notetaking system called catjot. "
-            "Use the available tools to search notes as needed. "
-            "Work step by step and utilize all three search mechanisms if no answer is found: search_tag, search_context, and search_message. "
-        )
+    CATGPT_ROLE = getenv("openai_api_sysrole", "")
+
+    system_prompt = (
+        "You are a helpful cat assistant with access to a notetaking system called catjot. "
+        "Use the available tools to search notes as needed. "
+        "Work step by step and utilize all three search mechanisms if no comprehensive answer is yet found: search_tag, search_context, and search_message. "
+        f"{CATGPT_ROLE}"
+    )
 
     messages = [
         {"role": "system", "content": system_prompt},
