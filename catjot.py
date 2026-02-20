@@ -2203,7 +2203,20 @@ def main():
                 )
 
                 if sys.stdin.isatty():  # jot llm
-                    print(f"Pipe your query to catjot.")
+                    print_ascii_cat_with_text(
+                        "Hi, what can I help you with today? ",
+                        "Enter your prompt and hit Control-D to submit. \n",
+                    )
+
+                    try:
+                        query = flatten_pipe(sys.stdin.readlines())
+                        if not query:
+                            return
+                    except KeyboardInterrupt:
+                        return
+                    else:
+                        answer = run_tool_loop(query)
+                        print(f"Answer: {answer}")
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
                     print(f"Query: {query}\n")
