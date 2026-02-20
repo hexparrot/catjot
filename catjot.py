@@ -8,6 +8,8 @@ __status__ = "Development"
 
 import requests
 import json
+from functools import partial
+from typing import Callable, List
 from os import environ, getcwd, getenv
 from enum import Enum, auto
 
@@ -877,41 +879,33 @@ def dispatch_tool_call(tool_name, arguments_json):
     return handler(**args)
 
 
-def tool_search_tags(query, notefile=None):
-    """Search for notes whose tags contain the query string.
-    Returns a JSON list of {timestamp, tag, preview} dicts.
-    """
-    NOTEFILE = f"{environ['HOME']}/.catjot"
-    results = []
+def make_tool_handler(default_term: str):
+    term_map = {
+        "note": (SearchType.ALL, ""),
+        "tag": (SearchType.TAG, None),
+        "context": (SearchType.CONTEXT_I, None),
+        "message": (SearchType.MESSAGE_I, None),
+        "directory": (SearchType.DIRECTORY, None),
+    }
 
-    with NoteContext(NOTEFILE, (SearchType.TAG, query)) as nc:
-        for note in nc:
-            results.append(
-                {
-                    "timestamp": note.now,
-                    "tag": note.tag,
-                    "preview": note.message[:80],
-                }
-            )
+    def handler(query: str, term: str = default_term) -> str:
+        results = []
+        stype, override = term_map[term.lower()]
+        query_used = override if override is not None else query
 
-    return json.dumps(results, indent=2)
+        with NoteContext(Note.NOTEFILE, (stype, query_used)) as nc:
+            for note in nc:
+                results.append(
+                    {
+                        "tag": note.tag,
+                        "context": note.context,
+                        "message": note.message[:80],
+                    }
+                )
 
+        return json.dumps(results, indent=2)
 
-register_tool(
-    name="search_tags",
-    description="Search catjot notes by tag keyword. Returns matching note timestamps and tags.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The tag keyword to search for",
-            },
-        },
-        "required": ["query"],
-    },
-    handler=tool_search_tags,
-)
+    return handler
 
 
 def run_tool_loop(user_query, system_prompt=None, max_iterations=10):
@@ -924,7 +918,7 @@ def run_tool_loop(user_query, system_prompt=None, max_iterations=10):
         system_prompt = (
             "You are a helpful cat assistant with access to a notetaking system called catjot. "
             "Use the available tools to search notes as needed. "
-            "Work step by step: always search tags first. "
+            "Work step by step and utilize all three search mechanisms if no answer is found: search_tag, search_context, and search_message. "
         )
 
     messages = [
@@ -933,12 +927,7 @@ def run_tool_loop(user_query, system_prompt=None, max_iterations=10):
     ]
 
     for i in range(max_iterations):
-        if i == 0:
-            choice = {"type": "function", "function": {"name": "search_tags"}}
-        else:
-            choice = "auto"
-
-        response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice=choice)
+        response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice="auto")
 
         # If no tool calls, we're done - return the text answer
         tool_calls = response_msg.get("tool_calls")
@@ -2157,6 +2146,58 @@ def main():
                     else:  # at end of iterating notes
                         print("Done for today")
             elif args.additional_args[0] in SHORTCUTS["LLM"]:
+                search_tag = make_tool_handler(default_term="tag")
+                search_message = make_tool_handler(default_term="message")
+                search_context = make_tool_handler(default_term="context")
+
+                register_tool(
+                    name="search_tag",
+                    description="Search catjot notes by tag keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_tag,
+                )
+
+                register_tool(
+                    name="search_context",
+                    description="Search catjot notes by context keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_context,
+                )
+
+                register_tool(
+                    name="search_message",
+                    description="Search catjot notes by message keyword. Returns matching note with context, message, and tags.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The search criteria keyword to match",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    handler=search_message,
+                )
+
                 if sys.stdin.isatty():  # jot llm
                     print(f"Pipe your query to catjot.")
                 else:
