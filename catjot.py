@@ -25,6 +25,9 @@ from enum import Enum, auto
 # NUSHELL:
 # with-env { openai_api_sysrole: "tell me everything you find" } { jot llm }
 # with-env { openai_api_sysrole: "tell me everything you find", CATJOT_FILE: "/home/user/.myjot" } { jot llm }
+# NUSHELL config
+# $env.openai_api_url = "https://localhost:5000/v1/chat/completions"
+# $env.openai_api_sysrole = "dont be helpful"
 
 
 def supports_color():
@@ -901,6 +904,7 @@ def dispatch_tool_call(tool_name, arguments_json):
 
 # --- per-field search handlers, each returns a JSON list of Note.now IDs ---
 
+
 def make_tag_search_handler():
     def handler(query: str) -> str:
         seen = []
@@ -909,6 +913,7 @@ def make_tag_search_handler():
                 if note.now not in seen:
                     seen.append(note.now)
         return json.dumps(seen)
+
     return handler
 
 
@@ -916,10 +921,13 @@ def make_context_search_handler():
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
-            for note in Note.match(Note.NOTEFILE, [(SearchType.CONTEXT_I, word)], logic="or"):
+            for note in Note.match(
+                Note.NOTEFILE, [(SearchType.CONTEXT_I, word)], logic="or"
+            ):
                 if note.now not in seen:
                     seen.append(note.now)
         return json.dumps(seen)
+
     return handler
 
 
@@ -927,10 +935,13 @@ def make_message_search_handler():
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
-            for note in Note.match(Note.NOTEFILE, [(SearchType.MESSAGE_I, word)], logic="or"):
+            for note in Note.match(
+                Note.NOTEFILE, [(SearchType.MESSAGE_I, word)], logic="or"
+            ):
                 if note.now not in seen:
                     seen.append(note.now)
         return json.dumps(seen)
+
     return handler
 
 
@@ -938,10 +949,13 @@ def make_directory_search_handler():
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
-            for note in Note.match(Note.NOTEFILE, [(SearchType.DIRECTORY, word)], logic="or"):
+            for note in Note.match(
+                Note.NOTEFILE, [(SearchType.DIRECTORY, word)], logic="or"
+            ):
                 if note.now not in seen:
                     seen.append(note.now)
         return json.dumps(seen)
+
     return handler
 
 
@@ -1000,6 +1014,7 @@ register_tool(
 
 
 # --- aggregation helpers ---
+
 
 def aggregate_note_ids(messages):
     """
@@ -1108,7 +1123,7 @@ def run_tool_loop(user_query, max_iterations=10):
         tool_names_called = set()
         for msg in messages:
             if msg.get("role") == "assistant":
-                for tc in (msg.get("tool_calls") or []):
+                for tc in msg.get("tool_calls") or []:
                     tool_names_called.add(tc["function"]["name"])
 
         if REQUIRED_TOOLS.issubset(tool_names_called):
@@ -2340,7 +2355,7 @@ def main():
                         "Hi, what can I help you with today? ",
                         "Enter your prompt and hit Control-D to submit. \n",
                     )
-            
+
                     try:
                         query = flatten_pipe(sys.stdin.readlines())
                         if not query:
