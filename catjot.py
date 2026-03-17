@@ -899,51 +899,167 @@ def dispatch_tool_call(tool_name, arguments_json):
     return handler(**args)
 
 
-def make_tool_handler():
-    ALL_TYPES = [
-        SearchType.TAG,
-        SearchType.CONTEXT_I,
-        SearchType.MESSAGE_I,
-        SearchType.DIRECTORY,
-    ]
+# --- per-field search handlers, each returns a JSON list of Note.now IDs ---
 
+def make_tag_search_handler():
     def handler(query: str) -> str:
-        results = []
-
-        words = query.split()
-        seen = set()
-        for word in set(words):
-            criteria = [(st, word) for st in ALL_TYPES]
-            # construct a list of many criteria to be matched across multiple
-            # SearchTypes with the "or" logic
-            for note in Note.match(Note.NOTEFILE, criteria, logic="or"):
+        seen = []
+        for word in query.split():
+            for note in Note.match(Note.NOTEFILE, [(SearchType.TAG, word)], logic="or"):
                 if note.now not in seen:
-                    seen.add(note.now)
-                    results.append(
-                        {
-                            "tag": note.tag,
-                            "context": note.context,
-                            "message": note.message[:80],
-                        }
-                    )
-
-        return json.dumps(results, indent=2)
-
+                    seen.append(note.now)
+        return json.dumps(seen)
     return handler
 
 
+def make_context_search_handler():
+    def handler(query: str) -> str:
+        seen = []
+        for word in query.split():
+            for note in Note.match(Note.NOTEFILE, [(SearchType.CONTEXT_I, word)], logic="or"):
+                if note.now not in seen:
+                    seen.append(note.now)
+        return json.dumps(seen)
+    return handler
+
+
+def make_message_search_handler():
+    def handler(query: str) -> str:
+        seen = []
+        for word in query.split():
+            for note in Note.match(Note.NOTEFILE, [(SearchType.MESSAGE_I, word)], logic="or"):
+                if note.now not in seen:
+                    seen.append(note.now)
+        return json.dumps(seen)
+    return handler
+
+
+def make_directory_search_handler():
+    def handler(query: str) -> str:
+        seen = []
+        for word in query.split():
+            for note in Note.match(Note.NOTEFILE, [(SearchType.DIRECTORY, word)], logic="or"):
+                if note.now not in seen:
+                    seen.append(note.now)
+        return json.dumps(seen)
+    return handler
+
+
+# --- shared parameter schema for all four search tools ---
+
+_SEARCH_PARAM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Space-separated search terms to look up in this field.",
+        }
+    },
+    "required": ["query"],
+}
+
+register_tool(
+    name="search_by_tag",
+    description=(
+        "Search catjot notes by the tag field. "
+        "Returns a JSON list of note IDs (Note.now values)."
+    ),
+    parameters=_SEARCH_PARAM_SCHEMA,
+    handler=make_tag_search_handler(),
+)
+
+register_tool(
+    name="search_by_context",
+    description=(
+        "Search catjot notes by the context field (case-insensitive). "
+        "Returns a JSON list of note IDs (Note.now values)."
+    ),
+    parameters=_SEARCH_PARAM_SCHEMA,
+    handler=make_context_search_handler(),
+)
+
+register_tool(
+    name="search_by_message",
+    description=(
+        "Search catjot notes by the message body (case-insensitive). "
+        "Returns a JSON list of note IDs (Note.now values)."
+    ),
+    parameters=_SEARCH_PARAM_SCHEMA,
+    handler=make_message_search_handler(),
+)
+
+register_tool(
+    name="search_by_directory",
+    description=(
+        "Search catjot notes by the directory/pwd field. "
+        "Returns a JSON list of note IDs (Note.now values)."
+    ),
+    parameters=_SEARCH_PARAM_SCHEMA,
+    handler=make_directory_search_handler(),
+)
+
+
+# --- aggregation helpers ---
+
+def aggregate_note_ids(messages):
+    """
+    Walk all tool result messages and union the returned Note.now ID lists.
+    Returns a set of note IDs.
+    """
+    all_ids = set()
+    for msg in messages:
+        if msg.get("role") == "tool":
+            try:
+                ids = json.loads(msg["content"])
+                if isinstance(ids, list):
+                    all_ids.update(ids)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return all_ids
+
+
+def fetch_notes_by_ids(note_ids):
+    """
+    Given a set of Note.now values, return full note dicts for the final LLM pass.
+    """
+    results = []
+    with NoteContext(Note.NOTEFILE, (SearchType.ALL, "")) as nc:
+        for note in nc:
+            if note.now in note_ids:
+                results.append(
+                    {
+                        "now": note.now,
+                        "tag": note.tag,
+                        "context": note.context,
+                        "directory": note.pwd,
+                        "message": note.message,
+                    }
+                )
+        return results
+
+
 def run_tool_loop(user_query, max_iterations=10):
-    """Send user_query to the LLM with tools available.
-    The LLM may call tools multiple times in sequence.
-    Loop ends when the LLM responds with plain text (no tool calls)
-    or max_iterations is reached.
+    """Send user_query to the LLM, iterating through all four search tools.
+    Each tool searches a single field and returns a list of Note.now IDs.
+    Once all four tools have been called, results are aggregated and a final
+    LLM pass produces the summary.
     """
     CATGPT_ROLE = getenv("openai_api_sysrole", "")
 
     system_prompt = (
         "You are a helpful cat assistant with access to a notetaking system called catjot. "
-        "Use the available tool search_all to search notes which finds matches for search terms in context, tags, and message body. "
-        "Provide a summary of all the nodes at the end, mindful of their separate purposes (contexti, tags, or message body). "
+        "To answer the user's query you MUST call ALL FOUR of the following search tools "
+        "before drawing any conclusions:\n"
+        "  1. search_by_tag       - searches the tag field\n"
+        "  2. search_by_context   - searches the context field\n"
+        "  3. search_by_message   - searches the message body\n"
+        "  4. search_by_directory - searches the directory/pwd field\n"
+        "Each tool returns a JSON list of note IDs. Call all four tools using the relevant "
+        "search terms extracted from the user query. Do not skip any tool, even if you think "
+        "it is unlikely to return results. "
+        "Once all four tools have been called, stop making tool calls and wait. "
+        "The system will aggregate the results and provide you with the full matching notes "
+        "for your final summary.\n"
         f"{CATGPT_ROLE}"
     )
 
@@ -952,12 +1068,19 @@ def run_tool_loop(user_query, max_iterations=10):
         {"role": "user", "content": user_query},
     ]
 
+    REQUIRED_TOOLS = {
+        "search_by_tag",
+        "search_by_context",
+        "search_by_message",
+        "search_by_directory",
+    }
+
     for i in range(max_iterations):
         response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice="auto")
 
-        # If no tool calls, we're done - return the text answer
         tool_calls = response_msg.get("tool_calls")
         if not tool_calls:
+            # LLM stopped calling tools before all four were used - return whatever it said
             return response_msg.get("content", "")
 
         # Append the assistant message (with tool_calls) to history
@@ -980,6 +1103,35 @@ def run_tool_loop(user_query, max_iterations=10):
                     "content": str(result),
                 }
             )
+
+        # Determine which tool names have been called across the full history
+        tool_names_called = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                for tc in (msg.get("tool_calls") or []):
+                    tool_names_called.add(tc["function"]["name"])
+
+        if REQUIRED_TOOLS.issubset(tool_names_called):
+            # All four tools have reported - aggregate IDs and do final LLM pass
+            note_ids = aggregate_note_ids(messages)
+            notes = fetch_notes_by_ids(note_ids)
+
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "All four searches are complete. "
+                        "Here are the matching notes found across all search fields:\n"
+                        + json.dumps(notes, indent=2)
+                        + "\n\nPlease provide a final summary of these notes that is "
+                        "relevant to the original query, noting which fields each match "
+                        "came from where useful."
+                    ),
+                }
+            )
+
+            final_msg = call_llm(messages, tools=None)
+            return final_msg.get("content", "")
 
     return "Max iterations reached without a final answer."
 
@@ -2183,30 +2335,12 @@ def main():
                     else:  # at end of iterating notes
                         print("Done for today")
             elif args.additional_args[0] in SHORTCUTS["LLM"]:
-                search_all = make_tool_handler()
-
-                register_tool(
-                    name="search_all",
-                    description="Search catjot notes by all fields. Returns matching note with context, message, and tags.",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The search criteria keyword to match among all available fields",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                    handler=search_all,
-                )
-
                 if sys.stdin.isatty():  # jot llm
                     print_ascii_cat_with_text(
                         "Hi, what can I help you with today? ",
                         "Enter your prompt and hit Control-D to submit. \n",
                     )
-
+            
                     try:
                         query = flatten_pipe(sys.stdin.readlines())
                         if not query:
@@ -2224,6 +2358,7 @@ def main():
                     print_ascii_cat_with_text(
                         query, answer, intro_color=OutputColors.CHAT_ME
                     )
+
         # TWO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 2:
             if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
