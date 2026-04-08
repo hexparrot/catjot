@@ -2356,17 +2356,18 @@ def main():
                         "Enter your prompt and hit Control-D to submit. \n",
                     )
 
-                    try:
-                        query = flatten_pipe(sys.stdin.readlines())
-                        if not query:
+                    while True:
+                        try:
+                            query = flatten_pipe(sys.stdin.readlines())
+                            if not query:
+                                return
+                        except KeyboardInterrupt:
                             return
-                    except KeyboardInterrupt:
-                        return
-                    else:
-                        answer = run_tool_loop(query)
-                        print_ascii_cat_with_text(
-                            query, answer, intro_color=OutputColors.CHAT_ME
-                        )
+                        else:
+                            answer = run_tool_loop(query)
+                            print_ascii_cat_with_text(
+                                query, answer, intro_color=OutputColors.CHAT_ME
+                            )
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
                     answer = run_tool_loop(query)
