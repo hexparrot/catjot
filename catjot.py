@@ -137,9 +137,11 @@ class Note(object):
     # Use colorization if terminal supports
     USE_COLORIZATION = True and supports_color()
 
-    def __init__(self, values_dict={}):
+    def __init__(self, values_dict=None):
         from time import time
 
+        if values_dict is None:
+            values_dict = {}
         now = int(time())
         self.pwd = values_dict.get("pwd", getcwd())
         assert self.pwd.startswith("/")
@@ -235,13 +237,7 @@ class Note(object):
     def append(cls, src, note):
         """Accepts non-falsy text and writes it to the .catjot file."""
         if not note.message:
-            return
-        if not note.pwd:
-            note.pwd = getcwd()
-        if not note.now:
-            from time import time
-
-            note.now = int(time())
+            raise ValueError("Cannot append a note with an empty message")
 
         with open(src, "at") as file:
             file.write(f"{Note.LABEL_SEP}\n")
@@ -436,7 +432,9 @@ class Note(object):
             for inst in cls.iterate(src):
                 CRITERIA_MET = 0
                 for s_type, s_text in criteria:
-                    if not s_text:
+                    if s_type is SearchType.ALL:
+                        CRITERIA_MET += 1
+                    elif not s_text:
                         pass  # no matching, no incrementing
                     elif s_type is SearchType.DIRECTORY:
                         CRITERIA_MET += 1 if inst.pwd == s_text else 0
@@ -593,7 +591,7 @@ class ContextBundle(object):
         """Helper function to return the list of notes, impacted by suppression"""
         seen = []
 
-        def iterate_notes(search_type, values):
+        def iterate_notes(values):
             for value in values:
                 for n in self.notes:
                     # Check if the note is not blocked by tags, directory, or timestamp
@@ -607,9 +605,9 @@ class ContextBundle(object):
                         yield n
 
         # Iterate over notes for tags, timestamps, and directories
-        yield from iterate_notes(SearchType.TAG, self.tags)
-        yield from iterate_notes(SearchType.TIMESTAMP, self.ts)
-        yield from iterate_notes(SearchType.DIRECTORY, self.dirs)
+        yield from iterate_notes(self.tags)
+        yield from iterate_notes(self.ts)
+        yield from iterate_notes(self.dirs)
 
     def _regen_notes(self):
         """Reads disk and iterates all notes, adding notes that match on 'matching' terms"""
@@ -1232,7 +1230,7 @@ def return_footer(gpt_reply):
     # receives the jSON object from a successful gpt call
     # returns technical details of token usage/model
     finish_reason = gpt_reply["choices"][0].get("finish_reason", "stop")
-    return f"{finish_reason}. model={gpt_reply['model']})"
+    return f"{finish_reason}. model={gpt_reply['model']}"
 
 
 def is_binary_string(data):
@@ -1242,6 +1240,9 @@ def is_binary_string(data):
     :param data: A string to be checked
     :return: True if the string is binary, False if it is text
     """
+    if not data:
+        return False
+
     if "\x00" in data:
         return True
 
@@ -1262,9 +1263,6 @@ def print_ascii_cat_with_text(
  > ^ <
 """
     wrapped_text = textwrap.wrap(intro, 80)
-
-    # Determine the height of the ASCII cat
-    cat_height = cat.count("\n")
 
     # Print the ASCII cat and the wrapped text side by side
     cat_lines = cat.split("\n")
@@ -1357,7 +1355,6 @@ def main():
 
     NOTEFILE = Note.NOTEFILE
     import sys
-    from os import environ
 
     if "CATJOT_FILE" in environ:
         # the environment variable will always supercede $HOME default when set
@@ -1578,7 +1575,7 @@ def main():
                     sys.exit(1)
                 elif not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
-            elif not sys.stdin.isatty():  # not interactive tty, all pipe!
+            else:  # not interactive tty, all pipe!
                 # routes 5,6,7,8,9,10: fill in the blank, pref intro
                 if not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
@@ -1601,8 +1598,6 @@ def main():
             full_sendout = f"{intro}\n\n{txt}"
 
             if len(args.additional_args) and args.additional_args[0] in ["home"]:
-                from os import environ
-
                 params["pwd"] = environ["HOME"]
 
             if is_binary_string(full_sendout):
@@ -1990,8 +1985,6 @@ def main():
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 0:
             # show all notes originating from this PWD
-            from os import getcwd
-
             if sys.stdin.isatty():
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     match_count = 0
@@ -2018,8 +2011,6 @@ def main():
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
                 # only display the most recently created note in this PWD
-                from os import getcwd
-
                 last_note = "No notes to show.\n"
                 with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                     for inst in nc:
@@ -2028,8 +2019,6 @@ def main():
                         printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]:
                 # only display the most recently created note in this PWD
-                from os import getcwd
-
                 last_note = "No notes to show.\n"
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     for inst in nc:
@@ -2038,8 +2027,6 @@ def main():
                         printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["DELETE_MOST_RECENT_PWD"]:
                 # always deletes the most recently created note in this PWD
-                from os import getcwd
-
                 try:
                     Note.pop(NOTEFILE, getcwd())
                     Note.commit(NOTEFILE)
@@ -2052,8 +2039,6 @@ def main():
             elif args.additional_args[0] in SHORTCUTS["HOMENOTES"]:
                 # if simply typed, show home notes
                 # if piped to, save as home note
-                from os import environ
-
                 if sys.stdin.isatty():
                     with NoteContext(
                         NOTEFILE, (SearchType.DIRECTORY, environ["HOME"])
@@ -2217,8 +2202,6 @@ def main():
                 """
                 parsed_vars = {}
                 if sys.stdin.isatty():  # jot ql
-                    from os import getcwd
-
                     parsed_vars = {"pwdtree": getcwd()}
                 else:  # cat | jot ql
                     for line in sys.stdin:
@@ -2431,8 +2414,6 @@ def main():
                         print(f"{Note.LABEL_SEP}")
                         print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS["MESSAGE_ONLY"]:
-                from os import getcwd
-
                 # returns the message only (no pwd, no timestamp, no context).
                 # when provided a timestamp, any notes matching timestamp
                 # will be sent to stdout, concatenated in order of appearance
@@ -2592,7 +2573,6 @@ def main():
             elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
                 # only display the most recently created n notes in this PWD
                 from collections import deque
-                from os import getcwd
 
                 record_count_to_show = 1
                 user_tilde_given = False

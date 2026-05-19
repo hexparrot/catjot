@@ -64,22 +64,6 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.context, "whoami")
         self.assertEqual(inst.message, "hello\nthere\n")
 
-    def test_create_note(self):
-        data = {
-            "pwd": "/home/user/git",
-            "now": 1694747655,
-            "tag": "projectx",
-            "context": "whoami",
-            "message": "hello\nthere\n",
-        }
-
-        inst = Note(data)
-        self.assertEqual(inst.pwd, "/home/user/git")
-        self.assertEqual(inst.now, 1694747655)
-        self.assertEqual(inst.tag, "projectx")
-        self.assertEqual(inst.context, "whoami")
-        self.assertEqual(inst.message, "hello\nthere\n")
-
     def test_find_path_match(self):
         # searches through an example file for a matching string argument
 
@@ -193,25 +177,6 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(inst.pwd, getcwd())
         self.assertEqual(inst.message, "nnnnnote2\n")
 
-    def test_list_herenote_homenote(self):
-        Note.append(TMP_CATNOTE, Note.jot("this is a note"))
-        inst = next(Note.match(TMP_CATNOTE, (SearchType.TREE, getcwd())))
-        self.assertTrue(abs(time() - inst.now) <= 1)  # is within one second
-        self.assertEqual(inst.pwd, getcwd())
-        self.assertEqual(inst.message, "this is a note\n")
-
-        Note.append(TMP_CATNOTE, Note.jot("nnnnnote2"))
-        multi = Note.match(TMP_CATNOTE, (SearchType.TREE, getcwd()))
-        inst = next(multi)
-        self.assertTrue(abs(time() - inst.now) <= 1)  # is within one second
-        self.assertEqual(inst.pwd, getcwd())
-        self.assertEqual(inst.message, "this is a note\n")
-
-        inst = next(multi)
-        self.assertTrue(abs(time() - inst.now) <= 1)  # is within one second
-        self.assertEqual(inst.pwd, getcwd())
-        self.assertEqual(inst.message, "nnnnnote2\n")
-
     def test_string_representation(self):
         thenote = "this is a note-o"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
@@ -268,17 +233,6 @@ class TestTaker(unittest.TestCase):
         )
 
     def test_search_multi_line_string_with_empty_lines_insensitive(self):
-        thenote = "notes can sometimes\n\n\n\ntake mAny lines"
-        Note.append(TMP_CATNOTE, Note.jot(thenote))
-        inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "MANY")))
-        dt = datetime.fromtimestamp(inst.now)
-        friendly_date = dt.strftime(Note.DATE_FORMAT)
-        self.assertEqual(
-            strip_ansi_codes(str(inst)),
-            f"> cd {inst.pwd}\n# date {friendly_date}\n{thenote}\n",
-        )
-
-    def test_search_multi_line_string_with_split_words_insensitive(self):
         thenote = "notes can sometimes\n\n\n\ntake mAny lines"
         Note.append(TMP_CATNOTE, Note.jot(thenote))
         inst = next(Note.match(TMP_CATNOTE, (SearchType.MESSAGE_I, "MANY")))
@@ -1163,6 +1117,48 @@ class TestTaker(unittest.TestCase):
 
         # Assert that the repr of the note matches the expected string
         self.assertEqual(repr(note), expected_repr)
+
+
+    def test_match_all_in_or_mode(self):
+        # SearchType.ALL must work in OR mode, mirroring AND mode behavior
+        matches = Note.match(FIXED_CATNOTE, [(SearchType.ALL, "")], "or")
+        self.assertEqual(len(list(matches)), 7)
+
+        # OR with ALL plus another criterion should still return all 7 (union)
+        matches = Note.match(
+            FIXED_CATNOTE,
+            [(SearchType.ALL, ""), (SearchType.DIRECTORY, "/home/user")],
+            "or",
+        )
+        self.assertEqual(len(list(matches)), 7)
+
+    def test_empty_criteria_yields_nothing_in_or_mode(self):
+        matches = Note.match(FIXED_CATNOTE, [], "or")
+        self.assertEqual(len(list(matches)), 0)
+
+    def test_empty_append_raises_valueerror(self):
+        Note.append(TMP_CATNOTE, Note.jot("first note"))
+
+        with self.assertRaises(ValueError):
+            Note.append(TMP_CATNOTE, Note.jot(""))
+
+        # file should still have exactly one note
+        iters = sum(1 for _ in Note.iterate(TMP_CATNOTE))
+        self.assertEqual(iters, 1)
+
+    def test_is_binary_string_empty(self):
+        from catjot import is_binary_string
+
+        self.assertFalse(is_binary_string(""))
+        self.assertFalse(is_binary_string("plain text"))
+        self.assertTrue(is_binary_string("\x00binary"))
+
+    def test_note_default_init(self):
+        # Calling Note() with no args must not share state across instances
+        n1 = Note()
+        n2 = Note()
+        n1.tag = "modified"
+        self.assertEqual(n2.tag, "")
 
 
 if __name__ == "__main__":
