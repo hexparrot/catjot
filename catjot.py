@@ -1447,16 +1447,19 @@ def register_tool(name, description, parameters, handler):
     handler:     callable(kwargs) -> str  (returns result as string)
     """
     TOOL_HANDLERS[name] = handler
-    TOOL_SCHEMAS.append(
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": parameters,
-            },
-        }
-    )
+    schema = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
+    for i, existing in enumerate(TOOL_SCHEMAS):
+        if existing["function"]["name"] == name:
+            TOOL_SCHEMAS[i] = schema
+            return
+    TOOL_SCHEMAS.append(schema)
 
 
 def dispatch_tool_call(tool_name, arguments_json):
