@@ -122,7 +122,7 @@ $ install -m 555 catjot.py $HOME/.local/bin/jot
 ### installation for system-wide use
 
 ```
-$ install -m 555 catjot.py $HOME/.local/bin/jot
+$ install -m 555 catjot.py /usr/local/bin/jot
 ```
 
 In all cases, individual users' notes will appear in `~/.catjot`.
@@ -131,21 +131,16 @@ In all cases, individual users' notes will appear in `~/.catjot`.
 
 ### Note Manipulation
 
-`jot` : display all notes created in the present working directory (pwd)
-
-`jot -ac "some context"` : Add context to last-written note
-
-`|jot -ac` : Piped content appended as context for last-written note
-
-`jot -ap "/var/log"` : Change pwd of last-written note
-
-`|jot -acp /var` : Piped content appended as context, provided pwd amends last-written note
-
-`jot -at "tabby friendly"` : Add one or more single-word tags to the last-written note
-
-`|jot -act healthy` : Piped content written as context, provided tag amends last-written note
-                         
-`jot -at ~inventory` : Subtract a tag from last-written note by preceding the word with a tilde `~`
+| Command | Description |
+|---------|-------------|
+| `jot` | Display all notes created in the present working directory |
+| `jot -ac "some context"` | Add context to last-written note |
+| `\| jot -ac` | Piped content appended as context for last-written note |
+| `jot -ap "/var/log"` | Change pwd of last-written note |
+| `\| jot -acp /var` | Piped content appended as context, provided pwd amends last-written note |
+| `jot -at "tabby friendly"` | Add one or more single-word tags to the last-written note |
+| `\| jot -act healthy` | Piped content written as context, provided tag amends last-written note |
+| `jot -at ~inventory` | Subtract a tag from last-written note by preceding the word with a tilde `~` |
 
 ### Homenotes
 
@@ -168,31 +163,31 @@ $ jot home
 
 The abbreviated and (parenthesized) forms are both acceptable.
 
-`jot c 16952...` : (catgpt)/send note matching timestamp to openai endpoint. This function depends on `openai_api_key` environment variable set.
-
-`jot d`        : (dump)/show all notes from all time, everywhere
-
-`jot h`        : show note (head)--show the last 1 note written, among all notes
-
-`jot h 3`      : show note (head)--show the last n notes written, among all notes
-               
-`jot h ~3`     : show note (head)--show n-th from last note, among all notes
-
-`jot home`     : show (home)notes
-
-`jot l`        : show (last) written note from this directory only
-
-`jot l 3`      : show (last) n written notes from this directory only
-
-`jot l ~3`     : show n-th to (last) written note, from this directory only
-
-`jot m Milo`   : (match) case-sensitive <term> within message payload (*see s)
-
-`jot p`        : (pop)/delete the last-written note in this pwd
-
-`jot pl`       : show last-written note, message (payload) only, omitting headers
-
-`jot pl 16952...`: show note matching timestamp(s), concatenated, message (payload) only
+| Command | Description |
+|---------|-------------|
+| `jot c <ts>` | (catgpt) send note matching timestamp to OpenAI endpoint |
+| `jot d` | (dump) show all notes from all time, everywhere |
+| `jot h` | (head) show the last note written among all notes |
+| `jot h N` | (head) show last N notes written among all notes |
+| `jot h ~N` | (head) show N-th from last note among all notes |
+| `jot home` | show homenotes (shorthand to `$HOME`, like a catch-all) |
+| `jot l` | (last) show last written note from this directory only |
+| `jot l N` | (last) show last N written notes from this directory only |
+| `jot l ~N` | (last) show N-th to last written note from this directory only |
+| `jot llm` | talk to a cat naturally; AI searches all note fields to answer your query |
+| `jot m <term>` | (match) case-sensitive `<term>` within message payload |
+| `jot p` | (pop) delete the last-written note in this pwd |
+| `jot pl` | (payload) show last-written note, message only, omitting headers |
+| `jot pl <ts>` | show note(s) matching timestamp, message only |
+| `jot r <ts>` | (remove) note by timestamp |
+| `jot s <term>` | (search) case-insensitive `<term>` within message payload |
+| `jot scoop` | view all notes in `$EDITOR`; prefix a timestamp with `d` to delete, `c`/`p` to cherry-pick |
+| `jot newsr` | interactive prompt to create a new spaced repetition note |
+| `jot sr` | iterate through all (sr) spaced repetition notes ready for review |
+| `jot stray` | display all notes whose pwd no longer exists on this filesystem |
+| `jot t <tag>` | (tag) search all notes filtering by tag, case-sensitive |
+| `jot ts <ts>` | search all notes filtering by timestamp |
+| `jot zzz` | spend a short moment with a kitten |
 
 ```
 $ DATA=$(jot pl 1695220591)
@@ -200,19 +195,7 @@ $ echo $DATA
 うち
 ```
 
-`jot r 16952...` : (remove) note by timestamp
-
-`jot s tabby`  : (search) case-insensitive <term> within message payload (*see m)
-
-`jot sr`     : go through all notes ready for (sr) spaced repetition
-
-`jot newsr`     : interactive prompt to create (newsr) new spaced repetition note. Where possible, prefer `echo "answer" | jot -c "hint" -p "/spaced_repetition"` in a script.
-
-`jot scoop`  : view list of all notes in $EDITOR, delete prefixing records with 's' or 'd'
-
-`jot stray`  : display all (strays), which are all notes whose pwd are absent on this system
-
-`jot t friendly`  : search all notes, filtering by (tag), case-sensitive. Tags are discrete words: "playful kitten" is intepreted as two separate tags, "playful" and "kitten" which can be removed independently.
+Tags are discrete words: `"playful kitten"` is interpreted as two separate tags, `playful` and `kitten`, which can be removed independently.
 
 ```
 $ cat|jot
@@ -235,16 +218,14 @@ $ jot l
 ねこ
 ```
 
-`jot ts 16952...` : search all notes, filtering by (timestamp)
-
-`jot zzz`  : spend a short moment with a kitten
-
 ### Alternate .catjot locations
 
 Set environment variable `CATJOT_FILE` to relocate your notefile.
 
-`export CATJOT_FILE=$HOME/.catjot # this is the default when unset`
-`export CATJOT_FILE=$HOME/notesandmusings`
+```
+export CATJOT_FILE=$HOME/.catjot        # this is the default when unset
+export CATJOT_FILE=$HOME/notesandmusings
+```
 
 ### Returning Only the (date)/Timestamp Value
 
@@ -265,7 +246,7 @@ $
 
 ### Line-by-Line Transcribing, Side-by-Side Layout
 
-Line-by-line transcribing creates a new note while while feeding you each line from an existing note. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
+Line-by-line transcribing creates a new note while feeding you each line from an existing note. Any difference in the original source and the newly typed line will be indicated on the next line with the following symbols:
 
 ✓ - typed line matches original source
 ✗ - line differs from original source
@@ -308,7 +289,7 @@ As for interactions, there are two different GPT-enhanced functionalities, CHAT 
 
 #### jot chat syntax
 
-Quick reference guide for most usable chat functionality (see catjoy.py for full list).
+Quick reference guide for most usable chat functionality (see catjot.py for full list).
 
 ```
 $ jot chat <enter>

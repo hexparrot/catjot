@@ -15,7 +15,7 @@ from os import getcwd, remove, environ
 
 TMP_CATNOTE = "tests/.catjot"
 FIXED_CATNOTE = "tests/bellvue.jot"
-catjot.NOTEFILE = FIXED_CATNOTE
+Note.NOTEFILE = FIXED_CATNOTE
 
 
 class TestRpjot(unittest.TestCase):

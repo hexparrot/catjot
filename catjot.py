@@ -6,6 +6,35 @@ __maintainer__ = "William Dizon"
 __email__ = "wdchromium@gmail.com"
 __status__ = "Development"
 
+"""
+catjot — a directory-aware, cat-themed note-taking tool
+========================================================
+
+Every note is stamped with the directory you were in when you wrote it, so
+your notes live where your work lives.  Jot something down, wander away,
+come back, and the cat remembers exactly where you left things.
+
+  jot              — show notes for the current directory
+  jot <text>       — write a note (pipe text in, or type after the command)
+  jot s <term>     — search all notes, case-insensitive
+  jot llm          — ask the cat to dig through your notes naturally
+  jot convo        — start a persistent LLM conversation stored as notes
+
+The on-disk format is a plain-text record file delimited by "^-^" separators
+(the cat face), making it human-readable and trivially grep-able without
+this tool.  See Note.LABEL_SEP and Note.FIELDS_TO_PARSE for the exact layout.
+
+Architecture at a glance
+─────────────────────────
+  Note            — a single jotted thought; knows how to read/write itself
+  NoteContext     — `with` wrapper that materialises a filtered Note list
+  ContextBundle   — a live, set-algebra view over many notes; used by the
+                    LLM roleplay / conversation system
+  catjot_graphql  — optional GraphQL interface over the same note file
+  run_tool_loop   — agentic LLM loop that searches notes via tool calls
+  main()          — the CLI; all user-facing commands land here
+"""
+
 import requests
 import json
 from functools import partial
@@ -13,24 +42,61 @@ from typing import Callable, List
 from os import environ, getcwd, getenv
 from enum import Enum, auto
 
-# START: ENVIRONMENT CONFIGURATION INSTRUCTIONS
-# set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
+# ENVIRONMENT VARIABLES
 #
-# BASH:
-# export CATJOT_FILE="/home/user/.myjot"  # defaults to $HOME/.catjot
-# export openai_api_key="sk-proj...8EEF"
-# export openai_api_url="https://localhost:5000/v1/chat/completions"
-# export openai_api_model="catgpt-nano"
-# export openai_api_sysrole="Overriding system role goes here"
-# NUSHELL:
-# with-env { openai_api_sysrole: "tell me everything you find" } { jot llm }
-# with-env { openai_api_sysrole: "tell me everything you find", CATJOT_FILE: "/home/user/.myjot" } { jot llm }
-# NUSHELL config
-# $env.openai_api_url = "https://localhost:5000/v1/chat/completions"
-# $env.openai_api_sysrole = "dont be helpful"
+# Variable          Default                  Description
+# ─────────────────────────────────────────────────────────────────────────────
+# CATJOT_FILE       $HOME/.catjot            Path to the note storage file.
+# EDITOR            vim                      Editor launched by `jot scoop`.
+# openai_api_key    (none)                   Bearer token for the LLM endpoint.
+# openai_api_url    (none)                   Full URL to an OpenAI-compatible
+#                                            chat-completions endpoint.
+# openai_api_model  (none)                   Model name sent in each request.
+# openai_api_sysrole (none)                  System-role prompt prepended to
+#                                            every LLM conversation. Appended
+#                                            to the built-in cat-assistant
+#                                            prompt in `jot llm`; replaces it
+#                                            entirely in `jot chat`/`jot convo`.
+#
+# ── Bash / Zsh ────────────────────────────────────────────────────────────────
+# Persist in ~/.bash_profile, ~/.bashrc, or ~/.zshrc:
+#
+#   export CATJOT_FILE="$HOME/.myjot"
+#   export EDITOR="nano"
+#   export openai_api_key="sk-proj...8EEF"
+#   export openai_api_url="https://localhost:5000/v1/chat/completions"
+#   export openai_api_model="catgpt-nano"
+#   export openai_api_sysrole="You are a pleasant cat assistant. Be playful."
+#
+# Override for a single command:
+#
+#   openai_api_sysrole="Be brief." jot chat explain recursion
+#   CATJOT_FILE=/tmp/scratch.jot jot
+#
+# ── Nushell ───────────────────────────────────────────────────────────────────
+# Persist in config.nu (or env.nu):
+#
+#   $env.CATJOT_FILE       = ($env.HOME | path join ".myjot")
+#   $env.EDITOR            = "hx"
+#   $env.openai_api_key    = "sk-proj...8EEF"
+#   $env.openai_api_url    = "https://localhost:5000/v1/chat/completions"
+#   $env.openai_api_model  = "catgpt-nano"
+#   $env.openai_api_sysrole = "You are a cat assistant. Be playful and punny."
+#
+# Override for a single command using with-env:
+#
+#   with-env { openai_api_sysrole: "Be brief." } { jot chat explain recursion }
+#   with-env { CATJOT_FILE: "/tmp/scratch.jot", openai_api_model: "gpt-4o" } { jot llm }
 
 
 def supports_color():
+    """Return True if the current terminal can display ANSI colour codes.
+
+    Checks two things: the platform is not plain Windows (unless ANSICON or
+    Windows Terminal are present), and stdout is an actual TTY rather than a
+    pipe or file redirect.  When piping output to `grep`, `less`, or a file
+    the cat quietly drops all the pretty colours so the raw text stays clean.
+    """
     import os
     import sys
 
@@ -41,10 +107,14 @@ def supports_color():
     return supported_platform and is_a_tty
 
 
-# START: ENUM LISTS
-
-
 class AnsiColor(Enum):
+    """Raw ANSI escape sequences for terminal colour output.
+
+    Values are strings that can be embedded directly in f-strings.
+    Always pair a colour with RESET at the end of the coloured span so the
+    cat's coat doesn't bleed onto unintended text.
+    """
+
     RESET = "\033[0m"
     BOLD = "\033[1m"
     UNDERLINE = "\033[4m"
@@ -59,6 +129,22 @@ class AnsiColor(Enum):
 
 
 class SearchType(Enum):
+    """Selects which field of a Note to match against in Note.match().
+
+    Pass one of these together with a search value as a (SearchType, value)
+    tuple.  Multiple tuples can be combined with AND or OR logic.
+
+      ALL        — match every note regardless of content; value is ignored
+      TAG        — exact word match within the space-separated tag field
+      MESSAGE    — case-sensitive substring search of the message body
+      MESSAGE_I  — case-insensitive version of MESSAGE
+      CONTEXT    — case-sensitive substring search of the context field
+      CONTEXT_I  — case-insensitive version of CONTEXT
+      TIMESTAMP  — match the exact integer epoch timestamp (Note.now)
+      DIRECTORY  — exact match on the stored directory path (Note.pwd)
+      TREE       — prefix match on pwd; returns the note and all children
+    """
+
     ALL = auto()
     TAG = auto()
     MESSAGE = auto()
@@ -71,17 +157,89 @@ class SearchType(Enum):
 
 
 class OutputColors(Enum):
+    """Semantic colour aliases used when rendering chat and cat-image output.
+
+    Keeps the display logic decoupled from raw ANSI values so the colour
+    scheme can be changed in one place.
+
+      IMG_CAT  — colour of the ASCII cat art
+      CHAT_ME  — colour of the user's prompt echo
+      CHAT_CAT — colour of the assistant's reply header
+      CHAT_END — colour of the status/footer line ("stop. model=…")
+    """
+
     IMG_CAT = AnsiColor.YELLOW.value
     CHAT_ME = AnsiColor.CYAN.value
     CHAT_CAT = AnsiColor.GREEN.value
     CHAT_END = AnsiColor.MAGENTA.value
 
 
-# END: ENUM LISTS
-# START: CLASSES
-
-
 class Note(object):
+    """A single catjot note — one thought, one place, one moment in time.
+
+    Each Note stores five fields:
+
+      pwd      — the working directory the note was written from
+      now      — Unix epoch timestamp (int) of when it was written
+      tag      — space-separated labels, e.g. "project1 urgent"
+      context  — a free-form string giving the note extra situational meaning;
+                 typically the command that produced the output being noted, or
+                 a summary of the surrounding conversation turn in LLM mode
+      message  — the actual note body (always ends with a newline)
+
+    On disk each note is stored in a plain-text "record" delimited by the
+    "^-^" separator (the cat face).  The serialised form looks like:
+
+      ^-^
+      Directory:/home/user
+      Date:1695002470
+      Tag:project1
+      Context:ls /home/user
+      Message:note_goes_here
+      note_continued
+
+    When printed to the terminal the same note renders as:
+
+      ^-^
+      > cd /home/user
+      # date 2023-09-17 19:01:10 (1695002470)
+      [project1]
+      % ls /home/user
+      note_goes_here
+      note_continued
+
+    The on-disk format is intentionally grep-friendly.  The terminal format
+    uses colour when the terminal supports it (see USE_COLORIZATION).
+
+    Class-level label constants (LABEL_SEP, LABEL_PWD, …) are the canonical
+    source of truth for both reading and writing; change them here if you
+    ever need to migrate the file format.
+
+    File lifecycle
+    ──────────────
+    Writes always append; destructive edits (delete, amend, pop) follow a
+    safe two-phase pattern:
+
+      1. Note.delete / Note.amend writes a <src>.new shadow file.
+      2. Note.commit renames <src> → <src>.old, then <src>.new → <src>.
+
+    This keeps a one-step rollback available at all times — the cat always
+    lands on its feet.
+    """
+
+    # ── On-disk field label constants ────────────────────────────────────────
+    # Label Name | File internally looks like:
+    # -----------|----------------------------------
+    # LABEL_SEP  | ^-^
+    # LABEL_PWD  | Directory:/home/user
+    # LABEL_NOW  | Date:1695002470
+    # LABEL_TAG  | Tag:project1
+    # LABEL_CTX  | Context:ls /home/user
+    # LABEL_ARG  | Message:note_goes_here
+    #            | note_continued
+    #            |
+
+    # ── Terminal display label constants ─────────────────────────────────────
     # Label Name | Default pattern shown at runtime:
     # -----------|----------------------------------
     # REC_TOP    | ^-^
@@ -92,19 +250,7 @@ class Note(object):
     # LABEL_DATA | note_goes_here
     #            | note_continued
     #            |
-    # REC_BOT    | ***************
-    #            | 0 matches in child directories
-
-    # Label Name | File internally looks like:
-    # -----------|----------------------------------
-    # LABEL_SEP  | ^-^
-    # LABEL_PWD  | Directory:/home/user
-    # LABEL_NOW  | Date:1695002470
-    # LABEL_TAG  | Tag:project1
-    # LABEL_CTX  | Context:ls /home/user
-    # LABEL_ARG  | note_goes_here
-    #            | note_continued
-    #            |
+    # REC_BOT    | (empty — override to add a footer)
 
     # Runtime display presentation
     LABEL_DIR = "> cd "
@@ -137,9 +283,30 @@ class Note(object):
     # Use colorization if terminal supports
     USE_COLORIZATION = True and supports_color()
 
-    def __init__(self, values_dict={}):
+    def __init__(self, values_dict=None):
+        """Initialise a Note from a plain dictionary of field values.
+
+        All fields are optional; missing ones fall back to sensible defaults
+        so that Note() with no arguments creates a valid (if empty) note
+        anchored to the current directory and current time.
+
+        The message field is stripped of a leading "Message:" prefix when
+        the dict comes directly from the file parser — that way the same
+        constructor handles both parsed records and hand-built dicts without
+        needing separate factory paths.
+
+        Args:
+            values_dict: dict with any subset of keys:
+                "pwd"     — absolute path string (asserted to start with "/")
+                "now"     — int epoch timestamp
+                "tag"     — str, space-separated tag words
+                "context" — str, situational annotation
+                "message" — str, the note body
+        """
         from time import time
 
+        if values_dict is None:
+            values_dict = {}
         now = int(time())
         self.pwd = values_dict.get("pwd", getcwd())
         assert self.pwd.startswith("/")
@@ -149,13 +316,26 @@ class Note(object):
         assert isinstance(self.tag, str)
         self.context = values_dict.get("context", "")
         self.message = values_dict.get("message", "")
+        # Strip the on-disk "Message:" label prefix if present so the stored
+        # text and the in-memory text are always identical.
         if self.message.startswith(Note.LABEL_ARG):
             self.message = self.message[len(Note.LABEL_ARG) :]
 
     def __str__(self):
-        """Returns the string representation of a note.
-        This representation does not need to reflect the format
-        on the underlying .catjot file."""
+        """Render the note for human eyes (terminal display format).
+
+        The output format is intentionally different from the on-disk storage
+        format — it's meant to be read by people, not parsed by machines.
+        Optional fields (tag, context) are omitted entirely when empty so
+        the display stays tidy.  Colour codes are applied when
+        Note.USE_COLORIZATION is True (i.e. the output is a real TTY).
+
+        Returns:
+            A multi-line string starting with the directory and timestamp
+            header, followed by optional tag and context lines, then the
+            message body.  Does NOT include the REC_TOP/REC_BOT separators —
+            the caller (printout in main) wraps those around the str() call.
+        """
         from datetime import datetime
 
         dt = datetime.fromtimestamp(self.now)
@@ -196,11 +376,21 @@ class Note(object):
             )
 
     def __repr__(self):
+        """Compact unambiguous representation for debugging and test output."""
         return f"Note(context='{self.context}', message='{self.message}')"
 
     def __eq__(self, other):
-        """Equality test for notes should:
-        Return true if strip()'ed and flattened values match."""
+        """Compare two notes for logical equality, ignoring insignificant whitespace.
+
+        Trailing newlines and leading/trailing spaces in message and context
+        are stripped before comparison, so a note written with a trailing
+        blank line is considered the same note as one without.  The timestamp
+        (now) must match exactly — two otherwise identical notes written at
+        different times are different notes.
+
+        Returns False (not NotImplemented) when compared to a non-Note so
+        that list membership tests work correctly without surprises.
+        """
 
         if isinstance(other, Note):
             return (
@@ -215,7 +405,26 @@ class Note(object):
 
     @classmethod
     def jot(cls, message, tag="", context="", pwd=None, now=None):
-        """Convenience function for low-effort creation of notes"""
+        """Create a new Note without touching the filesystem.
+
+        This is the preferred factory for constructing notes in code.  It
+        strips and re-adds a trailing newline so the message is always
+        consistently terminated, and raises immediately on an empty message
+        rather than letting a silent no-op propagate to disk.
+
+        Args:
+            message: the note body text; must be non-empty.
+            tag:     space-separated tag words, e.g. "project1 urgent".
+            context: situational annotation (command, conversation turn, etc.).
+            pwd:     directory to stamp on the note; defaults to getcwd().
+            now:     epoch timestamp int; defaults to the current time.
+
+        Returns:
+            A new Note object ready to be passed to Note.append().
+
+        Raises:
+            ValueError: if message is empty or whitespace-only.
+        """
         from time import time
 
         if not message:
@@ -233,15 +442,22 @@ class Note(object):
 
     @classmethod
     def append(cls, src, note):
-        """Accepts non-falsy text and writes it to the .catjot file."""
-        if not note.message:
-            return
-        if not note.pwd:
-            note.pwd = getcwd()
-        if not note.now:
-            from time import time
+        """Serialise a Note and append it to the note file.
 
-            note.now = int(time())
+        Writes one complete record — separator, all four header fields, and
+        the message body — in a single open/write/close cycle.  The file is
+        opened in append mode ("at") so concurrent writers don't clobber each
+        other's notes (though concurrent *deletes* are not safe).
+
+        Args:
+            src:  path to the .catjot file (created if it doesn't exist).
+            note: a Note object; its message must be non-empty.
+
+        Raises:
+            ValueError: if note.message is falsy (empty string).
+        """
+        if not note.message:
+            raise ValueError("Cannot append a note with an empty message")
 
         with open(src, "at") as file:
             file.write(f"{Note.LABEL_SEP}\n")
@@ -253,9 +469,21 @@ class Note(object):
 
     @classmethod
     def delete(cls, src, timestamp):
-        """Deletes a single note from the .catjot file.
-        It first creates .catjot.new which should have the full contents
-        of the original minus any timestamps (likely one) that is omitted"""
+        """Write a shadow copy of the note file with matching notes omitted.
+
+        Does NOT modify src in place.  Instead it creates <src>.new containing
+        every note whose timestamp does NOT equal `timestamp`.  Call
+        Note.commit(src) afterward to atomically replace src with the new file
+        and keep a backup at <src>.old.
+
+        If multiple notes share the same timestamp (unusual but possible if
+        notes are constructed with an explicit `now` value) all of them will be
+        omitted — timestamp is the only identity key the format provides.
+
+        Args:
+            src:       path to the source note file.
+            timestamp: int epoch value of the note(s) to remove.
+        """
         newpath = src + ".new"
         with open(newpath, "wt") as trunc_file:
             for inst in cls.iterate(src):
@@ -269,6 +497,27 @@ class Note(object):
 
     @classmethod
     def amend(cls, src, context=None, pwd=None, tag=None):
+        """Rewrite the *last* note in the file with updated field values.
+
+        Like delete(), this is a two-phase operation: it produces <src>.new and
+        requires a subsequent Note.commit() call to finalise.  All notes other
+        than the last are copied verbatim; the last note gets whichever fields
+        are provided as non-None arguments.
+
+        Tag handling is additive by default — passing tag="new_label" appends
+        to the existing tag string rather than replacing it.  To *remove* a
+        tag, prefix it with "~": tag="~old_label" strips "old_label" from
+        the existing tags.
+
+        Args:
+            src:     path to the source note file.
+            context: new context string for the last note, or None to keep
+                     the existing value.
+            pwd:     new directory path for the last note, or None to keep
+                     the existing value.
+            tag:     tag to add (plain string) or remove ("~tagname"), or None
+                     to leave the tag field untouched.
+        """
         last_record = None
         for inst in cls.iterate(src):
             last_record = inst
@@ -311,7 +560,22 @@ class Note(object):
 
     @classmethod
     def pop(cls, src, path):
-        """Deletes the most recent note from the PWD"""
+        """Delete the most recently written note for a given directory.
+
+        Iterates every note that matches the exact directory path and tracks
+        the last one seen.  After the loop completes, that final timestamp is
+        passed to Note.delete() to produce the <src>.new shadow file.
+
+        Still requires Note.commit(src) to apply the deletion.
+
+        Args:
+            src:  path to the note file.
+            path: exact directory string to match (SearchType.DIRECTORY).
+
+        Raises:
+            TypeError: if no notes are found for `path` (last_record stays
+                       None and delete(src, None) will raise).
+        """
         last_record = None
         for inst in Note.match(src, [(SearchType.DIRECTORY, path)]):
             last_record = inst.now
@@ -320,9 +584,17 @@ class Note(object):
 
     @classmethod
     def commit(cls, src):
-        """Finally commits to the filesystem changes implemented by delete().
-        It is a separate function, but should be expected to be paired,
-        100% of the time, alongside pop/deletes"""
+        """Atomically replace the note file with the pending shadow copy.
+
+        The two-step rename sequence is:
+          1. src        → src.old   (previous version kept as one-step backup)
+          2. src.new    → src       (shadow copy becomes the live file)
+
+        Always pair this with a prior Note.delete(), Note.amend(), or
+        Note.pop() call that produced the src.new file.  Calling commit()
+        without a preceding write-phase will raise FileNotFoundError because
+        src.new won't exist — the cat doesn't like committing to nothing.
+        """
         import shutil
 
         shutil.move(src, src + ".old")
@@ -330,24 +602,56 @@ class Note(object):
 
     @classmethod
     def iterate(cls, src):
-        """Iterate all notes, across all paths.
-        Other functions should expect to start with this, pruning down unwanted
-        notes via a matching mechanism such as search()"""
+        """Yield every Note in the file, in order of appearance.
+
+        This is the foundation of all read operations.  Note.match() calls
+        this generator and filters its output; nothing else should need to
+        open the note file directly.
+
+        The parser recognises a record boundary as a blank line immediately
+        followed by a "^-^" line (LABEL_SEP).  Records do not need a trailing
+        separator at the end of the file — the final record is flushed when
+        EOF is reached.
+
+        Fault tolerance
+        ───────────────
+        If the first line of a record doesn't look like a Directory: header
+        (which happens when a raw "^-^" separator ends up inside a note's
+        message body, e.g. from `cat file.jot | jot`), the parser salvages
+        what it can: it borrows the pwd/now/tag from the previous valid record,
+        injects a synthetic context explaining what happened, and continues
+        collecting lines.  The corrupted segment is preserved in the message
+        body so nothing is silently discarded.
+
+        Yields:
+            Note objects, one per valid record.
+        """
 
         def parse(record):
-            """Receives a list of lines which represent one single record.
-            It forces the arrangement of the notes to be specifically matching
-            that of FIELDS_TO_PARSE, but it is not enforced here.
-            Leaving here is simply a dictionary matching all the fields
-            from __init__"""
+            """Convert a list of raw lines into a Note-constructor dict.
+
+            Pops lines from the front of `record` in FIELDS_TO_PARSE order,
+            strips the field label prefix, and accumulates the remainder as
+            the message body.  Returns None (implicitly) if the header lines
+            don't match the expected labels, causing the caller to skip the
+            malformed record silently.
+
+            Args:
+                record: list of raw file lines for one record (mutable;
+                        lines are pop(0)'ed during parsing).
+
+            Returns:
+                dict suitable for Note(**d), or None on parse failure.
+            """
             current_read = {}
-            for field, label in cls.FIELDS_TO_PARSE:  # forces ordering of fields
+            for field, label in cls.FIELDS_TO_PARSE:  # enforce header ordering
                 try:
                     current_read[field] = record.pop(0).split(label, 1)[1].strip()
                 except IndexError:
-                    break  # label/order does not match expected headers
-                    # print(f"Error reading line, expecting label \"{label}<value>\"")
+                    break  # header line missing or out of order — skip record
             else:
+                # `for…else` fires only when the loop completed without a break,
+                # meaning all four header fields were parsed successfully.
                 message = "".join(record).rstrip() + "\n"
                 current_read["message"] = message
                 return current_read
@@ -355,24 +659,26 @@ class Note(object):
         current_record = []
         last_record = None
         last_line = ""
-        # Loops through all lines in the file looking for anywhere where the last line
-        # was empty, followed by the LABEL_SEP (^-^). Lines are added to the
-        # current_record list and once the next LABEL_SEP combo is met, the previous
-        # record parsed and casted into a Note
+
         with open(src, "r") as file:
             for line in file:
                 if last_line == "" and line.strip() == Note.LABEL_SEP:
+                    # Blank line + separator = end of previous record.
+                    # Flush whatever we accumulated and start fresh.
                     if len(current_record):
                         yield Note(parse(current_record))
                     current_record = []
                 else:
                     if current_record and Note.LABEL_PWD not in current_record[0]:
-                        # if its reading a line, but the first of this record
+                        # We're mid-record but the first line doesn't look like
+                        # a Directory: header — the separator ended up inside
+                        # note data.  Salvage by inheriting the previous record's
+                        # metadata and flagging it in the context field.
                         try:
-                            current_record = last_record[0:3]  # pwd, now, tag
+                            current_record = last_record[0:3]  # pwd, now, tag lines
                         except TypeError:
-                            # faulty jot in file, such as record separator
-                            # being piped in from jot into jot
+                            # No previous record to borrow from (corrupted start
+                            # of file).  Discard this fragment and move on.
                             current_record = []
                             last_line = ""
                             continue
@@ -382,21 +688,52 @@ class Note(object):
                                 + f"Salvaging remaining note into this new note.\n"
                                 + f"Ignore this line up to and including Date above, to restore original form."
                             )
-                        # Adding context to this new note about why it now exists
 
                     current_record.append(line)
                     last_line = line.strip()
             else:
-                # There is no LABEL_SEP at the end of a file, so this would be reached
-                # at the end of loop, and occurs once only per file
+                # End of file: no trailing separator, so flush the last record
+                # manually if one is in progress.
                 if last_line == "" and len(current_record):
                     yield Note(parse(current_record))
 
     @classmethod
     def match(cls, src, criteria, logic="and", time_only=False):
+        """Yield notes from src that satisfy the given search criteria.
+
+        Criteria are expressed as (SearchType, value) tuples.  For
+        convenience a single tuple may be passed directly (without wrapping
+        it in a list) — this method normalises it automatically.
+
+        AND mode (default)
+        ──────────────────
+        A note is yielded only when it satisfies *every* criterion.  The
+        yield happens as soon as the running match count reaches len(criteria),
+        which means the generator is safe to partially consume (e.g. next()).
+
+        OR mode
+        ───────
+        A note is yielded as soon as *any single* criterion is satisfied,
+        then the inner loop breaks so the note is never yielded twice.
+
+        Empty criteria list always yields nothing — an explicit match
+        against nothing is treated as "no results", not "everything".
+
+        Falsy values (empty string, 0) are skipped and never increment the
+        match counter, EXCEPT for SearchType.ALL which always matches and
+        always increments regardless of its value.
+
+        Args:
+            src:       path to the note file.
+            criteria:  list of (SearchType, value) tuples, or a single tuple.
+            logic:     "and" (all must match) or "or" (any must match).
+            time_only: if True, yield note.now (int) instead of the Note object.
+
+        Yields:
+            Note objects (or int timestamps if time_only=True) in file order.
+        """
         if isinstance(criteria, tuple):
-            criteria = [criteria]  # force all criteria passed in as tuples into a list
-            # and save all the boilerplate of [] everywhere else
+            criteria = [criteria]  # normalise bare tuple → single-element list
 
         if logic == "and":
             for inst in cls.iterate(src):
@@ -436,7 +773,9 @@ class Note(object):
             for inst in cls.iterate(src):
                 CRITERIA_MET = 0
                 for s_type, s_text in criteria:
-                    if not s_text:
+                    if s_type is SearchType.ALL:
+                        CRITERIA_MET += 1
+                    elif not s_text:
                         pass  # no matching, no incrementing
                     elif s_type is SearchType.DIRECTORY:
                         CRITERIA_MET += 1 if inst.pwd == s_text else 0
@@ -468,14 +807,48 @@ class Note(object):
 
 
 class ContextBundle(object):
-    def __init__(self, tags_dirs_ts):
-        """Holds a set of correlated notes, distinguished by:
-        Tags, dirs, and timestamps. The NOTEFILE is iterated and any matching
-        notes are copied into the `.notes` list.
+    """A live, set-algebra view over a collection of notes.
 
-        This object also can suppress tags/dirs/ts, which leaves the notes
-        intact in the context, but inaccessible on iteration of the context.
-        This enables wholesale blocking out of memories."""
+    ContextBundle is primarily used by the LLM conversation and roleplay
+    system to assemble curated groups of notes as context windows.  It
+    supports natural Python operators for building and manipulating that
+    context:
+
+      ctx  = ContextBundle("my_tag")          # start with all notes tagged "my_tag"
+      ctx += "/home/user/project"             # union in notes from a directory
+      ctx += 1726009125                       # union in a note by timestamp
+      ctx -= "unwanted_tag"                   # remove all notes with that tag
+      ctx2 = ctx - ContextBundle("spoilers")  # new object, "spoilers" notes suppressed
+      str(ctx)                                # context+message pairs for LLM consumption
+
+    Matching terms (tags, dirs, timestamps) determine which notes are loaded
+    from disk into self.notes.  Suppression is a separate, non-destructive
+    layer: suppressed notes stay in self.notes but are excluded from
+    iteration and str() output.  This lets you temporarily hide parts of
+    the context without losing the underlying data.
+
+    The distinction between -= and suppress():
+      -=           removes the matching term and reloads notes from disk;
+                   the note may disappear if no other term covers it.
+      suppress()   adds the term to a blocklist; the note stays in self.notes
+                   but is invisible to callers — until unsuppress() is called.
+
+    Term type dispatch (used by +=, -=, suppress, unsuppress):
+      int           → treated as a timestamp
+      str starting with "/" → treated as a directory path
+      any other str → treated as a tag
+    """
+
+    def __init__(self, tags_dirs_ts):
+        """Initialise a ContextBundle and immediately load matching notes.
+
+        Accepts a single term (str or int) or a list of mixed terms.  Each
+        term is dispatched to the appropriate set (self.tags, self.dirs, or
+        self.ts) and notes are loaded from Note.NOTEFILE for each.
+
+        Args:
+            tags_dirs_ts: a single tag/dir/timestamp, or a list of them.
+        """
         self.tags = set()
         self.dirs = set()
         self.ts = set()
@@ -489,8 +862,16 @@ class ContextBundle(object):
             self += tags_dirs_ts
 
     def __str__(self):
-        """Returns a string of `context' and `message' separated by two newlines.
-        Iterates through all available visible notes--notes not suppressed."""
+        """Render the bundle as a flat string for LLM context injection.
+
+        Each visible note contributes two paragraphs: its context field (the
+        situational annotation) followed by its message body, separated by a
+        blank line.  Notes are emitted in the order they were added to the
+        bundle.  Suppressed notes are silently skipped.
+
+        The result is suitable for inserting directly into an LLM message as
+        prior-conversation context or world-state background.
+        """
         combined_str = ""
         for note in self._visible_notes():
             combined_str += (
@@ -501,19 +882,30 @@ class ContextBundle(object):
         )  # Remove the trailing newline from the final concatenation
 
     def __repr__(self):
+        """Full developer representation showing all internal state."""
         return (
             f"ContextBundle(tags={self.tags}, dirs={self.dirs}, ts={self.ts}, "
             f"notes={self.notes}, blocks={self.blocks})"
         )
 
     def __iter__(self):
-        """Iterate through visible notes--ones not suppressed"""
+        """Yield each visible (non-suppressed) note in addition order."""
         for n in self._visible_notes():
             yield n
 
     def __add__(self, item):
-        """Combines the matching terms of two contexts, effectively combining them.
-        Suppressions are not copied from either ContextBundle."""
+        """Return a new bundle that is the union of this bundle and `item`.
+
+        When `item` is another ContextBundle, the matching terms (tags, dirs,
+        ts) of both are merged into the new object.  Suppressions from either
+        side are NOT carried over — the returned bundle starts with a clean
+        block list.
+
+        When `item` is a plain str or int it is added via __iadd__ on a deep
+        copy of self.
+
+        Returns a new ContextBundle; self is unchanged.
+        """
         import copy
 
         # Create a deep copy of the current instance
@@ -533,7 +925,16 @@ class ContextBundle(object):
         return new_obj
 
     def __iadd__(self, item):
-        """Add 'matching' term to the object via +="""
+        """Add a matching term in place and reload notes from disk.
+
+        Dispatches by type/prefix:
+          int  → self.ts    (timestamp match)
+          str starting with "/" → self.dirs  (exact directory match)
+          other str → self.tags  (tag word match)
+
+        After updating the appropriate set, _regen_notes() re-reads the file
+        so self.notes reflects the new union of all matching terms.
+        """
         # adds notes if not existing
         if isinstance(item, int):
             self.ts.add(item)
@@ -548,7 +949,14 @@ class ContextBundle(object):
         return self
 
     def __isub__(self, item):
-        """Remove 'matching' term to the object via -="""
+        """Remove a matching term in place and reload notes from disk.
+
+        Removes `item` from the appropriate set (ts, dirs, or tags).  If the
+        item isn't present the operation is a silent no-op.  After updating
+        the set, _regen_notes() re-reads the file — notes that were only
+        covered by the removed term will disappear from self.notes; notes
+        covered by remaining terms will stay.
+        """
         # identifies and removes matching notes
         if isinstance(item, int):
             if item in self.ts:
@@ -565,8 +973,18 @@ class ContextBundle(object):
         return self
 
     def __sub__(self, item):
-        """Either remove a 'matching' term, or if subtracting a ContextBundle:
-        Suppress all b's 'matching' terms from obj a."""
+        """Return a new bundle with `item` removed or suppressed.
+
+        When `item` is a ContextBundle: returns a deep copy of self with all
+        of item's tags, timestamps, and directories added to the block list
+        (suppression).  The underlying notes are preserved in memory; they
+        simply become invisible to iteration and str() until unsuppressed.
+
+        When `item` is a plain str or int: returns a deep copy with that term
+        removed from the matching sets (equivalent to -= on a copy).
+
+        Returns a new ContextBundle; self is unchanged.
+        """
         import copy
 
         # Create a deep copy of the current instance
@@ -586,17 +1004,29 @@ class ContextBundle(object):
         return new_obj
 
     def __len__(self):
-        """Return the amount of notes not suppressed."""
+        """Return the count of currently visible (non-suppressed) notes."""
         return len(list(self._visible_notes()))
 
     def _visible_notes(self):
-        """Helper function to return the list of notes, impacted by suppression"""
+        """Yield notes that pass all suppression filters, without duplicates.
+
+        Walks self.notes three times — once for each term type (tags, ts,
+        dirs) — and yields each qualifying note at most once by tracking
+        already-seen notes in a local list.
+
+        A note is hidden if any of the following is true:
+          • one of its tag words appears in self.blocks["tag"]
+          • its pwd is in self.blocks["directory"]
+          • its now timestamp is in self.blocks["timestamp"]
+
+        This is used by __iter__, __len__, and __str__ — everything that
+        needs to respect the current suppression state goes through here.
+        """
         seen = []
 
-        def iterate_notes(search_type, values):
+        def iterate_notes(values):
             for value in values:
                 for n in self.notes:
-                    # Check if the note is not blocked by tags, directory, or timestamp
                     if (
                         set(n.tag.split()).isdisjoint(self.blocks["tag"])
                         and n.pwd not in self.blocks["directory"]
@@ -606,13 +1036,21 @@ class ContextBundle(object):
                         seen.append(n)
                         yield n
 
-        # Iterate over notes for tags, timestamps, and directories
-        yield from iterate_notes(SearchType.TAG, self.tags)
-        yield from iterate_notes(SearchType.TIMESTAMP, self.ts)
-        yield from iterate_notes(SearchType.DIRECTORY, self.dirs)
+        yield from iterate_notes(self.tags)
+        yield from iterate_notes(self.ts)
+        yield from iterate_notes(self.dirs)
 
     def _regen_notes(self):
-        """Reads disk and iterates all notes, adding notes that match on 'matching' terms"""
+        """Rebuild self.notes by re-reading Note.NOTEFILE from disk.
+
+        Called every time a matching term is added or removed (via +=/-=) to
+        keep the in-memory note list consistent with the declared terms.
+        Uses NoteContext (which in turn calls Note.match) so the same search
+        logic applies here as everywhere else.
+
+        Notes are de-duplicated: a note that matches on both a tag and a
+        directory is only stored once.
+        """
         self.notes = []
 
         def add_notes(search_type, values):
@@ -629,14 +1067,29 @@ class ContextBundle(object):
 
     @property
     def active_tags(self):
-        """Returns a list of all tags present in all available notes, not impacted by suppression"""
+        """Return the set of all tag words across every note in self.notes.
+
+        Suppression is intentionally NOT applied here — this reflects the
+        full tag vocabulary of all loaded notes, not just the visible ones.
+        Useful for inspecting what tags are present before deciding what
+        to suppress or add as new matching terms.
+        """
         all_tags = set()
         for n in self.notes:
             all_tags.update(n.tag.split())
         return all_tags
 
     def suppress(self, item):
-        """Accepts a 'matching' term and adds it to the blocklist, so it will be hidden from iteration"""
+        """Add `item` to the block list so matching notes are hidden from iteration.
+
+        Does NOT remove notes from self.notes or touch the matching-term sets.
+        The notes remain in memory and can be revealed again via unsuppress().
+
+        Args:
+            item: int → blocks by timestamp;
+                  str starting with "/" → blocks by directory;
+                  other str → blocks by tag word.
+        """
         if isinstance(item, int):
             self.blocks["timestamp"].add(item)
         elif item.startswith("/"):
@@ -645,7 +1098,14 @@ class ContextBundle(object):
             self.blocks["tag"].add(item)
 
     def unsuppress(self, item):
-        """Reverses suppression--ensures notes matching the terms still are iterable"""
+        """Remove `item` from the block list, making matching notes visible again.
+
+        Silent no-op if `item` was not suppressed — the cat doesn't complain
+        about unsuppressing things that weren't suppressed in the first place.
+
+        Args:
+            item: int, directory string, or tag string (same dispatch as suppress).
+        """
         try:
             if isinstance(item, int):
                 self.blocks["timestamp"].remove(item)
@@ -658,6 +1118,30 @@ class ContextBundle(object):
 
 
 class NoteContext:
+    """Context manager that materialises a filtered list of Notes.
+
+    Wraps Note.match() in a `with` statement so callers get a concrete list
+    (not a lazy generator) without having to write their own try/except for
+    the "file doesn't exist yet" first-run case.
+
+    Usage:
+        with NoteContext(NOTEFILE, (SearchType.DIRECTORY, "/home/user")) as nc:
+            for note in nc:
+                print(note)
+
+    The `with` block receives a plain list, so len(), indexing (nc[0]),
+    and multiple passes all work without rewinding a generator.
+
+    First-run behaviour
+    ───────────────────
+    If the note file doesn't exist yet, NoteContext prints a friendly ASCII
+    cat, creates the empty file, and exits with code 1 — prompting the user
+    to try again.  On the second run the file exists and everything proceeds
+    normally.  The cat wanted a warm place to sleep before it started taking
+    notes.
+    """
+
+    # ASCII cat shown on first-run file creation (credit: felix lee)
     NEWCAT = r"""-------------------------------------
      ("`-/")_.-'"``-._
       . . `; -._    )-;-,_`)
@@ -665,13 +1149,29 @@ class NoteContext:
     _.- _..-_/ / ((.'
   ((,.-'   ((,/
    ((,-'    ((,|
-"""  # credits felix lee
+"""
 
     def __init__(self, notefile, search_criteria):
+        """Store the file path and search criteria for use in __enter__.
+
+        Args:
+            notefile:        path to the .catjot note file.
+            search_criteria: (SearchType, value) tuple, or list of tuples,
+                             or an empty list (yields zero results).
+        """
         self.notefile = notefile
         self.criteria = search_criteria
 
     def __enter__(self):
+        """Execute the search and return the result as a list.
+
+        Returns:
+            list of Note objects matching self.criteria.
+
+        Side effects on error:
+            FileNotFoundError → prints ASCII cat, creates the file, sys.exit(1)
+            ValueError        → prints type-mismatch message, sys.exit(3)
+        """
         import sys
 
         try:
@@ -689,14 +1189,33 @@ class NoteContext:
             sys.exit(3)
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """No cleanup needed — the list was fully materialised in __enter__."""
         pass
 
 
 class catjot_graphql(object):
-    """Implements a GraphQL interface allowing access to NOTEFILE.
-    A basic query filter runs in O(n) time."""
+    """Optional GraphQL interface over the catjot note file.
 
-    # Basic query means using any of the SearchType enums, case-insensitive.
+    Exposes the same Note fields available through Note.match() as a GraphQL
+    query endpoint.  Useful when you want to drive catjot from tooling that
+    speaks GraphQL (dashboards, notebooks, external scripts).
+
+    All filtering runs in O(n) time over the note file — there is no index.
+    For interactive use this is fine; for very large note files consider
+    batching queries or pre-filtering with Note.match() directly.
+
+    Quickstart:
+        gql = catjot_graphql()
+        result = gql.execute_query({"pwdtree": "/home/user/project"})
+        for note in result.data["notes"]:
+            print(note["message"])
+
+    The default query (QUERY) returns all five note fields.  Pass a custom
+    query string to execute_query() if you only need a subset.
+    """
+
+    # Default GraphQL query — returns all five note fields.
+    # Use as a template; narrow the field selection if you only need a subset.
     QUERY = """
     query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
       notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
@@ -714,6 +1233,12 @@ class catjot_graphql(object):
         self.NOTEFILE = notefile
 
     def _create_schema(self):
+        """Build and return the GraphQL schema for the Note type.
+
+        Defines one root query field ("notes") that accepts the same filter
+        arguments as Note.match() and delegates to resolve_notes().  The
+        schema is constructed once in __init__ and reused across queries.
+        """
         from graphql import (
             graphql_sync,
             GraphQLSchema,
@@ -759,20 +1284,32 @@ class catjot_graphql(object):
         return GraphQLSchema(query=QueryType)
 
     def execute_query(self, variables, query=QUERY):
-        """Return a list of Notes according to the criteria provided
-        as a dictionary applied to QUERY"""
-        # Example: Match each criteria with and/or logic
-        # from pprint import pprint
-        # pprint(catjot_graphql().execute_query(
-        # {
-        #    "tag": ["predator", "kitten"],
-        #    "context": "catgpt",
-        #    "message": "meow",
-        #    "logic": "and", # or "or"
-        # }).data)
+        """Execute a GraphQL query against the note file.
 
-        # Example: print all notes
-        # pprint(catjot_graphql().execute_query({"pwdtree": "/"}).data)"""
+        Args:
+            variables: dict of query variables, e.g.:
+                {"tag": ["project", "urgent"], "logic": "and"}
+                {"pwdtree": "/home/user/project"}
+                {"message": "deployment", "context": "prod"}
+            query: GraphQL query string; defaults to QUERY (returns all fields).
+
+        Returns:
+            graphql.ExecutionResult with a .data dict and optional .errors list.
+
+        Examples:
+            from pprint import pprint
+            gql = catjot_graphql()
+
+            # AND logic: notes tagged "predator" AND "kitten" mentioning "meow"
+            pprint(gql.execute_query({
+                "tag": ["predator", "kitten"],
+                "message": "meow",
+                "logic": "and",
+            }).data)
+
+            # All notes under any path
+            pprint(gql.execute_query({"pwdtree": "/"}).data)
+        """
         from graphql import parse, execute_sync
 
         parsed_query = parse(query)
@@ -791,7 +1328,27 @@ class catjot_graphql(object):
         pwdtree=None,
         logic="or",
     ):
-        """Resolver for Note GraphQL datatype"""
+        """GraphQL resolver: translate query args into Note.match() criteria.
+
+        Each non-None argument becomes a (SearchType, value) tuple in the
+        criteria list.  `tag` may be a list of strings — each becomes its
+        own TAG criterion (combined with the chosen logic).  String fields
+        use case-insensitive search (CONTEXT_I, MESSAGE_I).
+
+        Args:
+            _:       root value (unused, required by graphql-core signature).
+            info:    resolver context (unused).
+            pwd:     exact directory match.
+            now:     exact timestamp match.
+            tag:     single tag string or list of tag strings.
+            context: case-insensitive context substring.
+            message: case-insensitive message substring.
+            pwdtree: directory prefix match (note and all children).
+            logic:   "or" (default) or "and".
+
+        Returns:
+            list of Note objects satisfying the criteria.
+        """
 
         criteria = []
 
@@ -825,7 +1382,21 @@ class catjot_graphql(object):
 
 
 def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
-    """Single LLM chat completion call. Returns the response message dict."""
+    """Fire a single chat-completion request at the configured LLM endpoint.
+
+    Reads credentials and model from environment variables:
+        openai_api_key   – Bearer token sent in the Authorization header.
+        openai_api_url   – Full completion endpoint URL.
+        openai_api_model – Model identifier string.
+
+    When *tools* is provided the payload gains ``tools`` and ``tool_choice``
+    fields so the LLM can request function calls.  Some provider implementations
+    attach ``tool_calls`` at the choice level rather than inside the message
+    dict; this function normalises that quirk before returning.
+
+    Returns the ``message`` dict from ``choices[0]``.  Raises
+    ``requests.HTTPError`` on a non-2xx response.
+    """
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url")
     api_model = getenv("openai_api_model")
@@ -889,7 +1460,14 @@ def register_tool(name, description, parameters, handler):
 
 
 def dispatch_tool_call(tool_name, arguments_json):
-    """Look up a tool by name and execute it. Returns result string."""
+    """Look up a registered tool by name and invoke its handler.
+
+    *arguments_json* may arrive as a raw JSON string (as the LLM sends it) or
+    as an already-parsed dict — both forms are accepted.
+
+    Returns the handler's string result, or an error string if the tool name
+    is not found in ``TOOL_HANDLERS``.
+    """
     handler = TOOL_HANDLERS.get(tool_name)
     if not handler:
         return f"Error: unknown tool '{tool_name}'"
@@ -906,6 +1484,18 @@ def dispatch_tool_call(tool_name, arguments_json):
 
 
 def make_tag_search_handler():
+    """Return a handler that searches notes by the *tag* field.
+
+    The returned callable splits *query* on whitespace and runs an OR search
+    against ``Note.NOTEFILE`` for each word.  It collects the ``note.now``
+    timestamps of every matching note (deduplicating order-preservingly) and
+    returns them as a JSON array string — the format expected by
+    ``aggregate_note_ids``.
+
+    Factory pattern used so the handler closes over nothing mutable and can
+    be safely registered at import time via ``register_tool``.
+    """
+
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
@@ -918,6 +1508,13 @@ def make_tag_search_handler():
 
 
 def make_context_search_handler():
+    """Return a handler that searches notes by the *context* field (case-insensitive).
+
+    Identical contract to ``make_tag_search_handler`` but targets
+    ``SearchType.CONTEXT_I``.  Each word in *query* is searched independently
+    and the union of matching note IDs is returned as a JSON array.
+    """
+
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
@@ -932,6 +1529,13 @@ def make_context_search_handler():
 
 
 def make_message_search_handler():
+    """Return a handler that searches notes by the *message* body (case-insensitive).
+
+    Identical contract to ``make_tag_search_handler`` but targets
+    ``SearchType.MESSAGE_I``.  The message body is typically the longest field
+    in a note, so queries here cover the bulk of free-form note content.
+    """
+
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
@@ -946,6 +1550,13 @@ def make_message_search_handler():
 
 
 def make_directory_search_handler():
+    """Return a handler that searches notes by the *directory* / pwd field.
+
+    Identical contract to ``make_tag_search_handler`` but targets
+    ``SearchType.DIRECTORY``.  Useful when the user query names a path
+    fragment like ``/home/user/projects/catjot``.
+    """
+
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
@@ -1017,9 +1628,17 @@ register_tool(
 
 
 def aggregate_note_ids(messages):
-    """
-    Walk all tool result messages and union the returned Note.now ID lists.
-    Returns a set of note IDs.
+    """Walk the full message history and union every tool-result ID list.
+
+    Each search-tool handler returns a JSON array of ``Note.now`` timestamps.
+    After the LLM has called all four tools, this function scrapes those arrays
+    out of the ``role=tool`` messages and unions them into one set — the
+    complete candidate pool for the final answer pass.
+
+    Non-JSON or non-list tool results are silently skipped (e.g., error strings
+    from ``dispatch_tool_call``).
+
+    Returns a set of integer note IDs.
     """
     all_ids = set()
     for msg in messages:
@@ -1034,8 +1653,16 @@ def aggregate_note_ids(messages):
 
 
 def fetch_notes_by_ids(note_ids):
-    """
-    Given a set of Note.now values, return full note dicts for the final LLM pass.
+    """Hydrate a set of note IDs into full note dicts for the final LLM pass.
+
+    After ``aggregate_note_ids`` builds the candidate set, this function reads
+    through ``Note.NOTEFILE`` once via ``NoteContext`` and plucks out every note
+    whose ``note.now`` timestamp is in *note_ids*.
+
+    Each result dict contains: ``now``, ``tag``, ``context``, ``directory``,
+    and ``message`` — everything the LLM needs to write a grounded summary.
+
+    Returns a list of dicts (order follows the on-disk note order).
     """
     results = []
     with NoteContext(Note.NOTEFILE, (SearchType.ALL, "")) as nc:
@@ -1054,10 +1681,31 @@ def fetch_notes_by_ids(note_ids):
 
 
 def run_tool_loop(user_query, max_iterations=10):
-    """Send user_query to the LLM, iterating through all four search tools.
-    Each tool searches a single field and returns a list of Note.now IDs.
-    Once all four tools have been called, results are aggregated and a final
-    LLM pass produces the summary.
+    """Drive the agentic search-and-answer loop for ``jot llm``.
+
+    The loop enforces a protocol:
+
+    1. The system prompt instructs the LLM to call *all four* search tools
+       (tag, context, message, directory) before drawing conclusions.
+    2. Each iteration calls ``call_llm`` with the current message history and
+       the full ``TOOL_SCHEMAS`` list.
+    3. If the response contains ``tool_calls``, each call is dispatched via
+       ``dispatch_tool_call`` and the result is appended as a ``role=tool``
+       message.
+    4. After every iteration the set of tool names called so far is compared
+       against ``REQUIRED_TOOLS``.  Once all four have fired, the loop exits the
+       search phase: ``aggregate_note_ids`` + ``fetch_notes_by_ids`` hydrate the
+       matched notes, a final user turn presents the full note data, and one last
+       ``call_llm`` call (no tools) produces the human-readable summary.
+    5. If the LLM stops calling tools before all four have run it has broken
+       protocol — the loop returns whatever it said verbatim.
+    6. If ``max_iterations`` is exhausted without completing, a polite failure
+       string is returned instead of raising.
+
+    The ``openai_api_sysrole`` environment variable is appended to the system
+    prompt so operators can inject persona or constraint instructions.
+
+    Returns a plain-text answer string suitable for ``print_ascii_cat_with_text``.
     """
     CATGPT_ROLE = getenv("openai_api_sysrole", "")
 
@@ -1156,19 +1804,26 @@ def run_tool_loop(user_query, max_iterations=10):
 
 
 def send_prompt_to_endpoint(messages, model_name, mode):
-    """
-    Sends a prompt to a streaming-supported OpenAI GPT completion API and handles the response.
+    """Send a chat-completion request to an OpenAI-compatible endpoint.
 
-    Parameters:
-    - messages: List of messages to send to the API.
-    - model_name: The name of the model to use.
-    - mode: "stream" for character-by-character streaming, "full" for collecting the full response.
+    Reads ``openai_api_key``, ``openai_api_url``, and ``openai_api_model`` from
+    the environment.  If *model_name* is non-empty it overrides the env model
+    (i.e. ``jot -m gpt-4o chat …`` wins).  The Authorization header is omitted
+    when ``openai_api_key`` is falsy — handy for local models that need no key.
 
-    Returns:
-    - In "stream" mode: A generator that yields characters as they are streamed.
-    - In "full" mode: A tuple (full_response, last_token_obj), where:
-      - full_response: The full response string.
-      - last_token_obj: The last JSON object received, containing metadata like token count.
+    *mode* controls the response strategy:
+
+    ``"full"``
+        Waits for the complete response and returns the raw JSON dict from the
+        endpoint (the same ``response.json()`` you'd get from the API directly).
+        Returns ``None`` and prints an error on network failure.
+
+    ``"stream"``
+        Sets ``stream: True`` in the request body and returns a **generator**
+        that yields one character at a time as SSE ``data:`` lines arrive.
+        Callers iterate the generator and print each character with ``flush=True``
+        for a typewriter effect.  On network failure the generator yields
+        ``"[Error]"`` rather than raising.
     """
     api_key = getenv("openai_api_key")
     api_url = getenv("openai_api_url")
@@ -1229,10 +1884,17 @@ def send_prompt_to_endpoint(messages, model_name, mode):
 
 
 def return_footer(gpt_reply):
-    # receives the jSON object from a successful gpt call
-    # returns technical details of token usage/model
+    """Format a one-line footer string from a completed GPT response dict.
+
+    Extracts ``finish_reason`` and ``model`` from the standard OpenAI response
+    shape and returns them as a compact label — used as the *endtext* argument
+    to ``print_ascii_cat_with_text`` so the user knows why generation stopped
+    and which model was used.
+
+    Example output: ``"stop. model=gpt-4o"``
+    """
     finish_reason = gpt_reply["choices"][0].get("finish_reason", "stop")
-    return f"{finish_reason}. model={gpt_reply['model']})"
+    return f"{finish_reason}. model={gpt_reply['model']}"
 
 
 def is_binary_string(data):
@@ -1242,6 +1904,9 @@ def is_binary_string(data):
     :param data: A string to be checked
     :return: True if the string is binary, False if it is text
     """
+    if not data:
+        return False
+
     if "\x00" in data:
         return True
 
@@ -1255,6 +1920,26 @@ def is_binary_string(data):
 def print_ascii_cat_with_text(
     intro, text, endtext="stop.", intro_color=OutputColors.CHAT_CAT
 ):
+    """Render the signature ASCII cat alongside a prompt and response.
+
+    Layout::
+
+         /\\_/\\          <intro line 1>
+        ( o.o )          <intro line 2 …>
+         > ^ <
+
+    *intro* is word-wrapped to 80 columns and printed line-by-line next to the
+    cat art.  *text* follows on its own lines below (not wrapped — callers are
+    responsible for pre-formatting).  *endtext* is printed last, coloured with
+    ``OutputColors.CHAT_END`` so it visually marks the end of a response block.
+
+    When ``Note.USE_COLORIZATION`` is False all ANSI colour codes are suppressed
+    and the output remains clean for piping or dumb terminals.
+
+    The *intro_color* parameter lets callers tint the intro text differently —
+    ``OutputColors.CHAT_ME`` is used to distinguish the user's own words from the
+    cat's words when the two colours differ.
+    """
     import textwrap
 
     cat = r""" /\_/\
@@ -1262,9 +1947,6 @@ def print_ascii_cat_with_text(
  > ^ <
 """
     wrapped_text = textwrap.wrap(intro, 80)
-
-    # Determine the height of the ASCII cat
-    cat_height = cat.count("\n")
 
     # Print the ASCII cat and the wrapped text side by side
     cat_lines = cat.split("\n")
@@ -1287,6 +1969,56 @@ def print_ascii_cat_with_text(
 
 
 def main():
+    """CLI entry point — parse arguments and dispatch to the appropriate action.
+
+    **Dispatch hierarchy**
+
+    1. **Flag-only paths** (argparse short flags `-a`, `-c`, `-t`, `-p`) are
+       resolved first.  Combining `-a` with at least one of ``-c/-t/-p`` means
+       *amend* the most recent note's metadata.  Flags alone (without ``-a``)
+       search notes by that field (context / tag / pwd).  Piping to any of
+       these flags writes a new note instead of searching.
+
+    2. **SHORTCUTS dict** maps canonical action names to their accepted keyword
+       aliases.  All keyword matching is done against ``args.additional_args``
+       (positional arguments after the flags).  The dict lives in the
+       USER-EDITABLE AREA block so power users can remap words without touching
+       logic.
+
+    3. **Arity branching** — after IS_CHAT / IS_CONVO are resolved, the code
+       branches on ``len(args.additional_args)``:
+
+       - 0 args, interactive → show notes for current pwd + summary counts.
+       - 0 args, piped → create a new note from stdin.
+       - 1 arg → single-keyword shortcuts (head, last, pop, dump, home, zzz,
+         scoop, stray, graphql, newsr, sr, llm, …).
+       - 2 args → two-word shortcuts (match, search, ts, remove, tag, payload,
+         sbs, head+N, last+N, …).
+
+    **Key helper closures** (defined inside main):
+
+    - ``flatten(arg_lst)``   – joins positional args with spaces (for queries).
+    - ``flatten_pipe(arg_lst)`` – joins lines from stdin preserving newlines.
+    - ``printout(note_obj, message_only, time_only)`` – formats a single note
+      for display according to active flags.
+
+    **Environment variable override**: if ``CATJOT_FILE`` is set and non-empty
+    it replaces ``Note.NOTEFILE`` for this invocation (file is touch-created if
+    it doesn't yet exist).
+
+    **LLM subcommands** (``jot chat``, ``jot convo``, ``jot llm``):
+    - ``chat``  – one-shot: build a single-turn messages list, call
+      ``send_prompt_to_endpoint``, save the reply as a new note.
+    - ``convo`` – multi-turn loop: accumulates user + assistant turns across
+      Control-D-delimited blocks; supports ``continue`` (reload tag history),
+      ``summarize`` (compress + carry over), and ``cat``/``catenate`` (merge
+      multiple tag chains).
+    - ``llm``   – agentic: invokes ``run_tool_loop`` which calls all four search
+      tools before producing a grounded answer.
+
+    Exits with a non-zero status code on user-facing errors (missing note,
+    invalid input, insufficient terminal width, binary stdin, etc.).
+    """
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -1357,7 +2089,6 @@ def main():
 
     NOTEFILE = Note.NOTEFILE
     import sys
-    from os import environ
 
     if "CATJOT_FILE" in environ:
         # the environment variable will always supercede $HOME default when set
@@ -1578,7 +2309,7 @@ def main():
                     sys.exit(1)
                 elif not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
-            elif not sys.stdin.isatty():  # not interactive tty, all pipe!
+            else:  # not interactive tty, all pipe!
                 # routes 5,6,7,8,9,10: fill in the blank, pref intro
                 if not txt and not intro:
                     intro = flatten_pipe(sys.stdin.readlines())
@@ -1601,8 +2332,6 @@ def main():
             full_sendout = f"{intro}\n\n{txt}"
 
             if len(args.additional_args) and args.additional_args[0] in ["home"]:
-                from os import environ
-
                 params["pwd"] = environ["HOME"]
 
             if is_binary_string(full_sendout):
@@ -1990,8 +2719,6 @@ def main():
         # ZERO USER-PROVIDED PARAMETER SHORTCUTS
         elif len(args.additional_args) == 0:
             # show all notes originating from this PWD
-            from os import getcwd
-
             if sys.stdin.isatty():
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     match_count = 0
@@ -2018,8 +2745,6 @@ def main():
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
                 # only display the most recently created note in this PWD
-                from os import getcwd
-
                 last_note = "No notes to show.\n"
                 with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                     for inst in nc:
@@ -2028,8 +2753,6 @@ def main():
                         printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]:
                 # only display the most recently created note in this PWD
-                from os import getcwd
-
                 last_note = "No notes to show.\n"
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     for inst in nc:
@@ -2038,8 +2761,6 @@ def main():
                         printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["DELETE_MOST_RECENT_PWD"]:
                 # always deletes the most recently created note in this PWD
-                from os import getcwd
-
                 try:
                     Note.pop(NOTEFILE, getcwd())
                     Note.commit(NOTEFILE)
@@ -2052,8 +2773,6 @@ def main():
             elif args.additional_args[0] in SHORTCUTS["HOMENOTES"]:
                 # if simply typed, show home notes
                 # if piped to, save as home note
-                from os import environ
-
                 if sys.stdin.isatty():
                     with NoteContext(
                         NOTEFILE, (SearchType.DIRECTORY, environ["HOME"])
@@ -2217,8 +2936,6 @@ def main():
                 """
                 parsed_vars = {}
                 if sys.stdin.isatty():  # jot ql
-                    from os import getcwd
-
                     parsed_vars = {"pwdtree": getcwd()}
                 else:  # cat | jot ql
                     for line in sys.stdin:
@@ -2356,17 +3073,18 @@ def main():
                         "Enter your prompt and hit Control-D to submit. \n",
                     )
 
-                    try:
-                        query = flatten_pipe(sys.stdin.readlines())
-                        if not query:
+                    while True:
+                        try:
+                            query = flatten_pipe(sys.stdin.readlines())
+                            if not query:
+                                return
+                        except KeyboardInterrupt:
                             return
-                    except KeyboardInterrupt:
-                        return
-                    else:
-                        answer = run_tool_loop(query)
-                        print_ascii_cat_with_text(
-                            query, answer, intro_color=OutputColors.CHAT_ME
-                        )
+                        else:
+                            answer = run_tool_loop(query)
+                            print_ascii_cat_with_text(
+                                query, answer, intro_color=OutputColors.CHAT_ME
+                            )
                 else:
                     query = flatten_pipe(sys.stdin.readlines())
                     answer = run_tool_loop(query)
@@ -2430,8 +3148,6 @@ def main():
                         print(f"{Note.LABEL_SEP}")
                         print(f"{len(nc)} notes matching '{flattened}'")
             elif args.additional_args[0] in SHORTCUTS["MESSAGE_ONLY"]:
-                from os import getcwd
-
                 # returns the message only (no pwd, no timestamp, no context).
                 # when provided a timestamp, any notes matching timestamp
                 # will be sent to stdout, concatenated in order of appearance
@@ -2591,7 +3307,6 @@ def main():
             elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
                 # only display the most recently created n notes in this PWD
                 from collections import deque
-                from os import getcwd
 
                 record_count_to_show = 1
                 user_tilde_given = False
