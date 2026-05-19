@@ -13,21 +13,51 @@ from typing import Callable, List
 from os import environ, getcwd, getenv
 from enum import Enum, auto
 
-# START: ENVIRONMENT CONFIGURATION INSTRUCTIONS
-# set this key in your shell, e.g., this line in your ~/.bash_profile or ~/.zshrc, etc.:
+# ENVIRONMENT VARIABLES
 #
-# BASH:
-# export CATJOT_FILE="/home/user/.myjot"  # defaults to $HOME/.catjot
-# export openai_api_key="sk-proj...8EEF"
-# export openai_api_url="https://localhost:5000/v1/chat/completions"
-# export openai_api_model="catgpt-nano"
-# export openai_api_sysrole="Overriding system role goes here"
-# NUSHELL:
-# with-env { openai_api_sysrole: "tell me everything you find" } { jot llm }
-# with-env { openai_api_sysrole: "tell me everything you find", CATJOT_FILE: "/home/user/.myjot" } { jot llm }
-# NUSHELL config
-# $env.openai_api_url = "https://localhost:5000/v1/chat/completions"
-# $env.openai_api_sysrole = "dont be helpful"
+# Variable          Default                  Description
+# ─────────────────────────────────────────────────────────────────────────────
+# CATJOT_FILE       $HOME/.catjot            Path to the note storage file.
+# EDITOR            vim                      Editor launched by `jot scoop`.
+# openai_api_key    (none)                   Bearer token for the LLM endpoint.
+# openai_api_url    (none)                   Full URL to an OpenAI-compatible
+#                                            chat-completions endpoint.
+# openai_api_model  (none)                   Model name sent in each request.
+# openai_api_sysrole (none)                  System-role prompt prepended to
+#                                            every LLM conversation. Appended
+#                                            to the built-in cat-assistant
+#                                            prompt in `jot llm`; replaces it
+#                                            entirely in `jot chat`/`jot convo`.
+#
+# ── Bash / Zsh ────────────────────────────────────────────────────────────────
+# Persist in ~/.bash_profile, ~/.bashrc, or ~/.zshrc:
+#
+#   export CATJOT_FILE="$HOME/.myjot"
+#   export EDITOR="nano"
+#   export openai_api_key="sk-proj...8EEF"
+#   export openai_api_url="https://localhost:5000/v1/chat/completions"
+#   export openai_api_model="catgpt-nano"
+#   export openai_api_sysrole="You are a pleasant cat assistant. Be playful."
+#
+# Override for a single command:
+#
+#   openai_api_sysrole="Be brief." jot chat explain recursion
+#   CATJOT_FILE=/tmp/scratch.jot jot
+#
+# ── Nushell ───────────────────────────────────────────────────────────────────
+# Persist in config.nu (or env.nu):
+#
+#   $env.CATJOT_FILE       = ($env.HOME | path join ".myjot")
+#   $env.EDITOR            = "hx"
+#   $env.openai_api_key    = "sk-proj...8EEF"
+#   $env.openai_api_url    = "https://localhost:5000/v1/chat/completions"
+#   $env.openai_api_model  = "catgpt-nano"
+#   $env.openai_api_sysrole = "You are a cat assistant. Be playful and punny."
+#
+# Override for a single command using with-env:
+#
+#   with-env { openai_api_sysrole: "Be brief." } { jot chat explain recursion }
+#   with-env { CATJOT_FILE: "/tmp/scratch.jot", openai_api_model: "gpt-4o" } { jot llm }
 
 
 def supports_color():
