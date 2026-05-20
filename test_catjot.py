@@ -13,6 +13,7 @@ from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
 from catjot import Note, NoteContext, SearchType
+from conftest import jot_teardown
 
 TMP_CATNOTE = "tests/.catjot"
 FIXED_CATNOTE = "tests/example.jot"
@@ -30,23 +31,7 @@ class TestTaker(unittest.TestCase):
         pass
 
     def tearDown(self):
-        try:
-            remove(TMP_CATNOTE)
-        except FileNotFoundError:
-            pass
-
-        try:
-            remove(f"{TMP_CATNOTE}.new")
-        except FileNotFoundError:
-            pass
-
-        import shutil, os
-
-        (
-            shutil.move(f"{FIXED_CATNOTE}.old", FIXED_CATNOTE)
-            if os.path.exists(f"{FIXED_CATNOTE}.old")
-            else None
-        )
+        jot_teardown(TMP_CATNOTE, FIXED_CATNOTE)
 
     def test_init_note(self):
         data = {
@@ -1117,7 +1102,6 @@ class TestTaker(unittest.TestCase):
 
         # Assert that the repr of the note matches the expected string
         self.assertEqual(repr(note), expected_repr)
-
 
     def test_match_all_in_or_mode(self):
         # SearchType.ALL must work in OR mode, mirroring AND mode behavior

@@ -246,24 +246,933 @@ Tag:system_role
 Context:Waitstaff, resident mechanics, and other servants, like butlers and drivers are all women.
 Message:All of them are women, every single one of them.
 
-
 ^-^
-Directory:/system/rules/gameplay
-Date:1726009125
-Tag:system_role
-Context:Phrases to avoid in storytelling
-Message:"dripping with" -- nothing is ever dripping with anything, whether sarcasm or elsewise
-"next level" -- nobody ever wants to "take something to the next level"
-"bore into his very soul" -- no they dont
-"feeling a bit uneasy under her gaze" or "a sense of unease" -- overused
+Directory:/story/events/library
+Date:1779243245
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
 
 
 ^-^
-Directory:/system/rules/roleplaying
-Date:1726009504
-Tag:system_role
-Context:Storytelling guidelines
-Message:- Allow the user role to guide most of the actions; do not imply them unless it is clear from context what the intent was. For example, if the user asks somebody to wait a moment, allow the user to choose the dialog to address the subject with.
+Directory:/story/events/cellar
+Date:1779243245
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
 
+
+^-^
+Directory:/story/events/great-hall
+Date:1779243245
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243245
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779243245
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779243245
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779243245
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779243245
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779243245
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/tool-notes/test-chamber
+Date:1779243245
+Tag:tool:get_people_present
+Context:tool call log at loc:test-chamber
+Message:tool_call: get_people_present
+args: {}
+result: {"people": ["player"], "followup_instruction": "SENTINEL_FOLLOWUP"}
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779243245
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779243245
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243245
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/library
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
+
+
+^-^
+Directory:/story/events/great-hall
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779243247
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779243247
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779243247
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779243247
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779243247
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/tool-notes/test-chamber
+Date:1779243247
+Tag:tool:get_people_present
+Context:tool call log at loc:test-chamber
+Message:tool_call: get_people_present
+args: {}
+result: {"people": ["player"], "followup_instruction": "SENTINEL_FOLLOWUP"}
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779243247
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243247
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/library
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
+
+
+^-^
+Directory:/story/events/great-hall
+Date:1779243247
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779243248
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779243248
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779243248
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779243248
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779243248
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/events/library
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
+
+
+^-^
+Directory:/story/events/great-hall
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779243248
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779243248
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779243248
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779243248
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779243248
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/tool-notes/test-chamber
+Date:1779243248
+Tag:tool:get_people_present
+Context:tool call log at loc:test-chamber
+Message:tool_call: get_people_present
+args: {}
+result: {"people": ["player"], "followup_instruction": "SENTINEL_FOLLOWUP"}
+
+
+^-^
+Directory:/story/tool-notes/test-chamber
+Date:1779243248
+Tag:tool:get_people_present
+Context:tool call log at loc:test-chamber
+Message:tool_call: get_people_present
+args: {}
+result: {"people": ["player"], "followup_instruction": "SENTINEL_FOLLOWUP"}
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779243248
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779243248
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779243248
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243248
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/library
+Date:1779243250
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779243250
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
+
+
+^-^
+Directory:/story/events/great-hall
+Date:1779243250
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243250
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779243250
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779243250
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779243250
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779243250
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779243250
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/tool-notes/test-chamber
+Date:1779243251
+Tag:tool:get_people_present
+Context:tool call log at loc:test-chamber
+Message:tool_call: get_people_present
+args: {}
+result: {"people": ["player"], "followup_instruction": "SENTINEL_FOLLOWUP"}
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779243251
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779243251
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243251
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779243339
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779243339
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779246718
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779246718
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779251155
+Tag:test
+Context:canonical event at test-chamber
+Message:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779251155
+Tag:bob loc:test-chamber torch
+Context:canonical event at test-chamber
+Message:Bob lit the torch.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779251155
+Tag:alice loc:cellar door
+Context:canonical event at test-chamber
+Message:Alice opened the cellar door.
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779251155
+Tag:door loc:cellar
+Context:canonical event at cellar
+Message:The door slammed shut.
+
+
+^-^
+Directory:/story/events/library
+Date:1779251155
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to library via: test-chamber → library
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779251155
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to cellar via: test-chamber → cellar
+
+
+^-^
+Directory:/story/events/great-hall
+Date:1779251155
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to great-hall via: test-chamber → great-hall
+
+
+^-^
+Directory:/story/events/dungeon
+Date:1779251155
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from test-chamber to dungeon via: test-chamber → dungeon
+
+
+^-^
+Directory:/story/character/elara
+Date:1779251156
+Tag:char:elara
+Context:character profile: elara
+Message:A sharp-eyed elven ranger.
+
+
+^-^
+Directory:/story/character/theron
+Date:1779251156
+Tag:char:theron npc wizard
+Context:character profile: theron
+Message:An old wizard.
+
+
+^-^
+Directory:/story/location/crypt
+Date:1779251156
+Tag:loc:crypt
+Context:location profile: crypt
+Message:A damp stone crypt lit by cold blue flames.
+
+
+^-^
+Directory:/story/location/cellar
+Date:1779251156
+Tag:obj:iron-key
+Context:object: iron-key at cellar
+Message:A heavy iron key with a raven's-head bow.
+
+
+^-^
+Directory:/story/location/great-hall
+Date:1779251156
+Tag:obj:torch
+Context:object: torch at great-hall
+Message:A burning wall torch.
+
+
+^-^
+Directory:/story/events/dungeon/keep
+Date:1779251156
+Tag:nav
+Context:navigation event (direct)
+Message:Traveled from manor/foyer to dungeon/keep via: manor/foyer → dungeon/keep
+
+
+^-^
+Directory:/story/events/manor/bedroom
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/bedroom via: manor/foyer → manor → manor/bedroom
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/cellar
+Date:1779251156
+Tag:nav
+Context:navigation event (inferred)
+Message:Traveled from manor/foyer/corridor to manor/cellar via: manor/foyer/corridor → manor/foyer → manor → manor/cellar
+
+
+^-^
+Directory:/story/events/manor/foyer/closet
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer to manor/foyer/closet via: manor/foyer → manor/foyer/closet
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
+
+
+^-^
+Directory:/story/events/manor/foyer/drawing_room
+Date:1779251156
+Tag:nav
+Context:navigation event (hierarchical)
+Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
 
 
