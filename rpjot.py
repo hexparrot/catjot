@@ -163,7 +163,7 @@ CONTEXT_HARD_LIMIT_TOKS = (
 # ---------------------------------------------------------------------------
 # Set this to your model's actual context window.  _guard_payload() uses it
 # to protect every call_llm invocation from overflow.
-MODEL_CONTEXT_LIMIT_TOKS = 64_000
+MODEL_CONTEXT_LIMIT_TOKS = 30_000
 _RESPONSE_RESERVE_TOKS = 2_000  # headroom reserved for the model's reply
 NARRATIVE_TEMPERATURE = (
     0.75  # temperature for final prose; higher than tool-dispatch calls
