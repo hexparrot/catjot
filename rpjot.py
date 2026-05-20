@@ -158,6 +158,26 @@ CONTEXT_HARD_LIMIT_TOKS = (
 # to protect every call_llm invocation from overflow.
 MODEL_CONTEXT_LIMIT_TOKS = 64_000
 _RESPONSE_RESERVE_TOKS = 2_000  # headroom reserved for the model's reply
+NARRATIVE_TEMPERATURE = (
+    0.75  # temperature for final prose; higher than tool-dispatch calls
+)
+
+# Tools whose results contain newly written canonical material worth surfacing to the narrative.
+# Query tools (get_character, search_world, prepare_context, etc.) are excluded because
+# they return existing lore already visible in the context window.
+_WRITE_TOOLS = frozenset(
+    {
+        "record_event",
+        "navigate_to",
+        "set_people_present",
+        "save_character",
+        "save_location",
+        "save_object",
+        "begin_scene",
+        "record_knowledge",
+        "record_conscience",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Tool decorator
@@ -1932,6 +1952,81 @@ class RPJotEngine:
             logger.debug("tool-call note written: %s -> %s", fn_name, tool_id)
 
     # ------------------------------------------------------------------
+    # Narrative synthesis helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _summarize_write_result(fn_name: str, result_str: str) -> str:
+        """Return a short human-readable summary of a write-tool result.
+
+        Used to build the canonical-facts section of the narrative synthesis
+        injection.  The followup_instruction key is silently ignored since it
+        is directives, not content.
+        """
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return f"{fn_name}: {result_str[:150]}"
+
+        if fn_name == "navigate_to":
+            frm = parsed.get("from", "?")
+            to = parsed.get("to", "?")
+            via = " → ".join(parsed.get("traversal", [frm, to]))
+            return f"Traveled: {via}"
+        if fn_name == "begin_scene":
+            return f"Scene started: {parsed.get('scene', '?')}"
+        if fn_name == "record_knowledge":
+            witnesses = ", ".join(parsed.get("witnesses", []))
+            preview = parsed.get("content_preview", "")
+            return f"Private knowledge ({witnesses}): {preview}"
+        if fn_name == "record_conscience":
+            char = parsed.get("character", "?")
+            trait = parsed.get("trait", "?")
+            return f"Conscience ({char}): {trait}"
+        # All other cases: the result was not JSON-parsable into something useful;
+        # fall back to the raw result string (e.g. "Event recorded: …")
+        return f"{fn_name}: {str(parsed)[:150]}"
+
+    def _build_narrative_synthesis(
+        self,
+        accumulated_think: list[str],
+        canonical_results: list[tuple[str, str]],
+    ) -> str:
+        """Build a pre-narrative injection from think blocks and canonical write results.
+
+        Returns an empty string when there is nothing meaningful to inject.
+        The caller appends this as a role=user message before the final
+        narrative call, giving the LLM explicit access to:
+
+          - The story advances it reasoned about (think blocks from tool turns)
+          - The canonical facts it just established via write tools
+
+        Both sources are framed as directives, not summaries, so the LLM
+        incorporates them into the prose rather than restating them.
+        """
+        parts: list[str] = []
+
+        if accumulated_think:
+            combined = "\n---\n".join(accumulated_think)
+            parts.append(
+                "NARRATOR PLANNING NOTES — story advances you reasoned about this turn.\n"
+                "These belong in the narrative. Weave them into the prose naturally; "
+                "do not list or announce them separately:\n\n" + combined
+            )
+
+        if canonical_results:
+            lines = [
+                f"  • {self._summarize_write_result(fn, res)}"
+                for fn, res in canonical_results
+            ]
+            parts.append(
+                "CANONICAL FACTS ESTABLISHED THIS TURN — these just happened "
+                "and must be present in the narrative:\n" + "\n".join(lines)
+            )
+
+        return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
     # LLM tool loop
     # ------------------------------------------------------------------
 
@@ -2032,6 +2127,23 @@ class RPJotEngine:
         Loop until the LLM returns a narrative (no tool calls) or
         max_iterations is reached.
 
+        Before the final narrative call the loop injects a synthesis message
+        that consolidates two sources of material the vanilla response would
+        otherwise under-use:
+
+          1. Think blocks from tool-calling turns — the narrator's unspoken
+             planning notes, which often contain story advances that never
+             make it to the prose.
+          2. Results from write-type tools (record_event, navigate_to, etc.)
+             — canonical facts just established this turn that must appear in
+             the narrative.
+
+        The narrative call itself uses NARRATIVE_TEMPERATURE (not the lower
+        temperature used for tool dispatch), adding entropy that counteracts
+        the repetition caused by stationary lore in the context window.
+        When no tools were called at all (iter 0), the original response is
+        returned unchanged to avoid a redundant LLM call.
+
         Args:
             messages:       list of message dicts (mutated in place).
             max_iterations: safety cap on tool-call rounds.
@@ -2044,6 +2156,9 @@ class RPJotEngine:
             max_iterations,
             len(messages),
         )
+
+        accumulated_think: list[str] = []
+        canonical_results: list[tuple[str, str]] = []
 
         for i in range(max_iterations):
             messages = self._guard_payload(messages)
@@ -2060,16 +2175,43 @@ class RPJotEngine:
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                logger.debug("no tool calls -- returning narrative")
+                # ── Narrative synthesis injection ──────────────────────────
+                # If tools ran at least once, re-call the LLM without tools so
+                # it generates clean prose (not interrupted by tool dispatch),
+                # optionally prefaced by a synthesis of think+canonical material.
+                if i > 0:
+                    synthesis = self._build_narrative_synthesis(
+                        accumulated_think, canonical_results
+                    )
+                    if synthesis:
+                        logger.debug(
+                            "[SYNTH] injecting synthesis: %d think block(s), "
+                            "%d canonical result(s)",
+                            len(accumulated_think),
+                            len(canonical_results),
+                        )
+                        messages.append({"role": "user", "content": synthesis})
+                        messages = self._guard_payload(messages)
+                    response_msg = call_llm(messages, temperature=NARRATIVE_TEMPERATURE)
+
                 content = response_msg.get("content", "")
-                history_toks = sum(_tok(str(m.get("content") or "")) for m in messages)
+                history_toks = self._last_payload_toks
                 logger.info(
-                    "[CTX] run_tool_loop EXIT: narrative=%d tok | history=%d tok across %d messages",
+                    "[CTX] run_tool_loop EXIT: narrative=%d tok | history=%d tok "
+                    "across %d messages | think_blocks=%d canonical_writes=%d",
                     _tok(content),
                     history_toks,
                     len(messages),
+                    len(accumulated_think),
+                    len(canonical_results),
                 )
                 return response_msg
+
+            # ── Extract think from this tool-calling response ──────────────
+            think, _ = self.strip_think_tags(response_msg.get("content", "") or "")
+            if think.strip():
+                accumulated_think.append(think.strip())
+                logger.debug("[SYNTH] captured think block (%d tok)", _tok(think))
 
             messages.append(response_msg)
 
@@ -2080,6 +2222,11 @@ class RPJotEngine:
 
                 logger.info("TOOL CALL [iter %d]: %s(%s)", i + 1, fn_name, fn_args)
                 result = self._dispatch(fn_name, fn_args)
+
+                # Track canonical write results for synthesis injection
+                if fn_name in _WRITE_TOOLS:
+                    canonical_results.append((fn_name, result))
+                    logger.debug("[SYNTH] captured canonical result from %s", fn_name)
 
                 if DEBUG_AUDIT_NOTES:
                     self.create_notes_from_tool_calls(
