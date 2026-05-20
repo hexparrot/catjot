@@ -2,7 +2,6 @@
 """play.py -- Main game loop for the text-based RP engine."""
 
 import argparse
-import json
 import logging
 import os
 import shutil
@@ -25,7 +24,7 @@ from catjot import Note, ContextBundle
 # ---------------------------------------------------------------------------
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BELLVUE_JOT = os.path.join(_HERE, "tests", "bellvue_canonical.jot")
+_SEED_JOT = os.path.join(_HERE, "tests", "bellvue_canonical.jot")
 _SESSIONS_DIR = os.path.join(_HERE, "sessions")
 
 # ---------------------------------------------------------------------------
@@ -33,6 +32,70 @@ _SESSIONS_DIR = os.path.join(_HERE, "sessions")
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger("play")
+
+# ---------------------------------------------------------------------------
+# Known slash commands (for unknown-command guard)
+# ---------------------------------------------------------------------------
+
+_SLASH_EXACT = frozenset(["/quit", "/people", "/location", "/stats", "/mood", "/attn"])
+_SLASH_PREFIX = ("/objects", "/yomi")
+
+# ---------------------------------------------------------------------------
+# Input classification
+# ---------------------------------------------------------------------------
+
+_SIGILS = ('"', "*", "@", "^")
+
+_HELP_TEXT = (
+    "Input sigils:\n"
+    '  "text   — MC speaks aloud (default if no sigil)\n'
+    "  *text   — MC performs an action\n"
+    "  @name   — shift MC focus to person/object; tail is intent toward it\n"
+    "  ^text   — MC inner monologue (can seed backstory)\n"
+    "Commands: /quit, /people, /location, /objects [name], "
+    "/stats, /mood, /attn, /yomi <name>"
+)
+
+
+def classify_input(raw: str) -> str:
+    """Translate player sigils into explicit LLM directives."""
+    if raw.startswith('"'):
+        return f"[MC speaks aloud]: {raw}"
+
+    if raw.startswith("*"):
+        content = raw[1:].strip()
+        return f"[MC action]: {content}"
+
+    if raw.startswith("@"):
+        rest = raw[1:]
+        tokens = rest.split(maxsplit=1)
+        target = tokens[0]
+        tail = tokens[1].strip() if len(tokens) > 1 else ""
+        lines = [
+            f'[MC attention → "{target}"]: '
+            f"Shift MC's focus to '{target}'. "
+            f"If '{target}' is not yet in the scene but could plausibly exist here, "
+            f"introduce it as a discovered world detail. "
+            f"If it cannot plausibly exist here, do not force it — "
+            f"narrate the absence or redirect naturally."
+        ]
+        if tail:
+            lines.append(f'[MC intent regarding "{target}"]: {tail}')
+        return "\n".join(lines)
+
+    if raw.startswith("^"):
+        content = raw[1:].strip()
+        return (
+            f"[MC inner monologue — private, unspoken]: {content}\n"
+            "Narrate this as interior experience only, never as spoken dialogue. "
+            "If it reveals a meaningful feeling, preference, aversion, memory, or "
+            "developing emotional arc, use record_conscience or record_secret to "
+            "preserve it as MC backstory."
+        )
+
+    # Default: treat as spoken dialogue; note inference is acceptable
+    return f"[MC — likely spoken aloud, interpret as dialogue unless clearly an action]: {raw}"
+
 
 # ---------------------------------------------------------------------------
 # Context query helpers (placeholders -- wire to real ContextBundle logic)
@@ -95,7 +158,7 @@ def build_initial_messages():
 
       system_role  — RP/gameplay rules, story arcs, hardcoded world facts,
                      and narrator-only twist secrets
-      story_premise — who Bartholomew is and why he is at Ravenswood
+      story_premise — who mc is and why theyre where they are
       twist        — additional narrator secrets (belt-and-suspenders query
                      in case a twist note loses the system_role tag)
       backstory    — every named character's public profile (8 notes), giving
@@ -117,10 +180,8 @@ def game_loop(engine):
     """Main eternal game loop."""
     messages = build_initial_messages()
 
-    print(
-        "Welcome. Type your action. "
-        "Commands: /quit, /people, /location, /objects, /stats, /mood, /attn, /yomi <name>"
-    )
+    print("Welcome.\n")
+    print(_HELP_TEXT)
     print("-" * 60)
 
     while True:
@@ -185,8 +246,18 @@ def game_loop(engine):
                 print("Usage: /yomi <character_name>")
             continue
 
+        # --- Unknown slash command guard ---
+        if user_input.startswith("/"):
+            cmd = user_input.lower().split()[0]
+            if cmd not in _SLASH_EXACT and not any(
+                cmd.startswith(p) for p in _SLASH_PREFIX
+            ):
+                print(f"Unknown command: {cmd}")
+                print(_HELP_TEXT)
+                continue
+
         # --- Normal player input -> LLM ---
-        messages.append(engine.build_user_message(user_input))
+        messages.append(engine.build_user_message(classify_input(user_input)))
 
         response = engine.run_tool_loop(messages)
 
@@ -213,11 +284,11 @@ def game_loop(engine):
 
 
 def create_session() -> str:
-    """Copy bellvue.jot into a fresh timestamped session file and return its path."""
+    """Copy seed.jot into a fresh timestamped session file and return its path."""
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(_SESSIONS_DIR, f"session_{stamp}.jot")
-    shutil.copy2(_BELLVUE_JOT, path)
+    shutil.copy2(_SEED_JOT, path)
     return path
 
 
@@ -234,7 +305,7 @@ def set_session_file(path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Bellvue RP — omit SESSION to start a new game."
+        description="RP — omit SESSION to start a new game."
     )
     parser.add_argument(
         "session",
