@@ -296,6 +296,7 @@ class RPJotEngine:
         self._tool_schemas: list = []
         self._tool_handlers: dict = {}
         self._last_payload_toks: int = 0  # updated by _guard_payload each iteration
+        self._system_refresh_pending: bool = False
         self.main_character = main_character
         self.session = SessionState(
             location=location,
@@ -1821,6 +1822,7 @@ class RPJotEngine:
 
         self.session.current_scene = name
         self._cache_drop("social_map")
+        self._system_refresh_pending = True
 
         note = Note.jot(
             message=description,

@@ -2016,3 +2016,99 @@ Context:navigation event (hierarchical)
 Message:Traveled from manor/foyer/kitchen to manor/foyer/drawing_room via: manor/foyer/kitchen → manor/foyer → manor/foyer/drawing_room
 
 
+^-^
+Directory:/story/events/test-chamber
+Date:1779296953
+Tag:test
+Context:canonical event at test-chamber
+Message:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296953
+Tag:bob loc:test-chamber torch
+Context:canonical event at test-chamber
+Message:Bob lit the torch.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296953
+Tag:alice loc:cellar door
+Context:canonical event at test-chamber
+Message:Alice opened the cellar door.
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779296953
+Tag:door loc:cellar
+Context:canonical event at cellar
+Message:The door slammed shut.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296958
+Tag:test
+Context:canonical event at test-chamber
+Message:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296958
+Tag:bob loc:test-chamber torch
+Context:canonical event at test-chamber
+Message:Bob lit the torch.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296958
+Tag:alice loc:cellar door
+Context:canonical event at test-chamber
+Message:Alice opened the cellar door.
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779296958
+Tag:door loc:cellar
+Context:canonical event at cellar
+Message:The door slammed shut.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296962
+Tag:test
+Context:canonical event at test-chamber
+Message:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296962
+Tag:bob loc:test-chamber torch
+Context:canonical event at test-chamber
+Message:Bob lit the torch.
+
+
+^-^
+Directory:/story/events/test-chamber
+Date:1779296962
+Tag:alice loc:cellar door
+Context:canonical event at test-chamber
+Message:Alice opened the cellar door.
+
+
+^-^
+Directory:/story/events/cellar
+Date:1779296962
+Tag:door loc:cellar
+Context:canonical event at cellar
+Message:The door slammed shut.
+
+

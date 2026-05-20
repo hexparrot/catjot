@@ -18,7 +18,7 @@ from rpjot import (
     PWD_REL,
     PWD_INTERIOR,
 )
-from catjot import Note, ContextBundle
+from catjot import Note, ContextBundle, call_llm
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -40,6 +40,16 @@ logger = logging.getLogger("play")
 
 _SLASH_EXACT = frozenset(["/quit", "/people", "/location", "/stats", "/mood", "/attn"])
 _SLASH_PREFIX = ("/objects", "/yomi")
+
+_SYSTEM_REFRESH_TEMPERATURE = 0.9
+
+_PARAPHRASE_INSTRUCTION = (
+    "You are a narrator-briefing editor. "
+    "Restate the following in fresh phrasing. "
+    "Preserve every proper noun, character name, game rule, secret, "
+    "relationship, and factual detail exactly — do not add or omit anything. "
+    "Vary only sentence structure and word choice."
+)
 
 # ---------------------------------------------------------------------------
 # Input classification
@@ -199,6 +209,48 @@ def build_initial_messages():
     return [{"role": "system", "content": "\n\n".join(parts)}]
 
 
+def refresh_system_message(engine, messages):
+    """Replace messages[0] with a high-temperature paraphrase of the original
+    system content.  Called after begin_scene so the model never sees the same
+    preamble token-sequence twice, breaking repetition patterns without losing
+    any factual content.
+
+    No-ops (logs a warning) if the LLM call fails so the game continues.
+    """
+    parts = []
+    for tag in ("system_role", "story_premise", "twist", "backstory"):
+        text = str(ContextBundle(tag)).strip()
+        if text:
+            parts.append(text)
+
+    if not parts:
+        logger.warning("[REFRESH] no system content found; skipping refresh")
+        engine._system_refresh_pending = False
+        return
+
+    original = "\n\n".join(parts)
+    prompt_messages = [
+        {"role": "system", "content": _PARAPHRASE_INSTRUCTION},
+        {"role": "user", "content": original},
+    ]
+
+    try:
+        response = call_llm(prompt_messages, temperature=_SYSTEM_REFRESH_TEMPERATURE)
+        refreshed = response.get("content", "").strip()
+        if not refreshed:
+            raise ValueError("empty paraphrase response")
+    except Exception as exc:
+        logger.warning(
+            "[REFRESH] paraphrase call failed (%s); keeping old system message", exc
+        )
+        engine._system_refresh_pending = False
+        return
+
+    messages[0] = {"role": "system", "content": refreshed}
+    engine._system_refresh_pending = False
+    logger.info("[REFRESH] system message refreshed (%d tok)", len(refreshed.split()))
+
+
 def game_loop(engine):
     """Main eternal game loop."""
     messages = build_initial_messages()
@@ -313,6 +365,9 @@ def game_loop(engine):
 
         # Append the final assistant message to history
         messages.append({"role": "assistant", "content": narrative})
+
+        if engine._system_refresh_pending:
+            refresh_system_message(engine, messages)
 
 
 # ---------------------------------------------------------------------------
