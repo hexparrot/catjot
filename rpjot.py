@@ -336,16 +336,28 @@ class RPJotEngine:
     def strip_think_tags(text):
         """
         Separate <think>...</think> content from the rest of the LLM response.
+        Also strips <tool_call> blocks that the LLM emits as prose fallback.
+
+        Handles unclosed tags (truncated responses) for both tag types.
 
         Returns:
             (think_content, clean_content) -- both strings.
         """
         think_match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+        if not think_match:
+            think_match = re.search(r"<think>(.*)", text, flags=re.DOTALL)
         think_content = (
             think_match.group(1).strip().replace("\n", " ") if think_match else ""
         )
-        clean_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-        return think_content, clean_content
+        # Strip closed then unclosed think tags
+        clean_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        clean_content = re.sub(r"<think>.*", "", clean_content, flags=re.DOTALL)
+        # Strip closed then unclosed tool_call blocks
+        clean_content = re.sub(
+            r"<tool_call>.*?</tool_call>", "", clean_content, flags=re.DOTALL
+        )
+        clean_content = re.sub(r"<tool_call>.*", "", clean_content, flags=re.DOTALL)
+        return think_content, clean_content.strip()
 
     @classmethod
     def extract_think_contents(cls, messages: list) -> list[str]:
@@ -3233,6 +3245,34 @@ class RPJotEngine:
     # Tool registration
     # ------------------------------------------------------------------
 
+    # Tools listed here are skipped during registration.  Remove a name to re-enable it.
+    _DISABLED_TOOLS: frozenset = frozenset(
+        {
+            "record_bond",
+            "record_history",
+            "record_dynamic",
+            "record_power_dynamic",
+            "record_wound",
+            "record_promise",
+            "record_debt",
+            "record_lie",
+            "record_leverage",
+            "record_impression",
+            "record_secret",
+            "record_desire",
+            "record_longing",
+            "record_jealousy",
+            "record_mask",
+            "record_subtext",
+            "record_reputation",
+            "record_trigger",
+            "record_unspoken",
+            "record_mood",
+            "get_relationship_arc",
+            "get_social_map",
+        }
+    )
+
     def register_all_tools(self):
         """
         Discover and register all @rp_tool-decorated methods.
@@ -3246,6 +3286,9 @@ class RPJotEngine:
                 description, parameters = fn._rp_tool_meta
                 bound = getattr(self, attr_name)
                 tool_name = attr_name.removeprefix("_tool_")
+                if tool_name in self._DISABLED_TOOLS:
+                    logger.debug("skipping disabled tool: %s", tool_name)
+                    continue
                 self._register_tool(tool_name, description, parameters, bound)
 
         logger.info("registered %d tool(s)", len(self._tool_schemas))
@@ -3594,7 +3637,13 @@ class RPJotEngine:
                         accumulated_think, canonical_results
                     )
 
-                    injection_parts = []
+                    # Lead with the prose directive so the model does not
+                    # spend output tokens re-planning tool calls.
+                    injection_parts = [
+                        "PROSE PHASE — write the narrative response now. "
+                        "Do not plan or invoke any tools; this is the final "
+                        "prose generation step."
+                    ]
                     if attn_text:
                         injection_parts.append(attn_text)
                     if mood_text:
@@ -3605,17 +3654,16 @@ class RPJotEngine:
                         injection_parts.append(synthesis)
 
                     injection = "\n\n".join(injection_parts)
-                    if injection:
-                        logger.debug(
-                            "[ATTN/MOOD/YOMI/SYNTH] injection: attn=%s mood=%s yomi=%s think=%d canonical=%d",
-                            bool(attn_text),
-                            bool(mood_text),
-                            bool(yomi_text),
-                            len(accumulated_think),
-                            len(canonical_results),
-                        )
-                        messages.append({"role": "user", "content": injection})
-                        messages = self._guard_payload(messages)
+                    logger.debug(
+                        "[ATTN/MOOD/YOMI/SYNTH] injection: attn=%s mood=%s yomi=%s think=%d canonical=%d",
+                        bool(attn_text),
+                        bool(mood_text),
+                        bool(yomi_text),
+                        len(accumulated_think),
+                        len(canonical_results),
+                    )
+                    messages.append({"role": "user", "content": injection})
+                    messages = self._guard_payload(messages)
                     response_msg = call_llm(
                         messages,
                         tools=self._tool_schemas,

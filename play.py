@@ -264,6 +264,15 @@ def game_loop(engine):
         think, narrative = RPJotEngine.strip_think_tags(response.get("content", ""))
 
         display_think(think)
+
+        if not narrative:
+            logger.warning(
+                "[NARRATIVE] empty narrative after stripping — model produced no prose"
+            )
+            messages.append({"role": "assistant", "content": "(no response)"})
+            display_narrative("(The narrator fell silent.)")
+            continue
+
         display_narrative(narrative)
 
         note = Note.jot(
