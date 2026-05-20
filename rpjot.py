@@ -3616,7 +3616,12 @@ class RPJotEngine:
                         )
                         messages.append({"role": "user", "content": injection})
                         messages = self._guard_payload(messages)
-                    response_msg = call_llm(messages, temperature=NARRATIVE_TEMPERATURE)
+                    response_msg = call_llm(
+                        messages,
+                        tools=self._tool_schemas,
+                        tool_choice="none",
+                        temperature=NARRATIVE_TEMPERATURE,
+                    )
 
                 content = response_msg.get("content", "")
                 history_toks = self._last_payload_toks
