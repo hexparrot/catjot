@@ -9,7 +9,15 @@ import shutil
 from datetime import datetime
 
 import rpjot as _rpjot_module
-from rpjot import RPJotEngine, PWD_SUMMARIES, TAG_LOC, PWD_WORLD, PWD_YOMI
+from rpjot import (
+    RPJotEngine,
+    PWD_SUMMARIES,
+    TAG_LOC,
+    PWD_WORLD,
+    PWD_YOMI,
+    PWD_REL,
+    PWD_INTERIOR,
+)
 from catjot import Note, ContextBundle
 
 # ---------------------------------------------------------------------------
@@ -110,7 +118,8 @@ def game_loop(engine):
     messages = build_initial_messages()
 
     print(
-        "Welcome. Type your action. Commands: /quit, /people, /location, /objects, /stats, /attn, /yomi <name>"
+        "Welcome. Type your action. "
+        "Commands: /quit, /people, /location, /objects, /stats, /mood, /attn, /yomi <name>"
     )
     print("-" * 60)
 
@@ -145,6 +154,15 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            continue
+
+        if user_input.lower() == "/mood":
+            mood = engine.session.mood
+            if mood:
+                for char, state in sorted(mood.items()):
+                    print(f"  {char} → {state}")
+            else:
+                print("[no mood state set this turn]")
             continue
 
         if user_input.lower() == "/attn":

@@ -93,8 +93,12 @@ PWD_SCENES = "/story/scenes"
 PWD_CONSCIENCE = "/story/conscience"
 PWD_SUMMARIES = "/summaries"
 PWD_YOMI = "/yomi"
+PWD_REL = "/story/relationship"
+PWD_INTERIOR = "/story/interior"
 
 TAG_YOMI = "yomi:"  # yomi:alice
+TAG_REL = "rel:"  # rel:bond, rel:history, rel:wound …
+TAG_INT = "int:"  # int:secret, int:desire, int:mask …
 
 # ---------------------------------------------------------------------------
 # Debug flags
@@ -179,6 +183,12 @@ _WRITE_TOOLS = frozenset(
         "begin_scene",
         "record_knowledge",
         "record_conscience",
+        # interpersonal — high narrative salience when established mid-scene
+        "record_bond",
+        "record_history",
+        "record_wound",
+        "record_promise",
+        "record_impression",
     }
 )
 
@@ -216,7 +226,10 @@ class SessionState:
         self.current_scene: str = ""
         self.attention: dict[str, str] = (
             {}
-        )  # char → what/whom they are focused on (transient)
+        )  # char → gaze/focus (transient, not persisted)
+        self.mood: dict[str, str] = (
+            {}
+        )  # char → emotional state (transient, not persisted)
         logger.info(
             "SessionState created: loc=%s, present=%s",
             self.location,
@@ -238,14 +251,20 @@ class SessionState:
             ", ".join(sorted(self.people_present)) if self.people_present else "none"
         )
         scene_str = f" | scene: {self.current_scene}" if self.current_scene else ""
-        if self.attention:
-            attn_str = " ".join(f"{c}→{f}" for c, f in sorted(self.attention.items()))
-            attn_seg = f" | attn: {attn_str}"
-        else:
-            attn_seg = ""
+        attn_seg = (
+            " | attn: "
+            + " ".join(f"{c}→{f}" for c, f in sorted(self.attention.items()))
+            if self.attention
+            else ""
+        )
+        mood_seg = (
+            " | mood: " + " ".join(f"{c}:{m}" for c, m in sorted(self.mood.items()))
+            if self.mood
+            else ""
+        )
         h = (
             f"[CURRENT STATE | location: {TAG_LOC}{self.location}"
-            f" | present: {present_str}{scene_str}{attn_seg}]"
+            f" | present: {present_str}{scene_str}{attn_seg}{mood_seg}]"
         )
         logger.debug("SessionState.header: %s", h)
         return h
@@ -519,6 +538,7 @@ class RPJotEngine:
         terms.append(f"{PWD_CONSCIENCE}/{char_name}")
         terms.append(f"{TAG_KNOW}{char_name}")
         terms.append(f"{TAG_EXP}{char_name}")
+        terms.append(f"{PWD_INTERIOR}/{char_name}")
         if self.session.current_scene:
             terms.append(f"{TAG_SCENE}{self.session.current_scene}")
         logger.debug(
@@ -581,6 +601,24 @@ class RPJotEngine:
             "Let this shape physical staging, eyeline, and what each character "
             "can plausibly notice. Characters not looking at each other may miss "
             "reactions; shared gaze creates shared witness:\n\n" + "\n".join(lines)
+        )
+
+    def _gather_mood_for_scene(self) -> str:
+        """Format the current in-memory mood state for pre-narrative injection.
+
+        Returns an empty string when no moods have been set this turn.
+        Not persisted — cleared on cast and location changes.
+        """
+        if not self.session.mood:
+            return ""
+        lines = [
+            f"  {char} → {state}" for char, state in sorted(self.session.mood.items())
+        ]
+        logger.debug("[MOOD] _gather_mood_for_scene: %d entries", len(lines))
+        return (
+            "SCENE MOOD — current emotional states (transient, not persisted).\n"
+            "Let these color dialogue delivery, physical tells, and what each "
+            "character notices or ignores:\n\n" + "\n".join(lines)
         )
 
     def _gather_yomi_for_scene(self) -> str:
@@ -1206,10 +1244,11 @@ class RPJotEngine:
             if ctx_str:
                 intermediate_contexts.append({"location": stop, "context": ctx_str})
 
-        # Update session state; attention resets on location change
+        # Update session state; attention and mood reset on location change
         self.session.location = to_loc
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{to_loc}")
         self.session.attention = {}
+        self.session.mood = {}
 
         nav_tag = "nav"
         if self.session.current_scene:
@@ -1271,7 +1310,10 @@ class RPJotEngine:
         """Replace the scene's people list with the provided set."""
         logger.info("ENTER _tool_set_people_present: people=%r", people)
         self.session.people_present = set(people)
-        self.session.attention = {}  # cast changes; attention must be re-established
+        self.session.attention = (
+            {}
+        )  # cast change; attention and mood must be re-established
+        self.session.mood = {}
         logger.info("people_present updated: %s", self.session.people_present)
         present = ", ".join(sorted(self.session.people_present)) or "none"
         return f"Scene people updated: {present}"
@@ -2101,6 +2143,1022 @@ class RPJotEngine:
         )
 
     # ------------------------------------------------------------------
+    # Interpersonal tools — relationships, interior life, social query
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rel_key(char_a: str, char_b: str) -> str:
+        """Return a canonical alphabetically-sorted key for a character pair."""
+        return "-".join(sorted([char_a, char_b]))
+
+    # ── Relationship-pair record tools ────────────────────────────────
+
+    @rp_tool(
+        description=(
+            "Record the named relationship type between two characters — what they "
+            "are to each other and how that bond came to be. "
+            "Use this for durable relationships independent of the current scene: "
+            "old friends, estranged siblings, rivals, former lovers, mentor and student. "
+            "Call this when a relationship is established or revealed for the first time."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "char_a": {"type": "string", "description": "First character slug"},
+                "char_b": {"type": "string", "description": "Second character slug"},
+                "bond_type": {
+                    "type": "string",
+                    "description": "Short label (e.g. 'rivals', 'old-friends', 'former-lovers', 'mentor-student', 'estranged-siblings')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "How the bond formed, what defines it, and how it shapes both characters today",
+                },
+            },
+            "required": ["char_a", "char_b", "bond_type", "description"],
+        },
+    )
+    def _tool_record_bond(
+        self, char_a: str, char_b: str, bond_type: str, description: str
+    ) -> str:
+        logger.info("ENTER _tool_record_bond: %r ↔ %r [%s]", char_a, char_b, bond_type)
+        pair = self._rel_key(char_a, char_b)
+        note = Note.jot(
+            message=f"Bond type: {bond_type}\n\n{description}",
+            tag=f"{TAG_REL}bond {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            context=f"bond: {char_a} ↔ {char_b} ({bond_type})",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("bond recorded: %s ↔ %s [%s]", char_a, char_b, bond_type)
+        return json.dumps(
+            {
+                "char_a": char_a,
+                "char_b": char_b,
+                "bond_type": bond_type,
+                "status": "recorded",
+            }
+        )
+
+    @rp_tool(
+        description=(
+            "Record a specific shared past event between two characters that still "
+            "echoes in how they relate to each other — a betrayal, a rescue, a shared "
+            "loss, a night neither discusses. "
+            "History informs callbacks, half-sentences, and the weight of unsaid things. "
+            "Call once per significant backstory event when it is established or revealed."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "char_a": {"type": "string", "description": "First character slug"},
+                "char_b": {"type": "string", "description": "Second character slug"},
+                "event": {
+                    "type": "string",
+                    "description": "What happened — the concrete incident",
+                },
+                "significance": {
+                    "type": "string",
+                    "description": "How this event shaped both characters and what it still means to each of them",
+                },
+            },
+            "required": ["char_a", "char_b", "event", "significance"],
+        },
+    )
+    def _tool_record_history(
+        self, char_a: str, char_b: str, event: str, significance: str
+    ) -> str:
+        logger.info("ENTER _tool_record_history: %r ↔ %r", char_a, char_b)
+        pair = self._rel_key(char_a, char_b)
+        note = Note.jot(
+            message=f"{event}\n\nSignificance: {significance}",
+            tag=f"{TAG_REL}history {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            context=f"shared history: {char_a} ↔ {char_b}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("history recorded: %s ↔ %s", char_a, char_b)
+        return json.dumps({"char_a": char_a, "char_b": char_b, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record the recurring push-pull behavioral pattern between two characters — "
+            "the habitual way their interaction unfolds regardless of content: who leads, "
+            "who defers, who deflects with humor, who always needs the last word. "
+            "This is not WHAT they do but HOW they do it, replayed across encounters. "
+            "Use this when a pattern becomes clear after multiple interactions."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "char_a": {"type": "string", "description": "First character slug"},
+                "char_b": {"type": "string", "description": "Second character slug"},
+                "pattern": {
+                    "type": "string",
+                    "description": "Short kebab-case label (e.g. 'aurora-leads-mc-defers', 'mutual-deflection', 'competitive-performance')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "How the pattern manifests in dialogue and behavior — specific tells, recurring moves",
+                },
+            },
+            "required": ["char_a", "char_b", "pattern", "description"],
+        },
+    )
+    def _tool_record_dynamic(
+        self, char_a: str, char_b: str, pattern: str, description: str
+    ) -> str:
+        logger.info("ENTER _tool_record_dynamic: %r ↔ %r [%s]", char_a, char_b, pattern)
+        pair = self._rel_key(char_a, char_b)
+        note = Note.jot(
+            message=f"Pattern: {pattern}\n\n{description}",
+            tag=f"{TAG_REL}dynamic {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            context=f"dynamic: {char_a} ↔ {char_b} ({pattern})",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("dynamic recorded: %s ↔ %s [%s]", char_a, char_b, pattern)
+        return json.dumps(
+            {
+                "char_a": char_a,
+                "char_b": char_b,
+                "pattern": pattern,
+                "status": "recorded",
+            }
+        )
+
+    @rp_tool(
+        description=(
+            "Record who holds situational or social power over another character and why — "
+            "the asymmetry that makes one character careful around the other. "
+            "Power can come from status, a secret held, leverage, charm, institutional "
+            "authority, or financial dependency. "
+            "Use this when the power differential becomes narratively active."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "holder": {
+                    "type": "string",
+                    "description": "Character who holds power",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Character subject to that power",
+                },
+                "basis": {
+                    "type": "string",
+                    "description": "What the power is based on (e.g. 'status', 'blackmail', 'financial-dependency', 'emotional-hold', 'institutional-authority')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "How this manifests — what the subject does differently when the holder is present",
+                },
+            },
+            "required": ["holder", "subject", "basis", "description"],
+        },
+    )
+    def _tool_record_power_dynamic(
+        self, holder: str, subject: str, basis: str, description: str
+    ) -> str:
+        logger.info(
+            "ENTER _tool_record_power_dynamic: %r over %r [%s]", holder, subject, basis
+        )
+        pair = self._rel_key(holder, subject)
+        note = Note.jot(
+            message=f"Holder: {holder} | Subject: {subject} | Basis: {basis}\n\n{description}",
+            tag=f"{TAG_REL}power {TAG_CHAR}{holder} {TAG_CHAR}{subject}",
+            context=f"power dynamic: {holder} over {subject} ({basis})",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("power dynamic recorded: %s over %s [%s]", holder, subject, basis)
+        return json.dumps(
+            {"holder": holder, "subject": subject, "basis": basis, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Record an emotional injury one character inflicted on another — "
+            "deliberately or inadvertently — that still shapes how the wounded "
+            "character responds. "
+            "Wounds explain inexplicable coldness, overreaction, or the flinch at "
+            "a particular word. Unlike conscience (a self-contained trait), wounds "
+            "are relational: they came from a specific source. "
+            "Use known_to_inflicter to capture whether the wound-giver is aware."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "inflicter": {"type": "string", "description": "Who caused the wound"},
+                "wounded": {"type": "string", "description": "Who carries it"},
+                "description": {
+                    "type": "string",
+                    "description": "The act, its impact, and how the wound manifests now",
+                },
+                "known_to_inflicter": {
+                    "type": "boolean",
+                    "description": "Whether the inflicter knows they caused this (default false)",
+                },
+            },
+            "required": ["inflicter", "wounded", "description"],
+        },
+    )
+    def _tool_record_wound(
+        self,
+        inflicter: str,
+        wounded: str,
+        description: str,
+        known_to_inflicter: bool = False,
+    ) -> str:
+        logger.info("ENTER _tool_record_wound: %r → %r", inflicter, wounded)
+        pair = self._rel_key(inflicter, wounded)
+        awareness = "known to inflicter" if known_to_inflicter else "inflicter unaware"
+        note = Note.jot(
+            message=f"Inflicter: {inflicter} | Wounded: {wounded} | {awareness}\n\n{description}",
+            tag=f"{TAG_REL}wound {TAG_CHAR}{inflicter} {TAG_CHAR}{wounded}",
+            context=f"wound: {inflicter} → {wounded}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info(
+            "wound recorded: %s → %s (known=%s)", inflicter, wounded, known_to_inflicter
+        )
+        return json.dumps(
+            {
+                "inflicter": inflicter,
+                "wounded": wounded,
+                "known_to_inflicter": known_to_inflicter,
+                "status": "recorded",
+            }
+        )
+
+    @rp_tool(
+        description=(
+            "Record a commitment one character made to another — explicit or implied — "
+            "that now exists as a narrative obligation. "
+            "Promises create forward tension: they can be kept, broken, or weaponized. "
+            "Use stakes to describe what is at risk if the promise is not honored. "
+            "Call this when a character commits to something in a way that will matter."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "promiser": {
+                    "type": "string",
+                    "description": "Who made the commitment",
+                },
+                "recipient": {"type": "string", "description": "To whom it was made"},
+                "commitment": {
+                    "type": "string",
+                    "description": "The precise obligation — what was promised",
+                },
+                "stakes": {
+                    "type": "string",
+                    "description": "What is at risk if the promise is broken (optional)",
+                },
+            },
+            "required": ["promiser", "recipient", "commitment"],
+        },
+    )
+    def _tool_record_promise(
+        self, promiser: str, recipient: str, commitment: str, stakes: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_promise: %r → %r", promiser, recipient)
+        pair = self._rel_key(promiser, recipient)
+        body = (
+            f"Promiser: {promiser} | Recipient: {recipient}\n\nCommitment: {commitment}"
+        )
+        if stakes:
+            body += f"\n\nStakes: {stakes}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_REL}promise {TAG_CHAR}{promiser} {TAG_CHAR}{recipient}",
+            context=f"promise: {promiser} → {recipient}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("promise recorded: %s → %s", promiser, recipient)
+        return json.dumps(
+            {"promiser": promiser, "recipient": recipient, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Record that one character owes another something — a favor, a secret "
+            "kept, a life saved, a financial obligation. "
+            "Debts create behavioral asymmetry: the debtor is more careful, more "
+            "accommodating, more alert to the creditor's moods. "
+            "The creditor may choose not to collect yet, which is its own kind of power."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "debtor": {"type": "string", "description": "Who owes"},
+                "creditor": {"type": "string", "description": "Who is owed"},
+                "what_is_owed": {
+                    "type": "string",
+                    "description": "The nature of the debt — what must be repaid or returned",
+                },
+                "origin": {
+                    "type": "string",
+                    "description": "How the debt arose — the event or circumstance that created it",
+                },
+            },
+            "required": ["debtor", "creditor", "what_is_owed", "origin"],
+        },
+    )
+    def _tool_record_debt(
+        self, debtor: str, creditor: str, what_is_owed: str, origin: str
+    ) -> str:
+        logger.info("ENTER _tool_record_debt: %r owes %r", debtor, creditor)
+        pair = self._rel_key(debtor, creditor)
+        note = Note.jot(
+            message=f"Debtor: {debtor} | Creditor: {creditor}\n\nOwed: {what_is_owed}\n\nOrigin: {origin}",
+            tag=f"{TAG_REL}debt {TAG_CHAR}{debtor} {TAG_CHAR}{creditor}",
+            context=f"debt: {debtor} owes {creditor}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("debt recorded: %s owes %s", debtor, creditor)
+        return json.dumps(
+            {"debtor": debtor, "creditor": creditor, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Record a specific false statement one character made to another, "
+            "alongside the actual truth the narrator holds. "
+            "Lies create fault lines: the liar must maintain them, and the deceived "
+            "character operates on false premises. When the topic surfaces again, the "
+            "liar must choose to double down, deflect, or confess."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "liar": {"type": "string", "description": "Who told the lie"},
+                "target": {"type": "string", "description": "Who was lied to"},
+                "statement": {
+                    "type": "string",
+                    "description": "What was said — the false statement as delivered",
+                },
+                "truth": {
+                    "type": "string",
+                    "description": "The actual truth being concealed",
+                },
+            },
+            "required": ["liar", "target", "statement", "truth"],
+        },
+    )
+    def _tool_record_lie(
+        self, liar: str, target: str, statement: str, truth: str
+    ) -> str:
+        logger.info("ENTER _tool_record_lie: %r → %r", liar, target)
+        pair = self._rel_key(liar, target)
+        note = Note.jot(
+            message=f"Liar: {liar} | Target: {target}\n\nStatement: {statement}\n\nTruth: {truth}",
+            tag=f"{TAG_REL}lie {TAG_CHAR}{liar} {TAG_CHAR}{target}",
+            context=f"lie: {liar} → {target}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("lie recorded: %s → %s", liar, target)
+        return json.dumps({"liar": liar, "target": target, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record information or circumstances one character holds over another — "
+            "the kind of thing that makes the subject careful, conciliatory, or quietly "
+            "afraid. Leverage is not always deployed; sometimes power lies in its "
+            "existence. Can be blackmail material, knowledge of vulnerability, or any "
+            "asymmetric information that could cause harm."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "holder": {"type": "string", "description": "Who holds the leverage"},
+                "subject": {
+                    "type": "string",
+                    "description": "Who it can be used against",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the leverage is, and what harm its deployment would cause",
+                },
+            },
+            "required": ["holder", "subject", "description"],
+        },
+    )
+    def _tool_record_leverage(self, holder: str, subject: str, description: str) -> str:
+        logger.info("ENTER _tool_record_leverage: %r over %r", holder, subject)
+        pair = self._rel_key(holder, subject)
+        note = Note.jot(
+            message=f"Holder: {holder} | Subject: {subject}\n\n{description}",
+            tag=f"{TAG_REL}leverage {TAG_CHAR}{holder} {TAG_CHAR}{subject}",
+            context=f"leverage: {holder} over {subject}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("leverage recorded: %s over %s", holder, subject)
+        return json.dumps({"holder": holder, "subject": subject, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record one character's assessment of another after an interaction — "
+            "what impression formed, how it revised a prior view, and what caused it. "
+            "Impressions diverge between characters and create dramatic irony: "
+            "mc's warmth may land on someone already cold toward them. "
+            "Call this after a meaningful interaction when a character's view has "
+            "shifted or solidified."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "observer": {
+                    "type": "string",
+                    "description": "Who formed the impression",
+                },
+                "subject": {"type": "string", "description": "Who is being assessed"},
+                "impression": {
+                    "type": "string",
+                    "description": "What the observer now thinks or feels — as specific as possible",
+                },
+                "trigger": {
+                    "type": "string",
+                    "description": "What caused this impression to form or shift (optional)",
+                },
+            },
+            "required": ["observer", "subject", "impression"],
+        },
+    )
+    def _tool_record_impression(
+        self, observer: str, subject: str, impression: str, trigger: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_impression: %r of %r", observer, subject)
+        pair = self._rel_key(observer, subject)
+        body = f"Observer: {observer} | Subject: {subject}\n\nImpression: {impression}"
+        if trigger:
+            body += f"\n\nTriggered by: {trigger}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_REL}impression {TAG_CHAR}{observer} {TAG_CHAR}{subject}",
+            context=f"impression: {observer} of {subject}",
+            pwd=f"{PWD_REL}/{pair}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("impression recorded: %s of %s", observer, subject)
+        return json.dumps(
+            {"observer": observer, "subject": subject, "status": "recorded"}
+        )
+
+    # ── Character interior record tools ───────────────────────────────
+
+    @rp_tool(
+        description=(
+            "Record something a character is actively concealing — not merely unknown, "
+            "but deliberately hidden. Unlike record_knowledge (which captures facts), "
+            "this captures the ACT of hiding: the character deflects, changes subject, "
+            "or overcompensates when the topic comes near. "
+            "The narrator can write the seams around a secret without ever naming it. "
+            "concealed_from names who must not learn it."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Who holds this secret"},
+                "secret": {
+                    "type": "string",
+                    "description": "The full truth as the narrator knows it",
+                },
+                "concealed_from": {
+                    "type": "string",
+                    "description": "Who must not learn this (comma-separated, optional)",
+                },
+            },
+            "required": ["character", "secret"],
+        },
+    )
+    def _tool_record_secret(
+        self, character: str, secret: str, concealed_from: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_secret: character=%r", character)
+        body = secret
+        if concealed_from:
+            body += f"\n\nConcealed from: {concealed_from}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_INT}secret {TAG_CHAR}{character}",
+            context=f"secret: {character}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("secret recorded: %s", character)
+        return json.dumps({"character": character, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record what a character wants from the current interaction or from "
+            "another character — their hidden agenda, the thing driving behavior "
+            "beneath what they say they want. "
+            "Desire is almost always private. Every action becomes legible as pursuit "
+            "or concealment of the desire. "
+            "Use subtext to record what the desire really means at a deeper level."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Who holds this desire"},
+                "desire": {
+                    "type": "string",
+                    "description": "What they want — the immediate object or outcome",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Who they want it from, if applicable (optional)",
+                },
+                "subtext": {
+                    "type": "string",
+                    "description": "The deeper meaning — what this desire really represents (optional)",
+                },
+            },
+            "required": ["character", "desire"],
+        },
+    )
+    def _tool_record_desire(
+        self, character: str, desire: str, target: str = "", subtext: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_desire: character=%r", character)
+        body = desire
+        if target:
+            body = f"Directed at: {target}\n\n{body}"
+        if subtext:
+            body += f"\n\nSubtext: {subtext}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_INT}desire {TAG_CHAR}{character}",
+            context=f"desire: {character}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("desire recorded: %s", character)
+        return json.dumps({"character": character, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record a suppressed desire for another person — romantic, parental, the "
+            "longing to be truly seen or understood. "
+            "Longing is almost always hidden; the character may deny it to themselves. "
+            "It produces the richest prose: glances held a beat too long, the careful "
+            "not-touching, the specific thing they notice that no one else would."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {
+                    "type": "string",
+                    "description": "Who experiences the longing",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Who or what is longed for",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the longing feels like and how it manifests — specific, sensory, behavioral",
+                },
+            },
+            "required": ["character", "subject", "description"],
+        },
+    )
+    def _tool_record_longing(
+        self, character: str, subject: str, description: str
+    ) -> str:
+        logger.info("ENTER _tool_record_longing: %r for %r", character, subject)
+        note = Note.jot(
+            message=f"Longing for: {subject}\n\n{description}",
+            tag=f"{TAG_INT}longing {TAG_CHAR}{character}",
+            context=f"longing: {character} for {subject}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("longing recorded: %s for %s", character, subject)
+        return json.dumps(
+            {"character": character, "subject": subject, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Record the envy one character feels toward another over a specific thing: "
+            "the MC's attention, a social position, an inheritance, a talent. "
+            "The jealous character conceals or rationalizes it; others sense something "
+            "is off without naming it. "
+            "Jealousy leaks into tone, small sabotages, and the wrong kind of helpfulness."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {
+                    "type": "string",
+                    "description": "Who feels the jealousy",
+                },
+                "target": {"type": "string", "description": "Who they are envious of"},
+                "subject_of_competition": {
+                    "type": "string",
+                    "description": "What is being competed over (e.g. 'mc's attention', 'the inheritance', 'Ravenswood standing')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "How the jealousy manifests in behavior and thought",
+                },
+            },
+            "required": [
+                "character",
+                "target",
+                "subject_of_competition",
+                "description",
+            ],
+        },
+    )
+    def _tool_record_jealousy(
+        self, character: str, target: str, subject_of_competition: str, description: str
+    ) -> str:
+        logger.info("ENTER _tool_record_jealousy: %r of %r", character, target)
+        note = Note.jot(
+            message=f"Envious of: {target} | Over: {subject_of_competition}\n\n{description}",
+            tag=f"{TAG_INT}jealousy {TAG_CHAR}{character}",
+            context=f"jealousy: {character} of {target}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("jealousy recorded: %s of %s", character, target)
+        return json.dumps(
+            {"character": character, "target": target, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Record the persona a character presents publicly versus who they actually "
+            "are in private — the gap between their performed self and their real one. "
+            "A mask may be conscious (deliberate performance) or unconscious (a self "
+            "they have come to believe in). "
+            "Prose can show the cracks: the mask slipping, the over-correction, what "
+            "the real person almost let through."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Character slug"},
+                "public_persona": {
+                    "type": "string",
+                    "description": "The face shown to the world",
+                },
+                "private_self": {
+                    "type": "string",
+                    "description": "Who they actually are beneath the performance",
+                },
+            },
+            "required": ["character", "public_persona", "private_self"],
+        },
+    )
+    def _tool_record_mask(
+        self, character: str, public_persona: str, private_self: str
+    ) -> str:
+        logger.info("ENTER _tool_record_mask: character=%r", character)
+        note = Note.jot(
+            message=f"Public persona: {public_persona}\n\nPrivate self: {private_self}",
+            tag=f"{TAG_INT}mask {TAG_CHAR}{character}",
+            context=f"mask: {character}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("mask recorded: %s", character)
+        return json.dumps({"character": character, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record what a character actually meant by something they said — "
+            "the real message running beneath the stated words. "
+            "Dialogue written with captured subtext operates on two tracks: what was "
+            "said and what was meant, what was heard and what will be understood. "
+            "Call this when a significant exchange has a second layer worth preserving."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "speaker": {"type": "string", "description": "Who said it"},
+                "statement": {
+                    "type": "string",
+                    "description": "What was actually said",
+                },
+                "actual_meaning": {
+                    "type": "string",
+                    "description": "The real message beneath the surface",
+                },
+                "audience": {
+                    "type": "string",
+                    "description": "Who the statement was aimed at, if not the whole room (optional)",
+                },
+            },
+            "required": ["speaker", "statement", "actual_meaning"],
+        },
+    )
+    def _tool_record_subtext(
+        self, speaker: str, statement: str, actual_meaning: str, audience: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_subtext: speaker=%r", speaker)
+        body = f'Said: "{statement}"\n\nMeant: {actual_meaning}'
+        if audience:
+            body += f"\n\nAimed at: {audience}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_INT}subtext {TAG_CHAR}{speaker}",
+            context=f"subtext: {speaker}",
+            pwd=f"{PWD_INTERIOR}/{speaker}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("subtext recorded: %s", speaker)
+        return json.dumps({"speaker": speaker, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record how a character is generally perceived by others versus who they "
+            "actually are — the gap between reputation and reality. "
+            "Other characters arrive with preconceptions; they may be surprised, "
+            "confirmed, or deceived by what they find. "
+            "Use in_context to specify which social group holds this view."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Character slug"},
+                "perceived_as": {
+                    "type": "string",
+                    "description": "Their reputation — how others see them",
+                },
+                "reality": {
+                    "type": "string",
+                    "description": "Who they actually are, in tension with the reputation",
+                },
+                "in_context": {
+                    "type": "string",
+                    "description": "Among whom this reputation holds (e.g. 'Ravenswood staff', 'the nobility') — optional",
+                },
+            },
+            "required": ["character", "perceived_as", "reality"],
+        },
+    )
+    def _tool_record_reputation(
+        self, character: str, perceived_as: str, reality: str, in_context: str = ""
+    ) -> str:
+        logger.info("ENTER _tool_record_reputation: character=%r", character)
+        body = f"Perceived as: {perceived_as}\n\nReality: {reality}"
+        if in_context:
+            body += f"\n\nContext: {in_context}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_INT}reputation {TAG_CHAR}{character}",
+            context=f"reputation: {character}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("reputation recorded: %s", character)
+        return json.dumps({"character": character, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record a specific word, topic, gesture, or event that causes a strong "
+            "involuntary reaction in a character. "
+            "Unlike conscience (a broad behavioral invariant), a trigger is precise: "
+            "a single phrase, a smell, a name, a gesture. When it appears, the reaction "
+            "is immediate and visceral. Others may stumble onto it without knowing. "
+            "origin explains where the trigger came from."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Who is triggered"},
+                "trigger": {
+                    "type": "string",
+                    "description": "The specific word, topic, gesture, sound, or situation",
+                },
+                "reaction": {
+                    "type": "string",
+                    "description": "What happens when triggered — the immediate involuntary response",
+                },
+                "origin": {
+                    "type": "string",
+                    "description": "Where the trigger came from — the underlying wound or memory (optional)",
+                },
+            },
+            "required": ["character", "trigger", "reaction"],
+        },
+    )
+    def _tool_record_trigger(
+        self, character: str, trigger: str, reaction: str, origin: str = ""
+    ) -> str:
+        logger.info(
+            "ENTER _tool_record_trigger: character=%r trigger=%r", character, trigger
+        )
+        body = f"Trigger: {trigger}\n\nReaction: {reaction}"
+        if origin:
+            body += f"\n\nOrigin: {origin}"
+        note = Note.jot(
+            message=body,
+            tag=f"{TAG_INT}trigger {TAG_CHAR}{character}",
+            context=f"trigger: {character}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("trigger recorded: %s", character)
+        return json.dumps({"character": character, "status": "recorded"})
+
+    @rp_tool(
+        description=(
+            "Record something a character desperately wants to say to another person "
+            "but has not said — pent-up feeling, unsent confession, accusation being "
+            "swallowed. "
+            "The unspoken thing bends every interaction around it without appearing. "
+            "Conversations feel pressurized; pauses carry weight. "
+            "why_unsaid captures the obstacle: fear, timing, social cost, or inability "
+            "to find the words."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Who is holding it in"},
+                "target": {
+                    "type": "string",
+                    "description": "Who they want to say it to",
+                },
+                "what_they_want_to_say": {
+                    "type": "string",
+                    "description": "The unsaid thing — as specifically as possible",
+                },
+                "why_unsaid": {
+                    "type": "string",
+                    "description": "Why they haven't said it — fear, timing, pride, love, the wrong audience",
+                },
+            },
+            "required": ["character", "target", "what_they_want_to_say", "why_unsaid"],
+        },
+    )
+    def _tool_record_unspoken(
+        self, character: str, target: str, what_they_want_to_say: str, why_unsaid: str
+    ) -> str:
+        logger.info("ENTER _tool_record_unspoken: %r → %r", character, target)
+        note = Note.jot(
+            message=f"To: {target}\n\nUnsaid: {what_they_want_to_say}\n\nWhy unsaid: {why_unsaid}",
+            tag=f"{TAG_INT}unspoken {TAG_CHAR}{character}",
+            context=f"unspoken: {character} → {target}",
+            pwd=f"{PWD_INTERIOR}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+        logger.info("unspoken recorded: %s → %s", character, target)
+        return json.dumps(
+            {"character": character, "target": target, "status": "recorded"}
+        )
+
+    @rp_tool(
+        description=(
+            "Set a character's current emotional state for this scene — their mood, "
+            "disposition, or dominant feeling right now. "
+            "This is TRANSIENT: it lives in session memory only and is NOT persisted "
+            "to notes. It clears automatically on cast changes and location changes. "
+            "Mood colors dialogue delivery, physical tells, and what the character "
+            "notices or ignores. "
+            "Call update_attn for gaze and focus; call record_mood for emotional state."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {"type": "string", "description": "Character slug"},
+                "emotional_state": {
+                    "type": "string",
+                    "description": "Current emotional state (e.g. 'guarded', 'elated but hiding it', 'exhausted and bitter', 'nervously performing calm')",
+                },
+            },
+            "required": ["character", "emotional_state"],
+        },
+    )
+    def _tool_record_mood(self, character: str, emotional_state: str) -> str:
+        logger.info("ENTER _tool_record_mood: %r → %r", character, emotional_state)
+        self.session.mood[character] = emotional_state
+        logger.info("mood set: %s = %r", character, emotional_state)
+        return json.dumps(
+            {
+                "character": character,
+                "emotional_state": emotional_state,
+                "persisted": False,
+                "followup_instruction": (
+                    f"{character}'s mood is now '{emotional_state}'. "
+                    "Let this color their dialogue delivery, physical tells, and what "
+                    "they choose to notice or ignore in the scene."
+                ),
+            }
+        )
+
+    # ── Relationship query tools ───────────────────────────────────────
+
+    @rp_tool(
+        description=(
+            "Retrieve all stored relationship notes for a specific pair of characters: "
+            "bonds, shared history, dynamics, power, wounds, promises, debts, lies, "
+            "leverage, and impressions. "
+            "Use this before writing a key scene between two characters, when the "
+            "player asks out-of-character about a relationship, or when assessing "
+            "whether the relationship arc has developed. "
+            "Returns all notes sorted newest-first."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "char_a": {"type": "string", "description": "First character slug"},
+                "char_b": {"type": "string", "description": "Second character slug"},
+            },
+            "required": ["char_a", "char_b"],
+        },
+    )
+    def _tool_get_relationship_arc(self, char_a: str, char_b: str) -> str:
+        logger.info("ENTER _tool_get_relationship_arc: %r ↔ %r", char_a, char_b)
+        pair = self._rel_key(char_a, char_b)
+        bundle = ContextBundle(f"{PWD_REL}/{pair}")
+        context_str = self.render_context(bundle, focus_hint=f"{char_a}+{char_b}")
+        logger.info(
+            "get_relationship_arc: pair=%s notes=%d rendered=%d tok",
+            pair,
+            len(bundle),
+            _tok(context_str),
+        )
+        return json.dumps(
+            {
+                "char_a": char_a,
+                "char_b": char_b,
+                "relationship_arc": context_str
+                or f"[no relationship notes found for {char_a} ↔ {char_b}]",
+                "followup_instruction": (
+                    "Use this relationship history to inform how these characters interact — "
+                    "their dialogue, what they avoid, what they reach for, and what they "
+                    "cannot bring themselves to say."
+                ),
+            }
+        )
+
+    @rp_tool(
+        description=(
+            "Retrieve a relationship map for all characters currently present in the "
+            "scene — bonds, history, dynamics, wounds, and impressions for every pair. "
+            "Use this before writing a group scene to understand the full web: who "
+            "defers to whom, who avoids whose gaze, which alliances are hidden, who "
+            "is performing for whose benefit. "
+            "Returns pair-by-pair summaries sorted newest-first within each pair."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+    )
+    def _tool_get_social_map(self) -> str:
+        logger.info("ENTER _tool_get_social_map")
+        people = sorted(self.session.people_present)
+        if len(people) < 2:
+            return json.dumps(
+                {
+                    "social_map": "[fewer than 2 characters present — no relationships to map]",
+                }
+            )
+
+        map_parts = []
+        for i, char_a in enumerate(people):
+            for char_b in people[i + 1 :]:
+                pair = self._rel_key(char_a, char_b)
+                bundle = ContextBundle(f"{PWD_REL}/{pair}")
+                ctx = self.render_context(bundle, focus_hint=f"{char_a}+{char_b}")
+                if ctx.strip():
+                    map_parts.append(f"[{char_a} ↔ {char_b}]\n{ctx.strip()}")
+
+        social_map_str = (
+            "\n\n".join(map_parts)
+            if map_parts
+            else "[no relationship notes found for current cast]"
+        )
+        logger.info(
+            "get_social_map: %d character(s), %d pair(s) with notes",
+            len(people),
+            len(map_parts),
+        )
+        return json.dumps(
+            {
+                "cast": people,
+                "social_map": social_map_str,
+                "followup_instruction": (
+                    "Use this relationship web to write group dynamics authentically: "
+                    "who defers to whom, who avoids whose gaze, which alliances are "
+                    "hidden, and who is performing for whose benefit."
+                ),
+            }
+        )
+
+    # ------------------------------------------------------------------
     # Tool registration
     # ------------------------------------------------------------------
 
@@ -2234,8 +3292,23 @@ class RPJotEngine:
             char = parsed.get("character", "?")
             trait = parsed.get("trait", "?")
             return f"Conscience ({char}): {trait}"
-        # All other cases: the result was not JSON-parsable into something useful;
-        # fall back to the raw result string (e.g. "Event recorded: …")
+        if fn_name == "record_bond":
+            a, b = parsed.get("char_a", "?"), parsed.get("char_b", "?")
+            bt = parsed.get("bond_type", "?")
+            return f"Bond: {a} ↔ {b} ({bt})"
+        if fn_name == "record_history":
+            a, b = parsed.get("char_a", "?"), parsed.get("char_b", "?")
+            return f"Shared history recorded: {a} ↔ {b}"
+        if fn_name == "record_wound":
+            inf, wnd = parsed.get("inflicter", "?"), parsed.get("wounded", "?")
+            return f"Wound: {inf} → {wnd}"
+        if fn_name == "record_promise":
+            p, r = parsed.get("promiser", "?"), parsed.get("recipient", "?")
+            return f"Promise: {p} → {r}"
+        if fn_name == "record_impression":
+            obs, sub = parsed.get("observer", "?"), parsed.get("subject", "?")
+            return f"Impression: {obs} of {sub}"
+        # All other cases: fall back to the raw result string
         return f"{fn_name}: {str(parsed)[:150]}"
 
     def _build_narrative_synthesis(
@@ -2432,9 +3505,10 @@ class RPJotEngine:
                 # the LLM so it generates clean prose primed by staging, social
                 # intuition, and canonical facts.
                 attn_text = self._gather_attn_for_scene()
+                mood_text = self._gather_mood_for_scene()
                 yomi_text = self._gather_yomi_for_scene()
 
-                if i > 0 or attn_text or yomi_text:
+                if i > 0 or attn_text or mood_text or yomi_text:
                     synthesis = self._build_narrative_synthesis(
                         accumulated_think, canonical_results
                     )
@@ -2442,6 +3516,8 @@ class RPJotEngine:
                     injection_parts = []
                     if attn_text:
                         injection_parts.append(attn_text)
+                    if mood_text:
+                        injection_parts.append(mood_text)
                     if yomi_text:
                         injection_parts.append(yomi_text)
                     if synthesis:
@@ -2450,8 +3526,9 @@ class RPJotEngine:
                     injection = "\n\n".join(injection_parts)
                     if injection:
                         logger.debug(
-                            "[ATTN/YOMI/SYNTH] injection: attn=%s yomi=%s think=%d canonical=%d",
+                            "[ATTN/MOOD/YOMI/SYNTH] injection: attn=%s mood=%s yomi=%s think=%d canonical=%d",
                             bool(attn_text),
+                            bool(mood_text),
                             bool(yomi_text),
                             len(accumulated_think),
                             len(canonical_results),
