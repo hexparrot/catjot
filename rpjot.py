@@ -224,12 +224,11 @@ class SessionState:
         self.location_context = ContextBundle(f"{PWD_WORLD}/{location}")
         self.people_present = set(people_present or [])
         self.current_scene: str = ""
-        self.attention: dict[str, str] = (
+        self.attention: dict[str, str] = {}  # char → gaze/focus (transient)
+        self.mood: dict[str, str] = {}  # char → emotional state (transient)
+        self._query_cache: dict[str, str] = (
             {}
-        )  # char → gaze/focus (transient, not persisted)
-        self.mood: dict[str, str] = (
-            {}
-        )  # char → emotional state (transient, not persisted)
+        )  # render_context results; keyed, invalidated on write
         logger.info(
             "SessionState created: loc=%s, present=%s",
             self.location,
@@ -372,6 +371,26 @@ class RPJotEngine:
                 results.append(think_content)
 
         return results
+
+    # ------------------------------------------------------------------
+    # Query result cache (session-scoped, invalidated on write)
+    # ------------------------------------------------------------------
+
+    def _cache_get(self, key: str) -> str | None:
+        hit = self.session._query_cache.get(key)
+        if hit is not None:
+            logger.debug("[CACHE] HIT  %s (%d tok)", key, _tok(hit))
+        return hit
+
+    def _cache_put(self, key: str, value: str) -> None:
+        self.session._query_cache[key] = value
+        logger.debug("[CACHE] SET  %s (%d tok)", key, _tok(value))
+
+    def _cache_drop(self, *keys: str) -> None:
+        for k in keys:
+            if k in self.session._query_cache:
+                del self.session._query_cache[k]
+                logger.debug("[CACHE] EVICT %s", k)
 
     # ------------------------------------------------------------------
     # Utility: JSON extraction from LLM prose
@@ -634,8 +653,13 @@ class RPJotEngine:
 
         parts = []
         for char_name in others:
-            bundle = ContextBundle(f"{PWD_YOMI}/{char_name}")
-            context_str = self.render_context(bundle, focus_hint=char_name)
+            cache_key = f"yomi:{char_name}"
+            context_str = self._cache_get(cache_key)
+            if context_str is None:
+                bundle = ContextBundle(f"{PWD_YOMI}/{char_name}")
+                context_str = self.render_context(bundle, focus_hint=char_name)
+                if context_str.strip():
+                    self._cache_put(cache_key, context_str)
             if context_str.strip():
                 parts.append(f"[{char_name}]\n{context_str.strip()}")
                 logger.debug(
@@ -1249,6 +1273,7 @@ class RPJotEngine:
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{to_loc}")
         self.session.attention = {}
         self.session.mood = {}
+        self._cache_drop("social_map")
 
         nav_tag = "nav"
         if self.session.current_scene:
@@ -1314,6 +1339,7 @@ class RPJotEngine:
             {}
         )  # cast change; attention and mood must be re-established
         self.session.mood = {}
+        self._cache_drop("social_map")
         logger.info("people_present updated: %s", self.session.people_present)
         present = ", ".join(sorted(self.session.people_present)) or "none"
         return f"Scene people updated: {present}"
@@ -1358,6 +1384,7 @@ class RPJotEngine:
             pwd=f"{PWD_CHARS}/{name}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"char:{name}")
 
         logger.info("character saved: %s", name)
         return f"Character saved: {name}"
@@ -1485,8 +1512,12 @@ class RPJotEngine:
         """Return saved character notes as context for the LLM."""
         logger.info("ENTER _tool_get_character: name=%r", name)
 
-        ctx = self.gather_character_knowledge(name)
-        context_str = self.render_context(ctx, focus_hint=name)
+        cache_key = f"char:{name}"
+        context_str = self._cache_get(cache_key)
+        if context_str is None:
+            ctx = self.gather_character_knowledge(name)
+            context_str = self.render_context(ctx, focus_hint=name)
+            self._cache_put(cache_key, context_str)
         result = json.dumps(
             {
                 "character": context_str or f"[no notes found for character: {name}]",
@@ -1692,6 +1723,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_begin_scene: name=%r", name)
 
         self.session.current_scene = name
+        self._cache_drop("social_map")
 
         note = Note.jot(
             message=description,
@@ -1842,6 +1874,7 @@ class RPJotEngine:
             pwd=f"{PWD_CONSCIENCE}/{character}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"conscience:{character}")
 
         logger.info("conscience recorded: %s / %s", character, trait)
         return json.dumps(
@@ -1979,6 +2012,7 @@ class RPJotEngine:
             pwd=f"{PWD_YOMI}/{character}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"yomi:{character}")
 
         logger.info("yomi saved: %s → %s", self.main_character, character)
         return json.dumps(
@@ -2020,14 +2054,15 @@ class RPJotEngine:
         """Return stored yomi insights for a character."""
         logger.info("ENTER _tool_get_yomi: character=%r", character)
 
-        bundle = ContextBundle(f"{PWD_YOMI}/{character}")
-        context_str = self.render_context(bundle, focus_hint=character)
-
+        cache_key = f"yomi:{character}"
+        context_str = self._cache_get(cache_key)
+        if context_str is None:
+            bundle = ContextBundle(f"{PWD_YOMI}/{character}")
+            context_str = self.render_context(bundle, focus_hint=character)
+            if context_str.strip():
+                self._cache_put(cache_key, context_str)
         logger.info(
-            "get_yomi: character=%s notes=%d rendered=%d tok",
-            character,
-            len(bundle),
-            _tok(context_str),
+            "get_yomi: character=%s rendered=%d tok", character, _tok(context_str)
         )
         return json.dumps(
             {
@@ -2065,14 +2100,15 @@ class RPJotEngine:
         """Return all conscience constraints recorded for a character."""
         logger.info("ENTER _tool_get_conscience: character=%r", character)
 
-        bundle = self.gather_context([f"{PWD_CONSCIENCE}/{character}"])
-        context_str = self.render_context(bundle, focus_hint=character)
-
+        cache_key = f"conscience:{character}"
+        context_str = self._cache_get(cache_key)
+        if context_str is None:
+            bundle = self.gather_context([f"{PWD_CONSCIENCE}/{character}"])
+            context_str = self.render_context(bundle, focus_hint=character)
+            if context_str.strip():
+                self._cache_put(cache_key, context_str)
         logger.info(
-            "get_conscience: character=%s notes=%d rendered=%d tok",
-            character,
-            len(bundle),
-            _tok(context_str),
+            "get_conscience: character=%s rendered=%d tok", character, _tok(context_str)
         )
         return json.dumps(
             {
@@ -2190,6 +2226,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("bond recorded: %s ↔ %s [%s]", char_a, char_b, bond_type)
         return json.dumps(
             {
@@ -2237,6 +2274,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("history recorded: %s ↔ %s", char_a, char_b)
         return json.dumps({"char_a": char_a, "char_b": char_b, "status": "recorded"})
 
@@ -2277,6 +2315,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("dynamic recorded: %s ↔ %s [%s]", char_a, char_b, pattern)
         return json.dumps(
             {
@@ -2332,6 +2371,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("power dynamic recorded: %s over %s [%s]", holder, subject, basis)
         return json.dumps(
             {"holder": holder, "subject": subject, "basis": basis, "status": "recorded"}
@@ -2381,6 +2421,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info(
             "wound recorded: %s → %s (known=%s)", inflicter, wounded, known_to_inflicter
         )
@@ -2438,6 +2479,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("promise recorded: %s → %s", promiser, recipient)
         return json.dumps(
             {"promiser": promiser, "recipient": recipient, "status": "recorded"}
@@ -2480,6 +2522,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("debt recorded: %s owes %s", debtor, creditor)
         return json.dumps(
             {"debtor": debtor, "creditor": creditor, "status": "recorded"}
@@ -2522,6 +2565,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("lie recorded: %s → %s", liar, target)
         return json.dumps({"liar": liar, "target": target, "status": "recorded"})
 
@@ -2559,6 +2603,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("leverage recorded: %s over %s", holder, subject)
         return json.dumps({"holder": holder, "subject": subject, "status": "recorded"})
 
@@ -2606,6 +2651,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
+        self._cache_drop(f"rel:{pair}", "social_map")
         logger.info("impression recorded: %s of %s", observer, subject)
         return json.dumps(
             {"observer": observer, "subject": subject, "status": "recorded"}
@@ -3064,9 +3110,11 @@ class RPJotEngine:
             "Retrieve all stored relationship notes for a specific pair of characters: "
             "bonds, shared history, dynamics, power, wounds, promises, debts, lies, "
             "leverage, and impressions. "
-            "Use this before writing a key scene between two characters, when the "
-            "player asks out-of-character about a relationship, or when assessing "
-            "whether the relationship arc has developed. "
+            "Call this at scene open when two characters first interact, or when the "
+            "player asks out-of-character about a relationship. "
+            "Results are cached — repeat calls within the same scene are free. "
+            "Avoid calling this every beat; once per scene open is the right cadence "
+            "unless new notes have been written (cache invalidates automatically on writes). "
             "Returns all notes sorted newest-first."
         ),
         parameters={
@@ -3081,13 +3129,15 @@ class RPJotEngine:
     def _tool_get_relationship_arc(self, char_a: str, char_b: str) -> str:
         logger.info("ENTER _tool_get_relationship_arc: %r ↔ %r", char_a, char_b)
         pair = self._rel_key(char_a, char_b)
-        bundle = ContextBundle(f"{PWD_REL}/{pair}")
-        context_str = self.render_context(bundle, focus_hint=f"{char_a}+{char_b}")
+        cache_key = f"rel:{pair}"
+        context_str = self._cache_get(cache_key)
+        if context_str is None:
+            bundle = ContextBundle(f"{PWD_REL}/{pair}")
+            context_str = self.render_context(bundle, focus_hint=f"{char_a}+{char_b}")
+            if context_str.strip():
+                self._cache_put(cache_key, context_str)
         logger.info(
-            "get_relationship_arc: pair=%s notes=%d rendered=%d tok",
-            pair,
-            len(bundle),
-            _tok(context_str),
+            "get_relationship_arc: pair=%s rendered=%d tok", pair, _tok(context_str)
         )
         return json.dumps(
             {
@@ -3107,9 +3157,12 @@ class RPJotEngine:
         description=(
             "Retrieve a relationship map for all characters currently present in the "
             "scene — bonds, history, dynamics, wounds, and impressions for every pair. "
-            "Use this before writing a group scene to understand the full web: who "
-            "defers to whom, who avoids whose gaze, which alliances are hidden, who "
-            "is performing for whose benefit. "
+            "Call this once at scene open when multiple characters are present, to "
+            "understand the full web before writing group dynamics. "
+            "Results are cached — repeat calls within the same scene are free. "
+            "Avoid calling this on every beat; once per scene open is the right cadence "
+            "unless the cast changes or new relationship notes have been written "
+            "(cache invalidates automatically on writes and cast changes). "
             "Returns pair-by-pair summaries sorted newest-first within each pair."
         ),
         parameters={
@@ -3127,6 +3180,22 @@ class RPJotEngine:
                 }
             )
 
+        cache_key = "social_map"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.info("get_social_map: cache hit")
+            return json.dumps(
+                {
+                    "cast": people,
+                    "social_map": cached,
+                    "followup_instruction": (
+                        "Use this relationship web to write group dynamics authentically: "
+                        "who defers to whom, who avoids whose gaze, which alliances are "
+                        "hidden, and who is performing for whose benefit."
+                    ),
+                }
+            )
+
         map_parts = []
         for i, char_a in enumerate(people):
             for char_b in people[i + 1 :]:
@@ -3141,6 +3210,7 @@ class RPJotEngine:
             if map_parts
             else "[no relationship notes found for current cast]"
         )
+        self._cache_put(cache_key, social_map_str)
         logger.info(
             "get_social_map: %d character(s), %d pair(s) with notes",
             len(people),
@@ -3445,7 +3515,7 @@ class RPJotEngine:
         )
         return messages
 
-    def run_tool_loop(self, messages, max_iterations=8):
+    def run_tool_loop(self, messages, max_iterations=10):
         """
         Send the conversation to the LLM with registered tools.
         Loop until the LLM returns a narrative (no tool calls) or
