@@ -9,7 +9,7 @@ import shutil
 from datetime import datetime
 
 import rpjot as _rpjot_module
-from rpjot import RPJotEngine, PWD_SUMMARIES, TAG_LOC, PWD_WORLD
+from rpjot import RPJotEngine, PWD_SUMMARIES, TAG_LOC, PWD_WORLD, PWD_YOMI
 from catjot import Note, ContextBundle
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def game_loop(engine):
     messages = build_initial_messages()
 
     print(
-        "Welcome. Type your action. Commands: /quit, /people, /location, /objects, /stats"
+        "Welcome. Type your action. Commands: /quit, /people, /location, /objects, /stats, /yomi <name>"
     )
     print("-" * 60)
 
@@ -145,6 +145,17 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            continue
+
+        if user_input.lower().startswith("/yomi"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) > 1:
+                char_name = parts[1].strip()
+                bundle = ContextBundle(f"{PWD_YOMI}/{char_name}")
+                text = str(bundle).strip()
+                print(text or f"[no yomi found for: {char_name}]")
+            else:
+                print("Usage: /yomi <character_name>")
             continue
 
         # --- Normal player input -> LLM ---

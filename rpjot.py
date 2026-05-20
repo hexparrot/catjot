@@ -92,6 +92,9 @@ PWD_EVENTS = "/story/events"
 PWD_SCENES = "/story/scenes"
 PWD_CONSCIENCE = "/story/conscience"
 PWD_SUMMARIES = "/summaries"
+PWD_YOMI = "/yomi"
+
+TAG_YOMI = "yomi:"  # yomi:alice
 
 # ---------------------------------------------------------------------------
 # Debug flags
@@ -256,18 +259,20 @@ class RPJotEngine:
         response = engine.run_tool_loop(messages)
     """
 
-    def __init__(self, location, people_present=None):
+    def __init__(self, location, people_present=None, main_character="mc"):
         self._tool_schemas: list = []
         self._tool_handlers: dict = {}
         self._last_payload_toks: int = 0  # updated by _guard_payload each iteration
+        self.main_character = main_character
         self.session = SessionState(
             location=location,
             people_present=people_present or set(),
         )
         logger.info(
-            "RPJotEngine init: loc=%s people=%s",
+            "RPJotEngine init: loc=%s people=%s mc=%s",
             location,
             self.session.people_present,
+            self.main_character,
         )
 
     # ------------------------------------------------------------------
@@ -548,6 +553,43 @@ class RPJotEngine:
             len(self.session.people_present),
         )
         return result
+
+    def _gather_yomi_for_scene(self) -> str:
+        """Gather stored yomi for all non-protagonist characters in the scene.
+
+        Returns a formatted injection string, or empty string when no yomi exists.
+        Yomi notes are sorted newest-first; the most recent insight per character
+        leads, reflecting the current arc of the relationship.
+        """
+        others = sorted(self.session.people_present - {self.main_character})
+        if not others:
+            return ""
+
+        parts = []
+        for char_name in others:
+            bundle = ContextBundle(f"{PWD_YOMI}/{char_name}")
+            context_str = self.render_context(bundle, focus_hint=char_name)
+            if context_str.strip():
+                parts.append(f"[{char_name}]\n{context_str.strip()}")
+                logger.debug(
+                    "[YOMI] loaded yomi for %s: %d tok", char_name, _tok(context_str)
+                )
+
+        if not parts:
+            return ""
+
+        logger.debug(
+            "[YOMI] _gather_yomi_for_scene: %d character(s) with yomi", len(parts)
+        )
+        return (
+            "YOMI — FIRST-PERSON SOCIAL INTUITION\n"
+            "The main character's felt sense of how others in this scene perceive "
+            "and relate to them. Use these to shape the emotional texture of the "
+            "prose: micro-expressions, loaded silences, unspoken tensions, the raw "
+            "feeling of being seen or judged. Let this inner knowledge live in "
+            "sensory detail and subtext rather than stated plainly:\n\n"
+            + "\n\n".join(parts)
+        )
 
     def render_context(self, bundle: ContextBundle, focus_hint: str = "") -> str:
         """Render a ContextBundle as a recency-sorted, size-bounded string.
@@ -1745,6 +1787,111 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
+            "Record the main character's intuitive reading of how another character "
+            "perceives, feels about, or relates to them — the felt sense of social "
+            "dynamics beneath the surface of spoken words. "
+            "Yomi captures what the main character senses from micro-expressions, "
+            "tone, body language, and subtext: the unspoken intentions, suppressed "
+            "emotions, and underlying attitude of the other character toward the main "
+            "character. "
+            "Call this after a significant character interaction — a first meeting, "
+            "a loaded conversation, a moment of tension or warmth — when the main "
+            "character has reason to form a felt social read. "
+            "Yomi is automatically injected before narrative output to deepen "
+            "first-person interiority and vivid social awareness in the prose. "
+            "It also tracks the arc of relationships across scenes."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {
+                    "type": "string",
+                    "description": "Character slug the yomi is about (e.g. 'evie', 'aurora')",
+                },
+                "insight": {
+                    "type": "string",
+                    "description": (
+                        "The main character's felt intuition: what they sense about "
+                        "how this character sees them, what the character is feeling "
+                        "beneath the surface, and what unspoken intentions or tensions "
+                        "exist between them. Write in first-person present tense as the "
+                        "main character's inner voice."
+                    ),
+                },
+            },
+            "required": ["character", "insight"],
+        },
+    )
+    def _tool_save_yomi(self, character: str, insight: str) -> str:
+        """Persist the MC's yomi insight about another character."""
+        logger.info("ENTER _tool_save_yomi: character=%r", character)
+
+        note = Note.jot(
+            message=insight,
+            tag=f"{TAG_YOMI}{character}",
+            context=f"yomi: {self.main_character} → {character}",
+            pwd=f"{PWD_YOMI}/{character}",
+        )
+        Note.append(Note.NOTEFILE, note)
+
+        logger.info("yomi saved: %s → %s", self.main_character, character)
+        return json.dumps(
+            {
+                "status": "saved",
+                "character": character,
+                "followup_instruction": (
+                    f"Yomi for {character} has been recorded. "
+                    "Proceed to the narrative — this intuition will be woven into "
+                    "the main character's first-person perspective automatically."
+                ),
+            }
+        )
+
+    @rp_tool(
+        description=(
+            "Retrieve the main character's stored yomi insight for a specific "
+            "character — their accumulated intuitions about how that character "
+            "perceives and relates to them. "
+            "Call this when the player asks about their feelings toward or "
+            "relationship with a character out-of-character, when a conversation "
+            "between them becomes central to the action, or when assessing whether "
+            "their relationship arc has developed further. "
+            "Returns notes sorted newest-first; freshly produced yomi is preferable "
+            "when active social dynamics are at play."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "character": {
+                    "type": "string",
+                    "description": "Character slug to retrieve yomi for (e.g. 'evie', 'aurora')",
+                },
+            },
+            "required": ["character"],
+        },
+    )
+    def _tool_get_yomi(self, character: str) -> str:
+        """Return stored yomi insights for a character."""
+        logger.info("ENTER _tool_get_yomi: character=%r", character)
+
+        bundle = ContextBundle(f"{PWD_YOMI}/{character}")
+        context_str = self.render_context(bundle, focus_hint=character)
+
+        logger.info(
+            "get_yomi: character=%s notes=%d rendered=%d tok",
+            character,
+            len(bundle),
+            _tok(context_str),
+        )
+        return json.dumps(
+            {
+                "character": character,
+                "yomi": context_str or f"[no yomi recorded for: {character}]",
+            }
+        )
+
+    @rp_tool(
+        description=(
             "Retrieve all active conscience constraints for a character. "
             "Call this before narrating any action that might intersect with "
             "a known or suspected behavioral constraint — especially for the "
@@ -2175,22 +2322,32 @@ class RPJotEngine:
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                # ── Narrative synthesis injection ──────────────────────────
-                # If tools ran at least once, re-call the LLM without tools so
-                # it generates clean prose (not interrupted by tool dispatch),
-                # optionally prefaced by a synthesis of think+canonical material.
-                if i > 0:
+                # ── Yomi + narrative synthesis injection ───────────────────
+                # Gather yomi for present characters (empty string when none saved).
+                # If tools ran at least once OR yomi exists, re-call the LLM so it
+                # generates clean prose primed by social intuition and canonical facts.
+                yomi_text = self._gather_yomi_for_scene()
+
+                if i > 0 or yomi_text:
                     synthesis = self._build_narrative_synthesis(
                         accumulated_think, canonical_results
                     )
+
+                    injection_parts = []
+                    if yomi_text:
+                        injection_parts.append(yomi_text)
                     if synthesis:
+                        injection_parts.append(synthesis)
+
+                    injection = "\n\n".join(injection_parts)
+                    if injection:
                         logger.debug(
-                            "[SYNTH] injecting synthesis: %d think block(s), "
-                            "%d canonical result(s)",
+                            "[YOMI/SYNTH] injection: yomi=%s think=%d canonical=%d",
+                            bool(yomi_text),
                             len(accumulated_think),
                             len(canonical_results),
                         )
-                        messages.append({"role": "user", "content": synthesis})
+                        messages.append({"role": "user", "content": injection})
                         messages = self._guard_payload(messages)
                     response_msg = call_llm(messages, temperature=NARRATIVE_TEMPERATURE)
 
