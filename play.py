@@ -423,6 +423,18 @@ def main():
         people_present={"mc"},
     )
     engine.register_all_tools()
+
+    # Bootstrap the opening scene so current_scene is never empty from turn one.
+    # This ensures gather_pov_context includes scene notes and the entropy
+    # refresh cycle is primed.  The flag is cleared to avoid a gratuitous
+    # paraphrase call before the first player input.
+    engine._tool_begin_scene(
+        "opening",
+        "The story opens at the exterior of Ravenwood Manor. The player character has just arrived "
+        "having been dropped off and the taxi now fully out of sight.",
+    )
+    engine._system_refresh_pending = False
+
     game_loop(engine)
 
 

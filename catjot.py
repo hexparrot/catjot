@@ -1381,7 +1381,9 @@ class catjot_graphql(object):
 # START: LLM/MCP FUNCTIONS
 
 
-def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
+def call_llm(
+    messages, tools=None, temperature=0.2, tool_choice="auto", max_tokens=None
+):
     """Fire a single chat-completion request at the configured LLM endpoint.
 
     Reads credentials and model from environment variables:
@@ -1393,6 +1395,10 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
     fields so the LLM can request function calls.  Some provider implementations
     attach ``tool_calls`` at the choice level rather than inside the message
     dict; this function normalises that quirk before returning.
+
+    *max_tokens* caps the output budget for the call.  Pass it to prevent
+    thinking-heavy models from consuming the full output allowance on internal
+    reasoning before producing any prose or tool call.
 
     Returns the ``message`` dict from ``choices[0]``.  Raises
     ``requests.HTTPError`` on a non-2xx response.
@@ -1406,6 +1412,8 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice

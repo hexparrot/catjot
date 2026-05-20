@@ -176,6 +176,26 @@ NARRATIVE_TEMPERATURE = (
     0.75  # temperature for final prose; higher than tool-dispatch calls
 )
 
+# ---------------------------------------------------------------------------
+# Per-call output token budgets
+# ---------------------------------------------------------------------------
+# Cap each call_llm invocation so that thinking-heavy models cannot exhaust
+# the output budget on internal reasoning before producing usable content.
+# Each limit covers thinking overhead + the actual output tokens needed.
+# For models without thinking, these are simple output length caps.
+# Tune per model: a local non-thinking model can use smaller values.
+MAX_TOKENS_CONDENSE = 2_048  # context distillation / scene-object extraction
+MAX_TOKENS_TOOL_DISPATCH = 2_048  # tool selection + JSON arguments
+MAX_TOKENS_NARRATIVE = 2_048  # final prose generation
+
+# ---------------------------------------------------------------------------
+# Entropy: how often the system message is paraphrased regardless of scenes
+# ---------------------------------------------------------------------------
+# begin_scene sets _system_refresh_pending=True on scene transitions.
+# SYSTEM_REFRESH_INTERVAL provides a fallback so the system message is
+# paraphrased at least every N player turns even if the scene never changes.
+SYSTEM_REFRESH_INTERVAL = 8
+
 # Tools whose results contain newly written canonical material worth surfacing to the narrative.
 # Query tools (get_character, search_world, prepare_context, etc.) are excluded because
 # they return existing lore already visible in the context window.
@@ -296,7 +316,12 @@ class RPJotEngine:
         self._tool_schemas: list = []
         self._tool_handlers: dict = {}
         self._last_payload_toks: int = 0  # updated by _guard_payload each iteration
+        self._cached_schema_toks: int = (
+            0  # full schema overhead, set by register_all_tools
+        )
+        self._cached_bare_schema_toks: int = 0  # stub-only overhead for narrative calls
         self._system_refresh_pending: bool = False
+        self._turn_count: int = 0
         self.main_character = main_character
         self.session = SessionState(
             location=location,
@@ -312,6 +337,25 @@ class RPJotEngine:
     # ------------------------------------------------------------------
     # Private tool registry
     # ------------------------------------------------------------------
+
+    @property
+    def _bare_tool_schemas(self) -> list:
+        """Minimal tool stubs — just names, no descriptions or parameter schemas.
+
+        Servers that require a non-empty tools array with tool_choice='none'
+        accept these (~10x fewer tokens than full schemas).  Used for the
+        narrative synthesis call where no tool will actually be invoked.
+        """
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": s["function"]["name"],
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for s in self._tool_schemas
+        ]
 
     def _register_tool(self, name, description, parameters, handler):
         """Register a tool in the instance-local schema + handler dicts."""
@@ -354,12 +398,19 @@ class RPJotEngine:
         think_match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
         if not think_match:
             think_match = re.search(r"<think>(.*)", text, flags=re.DOTALL)
+        if not think_match:
+            # Orphaned closing tag: opening was missing/truncated; treat everything before </think> as think content
+            think_match = re.search(r"(.*?)</think>", text, flags=re.DOTALL)
         think_content = (
             think_match.group(1).strip().replace("\n", " ") if think_match else ""
         )
         # Strip closed then unclosed think tags
         clean_content = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         clean_content = re.sub(r"<think>.*", "", clean_content, flags=re.DOTALL)
+        # Strip orphaned closing tag and everything before it
+        clean_content = re.sub(
+            r".*?</think>", "", clean_content, count=1, flags=re.DOTALL
+        )
         # Strip closed then unclosed tool_call blocks
         clean_content = re.sub(
             r"<tool_call>.*?</tool_call>", "", clean_content, flags=re.DOTALL
@@ -818,7 +869,10 @@ class RPJotEngine:
         )
 
         try:
-            response = call_llm([{"role": "user", "content": prompt}])
+            response = call_llm(
+                [{"role": "user", "content": prompt}],
+                max_tokens=MAX_TOKENS_CONDENSE,
+            )
             content = response.get("content", "")
             _, condensed = self.strip_think_tags(content)
             if condensed.strip():
@@ -898,7 +952,7 @@ class RPJotEngine:
         ) % ctx_rendered
 
         messages = [{"role": "user", "content": prompt}]
-        response = call_llm(messages)
+        response = call_llm(messages, max_tokens=MAX_TOKENS_CONDENSE)
 
         content = response.get("content", "")
         _think, content = self.strip_think_tags(content)
@@ -1782,9 +1836,11 @@ class RPJotEngine:
         description=(
             "Start a new named narrative scene — a cohesive dramatic unit anchoring "
             "subsequent tool calls for retrieval. "
-            "ONLY call this when the player has chosen to engage with a new scene "
-            "context: they explicitly enter a new situation (a meal, an investigation, "
-            "a confrontation), or the player's input clearly marks a new dramatic beat. "
+            "Call this: (1) when current_scene is empty — always call on the first "
+            "player turn to open the story, or after navigate_to reaches a destination "
+            "if no scene is active; (2) when the player explicitly enters a new dramatic "
+            "context (a meal, an investigation, a confrontation); (3) when a previous "
+            "scene has ended and a new dramatic beat clearly begins. "
             "NPC arrivals, invitations, and escort behavior do NOT start a scene — "
             "wait for the player to respond or consent before calling begin_scene. "
             "Call at most ONCE per player turn. Do not call it a second time "
@@ -3377,7 +3433,14 @@ class RPJotEngine:
                     continue
                 self._register_tool(tool_name, description, parameters, bound)
 
-        logger.info("registered %d tool(s)", len(self._tool_schemas))
+        self._cached_schema_toks = _tok(json.dumps(self._tool_schemas))
+        self._cached_bare_schema_toks = _tok(json.dumps(self._bare_tool_schemas))
+        logger.info(
+            "registered %d tool(s) | schema overhead: %d tok (bare: %d tok)",
+            len(self._tool_schemas),
+            self._cached_schema_toks,
+            self._cached_bare_schema_toks,
+        )
 
     # ------------------------------------------------------------------
     # Message construction helpers
@@ -3564,27 +3627,43 @@ class RPJotEngine:
     # LLM tool loop
     # ------------------------------------------------------------------
 
-    def _guard_payload(self, messages: list) -> list:
+    def _guard_payload(
+        self, messages: list, schema_overhead: int | None = None
+    ) -> list:
         """Pre-call safety guard against exceeding MODEL_CONTEXT_LIMIT_TOKS.
 
         Tiers (capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS):
           < 85%  — debug log only, no action
-          85-99% — WARNING log, no mutation
-          ≥ 100% — WARNING log + targeted reduction:
-                   pass 1: trim oldest tool-result messages proportionally
-                   pass 2: drop oldest non-system messages if still over
+          85-89% — WARNING log, no mutation
+          90-99% — WARNING log + pass 1 (trim oldest tool results)
+          ≥ 100% — WARNING log + pass 1 + pass 2 (drop oldest non-system msgs)
         Never touches role="system" or the final message in the list.
+
+        schema_overhead: token cost of the tools array that will be sent with
+          this call.  Defaults to self._cached_schema_toks (full schemas).
+          Pass self._cached_bare_schema_toks for narrative calls that use stubs.
         """
         capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
-        total = sum(_tok(str(m.get("content") or "")) for m in messages)
+        if schema_overhead is None:
+            schema_overhead = self._cached_schema_toks
+        msg_toks = sum(_tok(str(m.get("content") or "")) for m in messages)
+        total = msg_toks + schema_overhead
         self._last_payload_toks = total
         pct = 100.0 * total / capacity
 
         if pct < 85.0:
-            logger.debug("[CTX] guard: %d tok (%.1f%% of cap=%d)", total, pct, capacity)
+            logger.debug(
+                "[CTX] guard: %d tok (msg=%d schema=%d, %.1f%% of cap=%d)",
+                total,
+                msg_toks,
+                schema_overhead,
+                pct,
+                capacity,
+            )
             return messages
 
-        if total <= capacity:
+        # 85-89%: warn only
+        if pct < 90.0:
             logger.warning(
                 "[CTX] guard: APPROACHING LIMIT — %d tok (%.1f%% of cap=%d)",
                 total,
@@ -3593,15 +3672,24 @@ class RPJotEngine:
             )
             return messages
 
-        # Over limit — reduce
-        logger.warning(
-            "[CTX] guard: OVER LIMIT — %d tok > cap=%d (%.1f%%) — reducing",
-            total,
-            capacity,
-            pct,
-        )
+        # 90-99%: pass 1 only (trim tool results) — reduce proactively before overflow
+        # ≥ 100%: pass 1 + pass 2 (drop messages)
+        if pct < 100.0:
+            logger.warning(
+                "[CTX] guard: NEAR LIMIT — %d tok (%.1f%% of cap=%d) — trimming tool results",
+                total,
+                pct,
+                capacity,
+            )
+        else:
+            logger.warning(
+                "[CTX] guard: OVER LIMIT — %d tok > cap=%d (%.1f%%) — reducing",
+                total,
+                capacity,
+                pct,
+            )
         messages = [dict(m) for m in messages]
-        excess = total - capacity
+        excess = max(total - int(capacity * 0.88), 0)  # trim to ~88% to give headroom
 
         # Pass 1: trim tool-result messages oldest-first, never the last message
         for i in range(len(messages) - 1):
@@ -3627,8 +3715,8 @@ class RPJotEngine:
                 ctoks,
             )
 
-        # Pass 2: drop oldest non-system messages if still over
-        if excess > 0:
+        # Pass 2: drop oldest non-system messages only when actually over limit
+        if excess > 0 and pct >= 100.0:
             for i in range(1, len(messages) - 1):
                 if excess <= 0:
                     break
@@ -3705,23 +3793,47 @@ class RPJotEngine:
             )
             try:
                 response_msg = call_llm(
-                    messages, tools=self._tool_schemas, tool_choice="auto"
+                    messages,
+                    tools=self._tool_schemas,
+                    tool_choice="auto",
+                    max_tokens=MAX_TOKENS_TOOL_DISPATCH,
                 )
             except requests.exceptions.RequestException as exc:
                 raise LLMError(str(exc)) from None
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                # ── Attn + Yomi + narrative synthesis injection ────────────
-                # Gather transient attention state and persisted yomi.
-                # If tools ran at least once OR either signal is present, re-call
-                # the LLM so it generates clean prose primed by staging, social
-                # intuition, and canonical facts.
+                # Capture any think block from the dispatch response itself.
+                # When the model decides not to call tools, its reasoning is
+                # still valuable synthesis material — and we must harvest it
+                # here because the tool-call path below won't run.
+                dispatch_think, dispatch_prose = self.strip_think_tags(
+                    response_msg.get("content", "") or ""
+                )
+                if dispatch_think.strip():
+                    accumulated_think.append(dispatch_think.strip())
+                    logger.debug(
+                        "[SYNTH] captured think block from no-tool dispatch (%d tok)",
+                        _tok(dispatch_think),
+                    )
+
+                # ── Narrative synthesis injection ──────────────────────────
+                # Trigger re-call when:
+                #   1. tools ran at least once this turn (i > 0)
+                #   2. transient state (attn/mood/yomi) is present
+                #   3. dispatch response had no clean prose (model only thought,
+                #      wrote nothing) — avoids returning an empty narrative
                 attn_text = self._gather_attn_for_scene()
                 mood_text = self._gather_mood_for_scene()
                 yomi_text = self._gather_yomi_for_scene()
 
-                if i > 0 or attn_text or mood_text or yomi_text:
+                if (
+                    i > 0
+                    or attn_text
+                    or mood_text
+                    or yomi_text
+                    or not dispatch_prose.strip()
+                ):
                     synthesis = self._build_narrative_synthesis(
                         accumulated_think, canonical_results
                     )
@@ -3752,27 +3864,46 @@ class RPJotEngine:
                         len(canonical_results),
                     )
                     messages.append({"role": "user", "content": injection})
-                    messages = self._guard_payload(messages)
+                    # Narrative guard uses bare schema overhead — stubs are sent,
+                    # not full descriptions, so the real payload is smaller.
+                    messages = self._guard_payload(
+                        messages, schema_overhead=self._cached_bare_schema_toks
+                    )
                     try:
                         response_msg = call_llm(
                             messages,
-                            tools=self._tool_schemas,
+                            tools=self._bare_tool_schemas,
                             tool_choice="none",
                             temperature=NARRATIVE_TEMPERATURE,
+                            max_tokens=MAX_TOKENS_NARRATIVE,
                         )
                     except requests.exceptions.RequestException as exc:
                         raise LLMError(str(exc)) from None
 
                 content = response_msg.get("content", "")
                 history_toks = self._last_payload_toks
+
+                # Advance turn counter; schedule entropy refresh on interval.
+                self._turn_count += 1
+                if (
+                    not self._system_refresh_pending
+                    and self._turn_count % SYSTEM_REFRESH_INTERVAL == 0
+                ):
+                    self._system_refresh_pending = True
+                    logger.info(
+                        "[ENTROPY] turn %d: scheduling system message refresh",
+                        self._turn_count,
+                    )
+
                 logger.info(
                     "[CTX] run_tool_loop EXIT: narrative=%d tok | history=%d tok "
-                    "across %d messages | think_blocks=%d canonical_writes=%d",
+                    "across %d messages | think_blocks=%d canonical_writes=%d | turn=%d",
                     _tok(content),
                     history_toks,
                     len(messages),
                     len(accumulated_think),
                     len(canonical_results),
+                    self._turn_count,
                 )
                 return response_msg
 
