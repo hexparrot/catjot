@@ -10,6 +10,7 @@ from datetime import datetime
 import rpjot as _rpjot_module
 from rpjot import (
     RPJotEngine,
+    LLMError,
     PWD_SUMMARIES,
     TAG_LOC,
     PWD_WORLD,
@@ -166,12 +167,34 @@ def build_initial_messages():
                      never invents people who do not exist
     """
     parts = []
+    backstory_bundle = None
 
     for tag in ("system_role", "story_premise", "twist", "backstory"):
         bundle = ContextBundle(tag)
+        if tag == "backstory":
+            backstory_bundle = bundle
         text = str(bundle).strip()
         if text:
             parts.append(text)
+
+    # Derive a roster lock from backstory so the LLM never invents new named NPCs.
+    # Extract every "char:name" token from backstory note tags, skip "mc" (engine alias).
+    if backstory_bundle:
+        names = sorted(
+            {
+                word[5:]
+                for note in backstory_bundle
+                for word in note.tag.split()
+                if word.startswith("char:") and word != "char:mc"
+            }
+        )
+        if names:
+            parts.append(
+                "NARRATOR RULE — Character Roster Check:\n"
+                f"There are many pre-named characters in this story: {', '.join(names)}.\n"
+                "Verify whether not-yet-named NPCs should adopt any of these characters "
+                "since they might correspond to a created person, but just unknown to mc."
+            )
 
     return [{"role": "system", "content": "\n\n".join(parts)}]
 
@@ -259,7 +282,12 @@ def game_loop(engine):
         # --- Normal player input -> LLM ---
         messages.append(engine.build_user_message(classify_input(user_input)))
 
-        response = engine.run_tool_loop(messages)
+        try:
+            response = engine.run_tool_loop(messages)
+        except LLMError as exc:
+            print(f"[LLM error: {exc}]")
+            messages.pop()
+            continue
 
         think, narrative = RPJotEngine.strip_think_tags(response.get("content", ""))
 

@@ -16,6 +16,8 @@ import logging
 import re
 import sys
 
+import requests
+
 from catjot import (
     Note,
     NoteContext,
@@ -23,6 +25,11 @@ from catjot import (
     ContextBundle,
     call_llm,
 )
+
+
+class LLMError(RuntimeError):
+    """Raised when the LLM endpoint returns an error or is unreachable."""
+
 
 # ---------------------------------------------------------------------------
 # Tokenizer
@@ -1541,6 +1548,83 @@ class RPJotEngine:
         )
         logger.info("get_character result: %d chars of context", len(context_str))
         return result
+
+    @rp_tool(
+        description=(
+            "Scan every character in /story/character to find an established character "
+            "who fits a role you are about to introduce. "
+            "Call this BEFORE naming any new NPC — pass a description of the role "
+            "(e.g. 'head waitstaff', 'personal assistant', 'housekeeper', 'driver'). "
+            "Returns the full roster of known character names and complete profiles "
+            "for any whose tags or backstory contain words from your role description. "
+            "If a match is found, use that character instead of inventing a new name."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "Description of the role or character type you want to introduce "
+                        "(e.g. 'head waitstaff', 'butler', 'eldest daughter', 'family assistant')"
+                    ),
+                },
+            },
+            "required": ["role"],
+        },
+    )
+    def _tool_find_character(self, role: str):
+        """Scan /story/character for established characters matching a role description."""
+        logger.info("ENTER _tool_find_character: role=%r", role)
+
+        role_words = {w.lower() for w in re.split(r"\W+", role) if len(w) > 2}
+
+        roster = []  # all known character slugs
+        matches = []  # full profiles for role-matching characters
+
+        seen_pwds = set()
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, PWD_CHARS)) as nc:
+            for note in nc:
+                if note.pwd in seen_pwds:
+                    continue
+                seen_pwds.add(note.pwd)
+
+                char_name = note.pwd.rstrip("/").split("/")[-1]
+                roster.append(char_name)
+
+                combined = (note.tag + " " + note.message).lower()
+                if role_words and all(w in combined for w in role_words):
+                    matches.append(
+                        {
+                            "name": char_name,
+                            "tags": note.tag,
+                            "profile": note.message.strip(),
+                        }
+                    )
+
+        logger.info(
+            "find_character: role=%r roster=%d matches=%d",
+            role,
+            len(roster),
+            len(matches),
+        )
+
+        followup = (
+            "A matching established character was found — use them instead of "
+            "inventing a new name. Load their full profile with get_character if needed."
+            if matches
+            else "No established character matches this role. "
+            "You may introduce an unnamed background figure, but do NOT give them a "
+            "name unless they are already on the roster."
+        )
+
+        return json.dumps(
+            {
+                "roster": roster,
+                "matches": matches,
+                "followup_instruction": followup,
+            }
+        )
 
     @rp_tool(
         description=(
@@ -3617,9 +3701,12 @@ class RPJotEngine:
                 len(messages),
                 self._last_payload_toks,
             )
-            response_msg = call_llm(
-                messages, tools=self._tool_schemas, tool_choice="auto"
-            )
+            try:
+                response_msg = call_llm(
+                    messages, tools=self._tool_schemas, tool_choice="auto"
+                )
+            except requests.exceptions.RequestException as exc:
+                raise LLMError(str(exc)) from None
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
@@ -3664,12 +3751,15 @@ class RPJotEngine:
                     )
                     messages.append({"role": "user", "content": injection})
                     messages = self._guard_payload(messages)
-                    response_msg = call_llm(
-                        messages,
-                        tools=self._tool_schemas,
-                        tool_choice="none",
-                        temperature=NARRATIVE_TEMPERATURE,
-                    )
+                    try:
+                        response_msg = call_llm(
+                            messages,
+                            tools=self._tool_schemas,
+                            tool_choice="none",
+                            temperature=NARRATIVE_TEMPERATURE,
+                        )
+                    except requests.exceptions.RequestException as exc:
+                        raise LLMError(str(exc)) from None
 
                 content = response_msg.get("content", "")
                 history_toks = self._last_payload_toks
