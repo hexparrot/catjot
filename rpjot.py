@@ -1214,13 +1214,16 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
-            "Move the scene to a new location using its full hierarchical path "
-            "(e.g. 'manor/foyer/closet'). The engine computes the traversal through "
-            "the location hierarchy and provides context for each intermediate room. "
-            "Prefer full hierarchical paths. Single bare names (e.g. 'cellar') are "
-            "interpreted as siblings under the current top-level root. "
-            "Completely different top-level destinations receive direct transport. "
-            "Traversal follows the hierarchy — shortcuts are not yet modeled."
+            "Move the scene to a new location. "
+            "ONLY call this when the player explicitly chooses to move — e.g., they say "
+            "'I go to', 'I follow her', 'I walk toward', 'I head to', 'I step inside', "
+            "or otherwise phrase an active movement decision in their own input. "
+            "NPC invitation, NPC escort arrival, or NPC suggestion to go somewhere is NOT "
+            "player movement. Do not call navigate_to in response to NPC behavior alone — "
+            "the player must consent to move before this tool fires. "
+            "Uses full hierarchical paths (e.g. 'manor/foyer/closet'). "
+            "Prefer full hierarchical paths; single bare names are treated as siblings "
+            "under the current root. Traversal follows the hierarchy."
         ),
         parameters={
             "type": "object",
@@ -1680,20 +1683,18 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
-            "Start a new narrative scene — a cohesive dramatic unit that may span "
-            "multiple locations or involve a changing cast. Call this when: "
-            "(1) a character begins escorting or leading Bartholomew across multiple "
-            "rooms in one continuous movement; "
-            "(2) a distinct new activity begins (a meal, an investigation, a "
-            "confrontation, a tour of the estate); "
-            "(3) multiple characters arrive or depart in a way that shifts the "
-            "scene's dramatic focus. "
-            "Once set, the active scene slug is automatically attached to every "
-            "subsequent record_event, navigate_to, and record_knowledge call — no "
-            "manual tagging needed. "
-            "Calling begin_scene again starts a fresh scene; the old scene's notes "
-            "remain queryable by name via get_scene. "
-            "Err toward calling begin_scene rather than leaving events unanchored."
+            "Start a new named narrative scene — a cohesive dramatic unit anchoring "
+            "subsequent tool calls for retrieval. "
+            "ONLY call this when the player has chosen to engage with a new scene "
+            "context: they explicitly enter a new situation (a meal, an investigation, "
+            "a confrontation), or the player's input clearly marks a new dramatic beat. "
+            "NPC arrivals, invitations, and escort behavior do NOT start a scene — "
+            "wait for the player to respond or consent before calling begin_scene. "
+            "Call at most ONCE per player turn. Do not call it a second time "
+            "within the same tool-call sequence. "
+            "Once set, the scene slug is attached to subsequent record_event and "
+            "record_knowledge calls automatically. "
+            "Old scene notes remain queryable via get_scene."
         ),
         parameters={
             "type": "object",
@@ -3253,6 +3254,16 @@ class RPJotEngine:
     # Message construction helpers
     # ------------------------------------------------------------------
 
+    _NARRATOR_RULE = (
+        "NARRATOR RULE: Respond to exactly what the player just did. "
+        "Do not advance time, change location, or progress the story beyond the "
+        "immediate consequence of this single player input. "
+        "NPC intentions, invitations, and escort behavior are narrative texture — "
+        "they do NOT constitute player consent to move, follow, or transition. "
+        "If an NPC invites or leads, narrate their intent and pause; "
+        "the player chooses whether to comply on their next turn."
+    )
+
     def build_user_message(self, user_input):
         """
         Augment raw user input with the current session state header.
@@ -3260,7 +3271,7 @@ class RPJotEngine:
         Returns:
             dict suitable for appending to a messages list.
         """
-        augmented = f"{self.session.header()}\n{user_input}"
+        augmented = f"{self.session.header()}\n{self._NARRATOR_RULE}\n{user_input}"
         return {"role": "user", "content": augmented}
 
     def build_tool_result_message(self, tool_call_id, result_str):
