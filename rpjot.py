@@ -214,6 +214,9 @@ class SessionState:
         self.location_context = ContextBundle(f"{PWD_WORLD}/{location}")
         self.people_present = set(people_present or [])
         self.current_scene: str = ""
+        self.attention: dict[str, str] = (
+            {}
+        )  # char → what/whom they are focused on (transient)
         logger.info(
             "SessionState created: loc=%s, present=%s",
             self.location,
@@ -235,9 +238,14 @@ class SessionState:
             ", ".join(sorted(self.people_present)) if self.people_present else "none"
         )
         scene_str = f" | scene: {self.current_scene}" if self.current_scene else ""
+        if self.attention:
+            attn_str = " ".join(f"{c}→{f}" for c, f in sorted(self.attention.items()))
+            attn_seg = f" | attn: {attn_str}"
+        else:
+            attn_seg = ""
         h = (
             f"[CURRENT STATE | location: {TAG_LOC}{self.location}"
-            f" | present: {present_str}{scene_str}]"
+            f" | present: {present_str}{scene_str}{attn_seg}]"
         )
         logger.debug("SessionState.header: %s", h)
         return h
@@ -553,6 +561,27 @@ class RPJotEngine:
             len(self.session.people_present),
         )
         return result
+
+    def _gather_attn_for_scene(self) -> str:
+        """Format the current in-memory attention state for pre-narrative injection.
+
+        Returns an empty string when no attention has been set this turn.
+        Not persisted — attention is lost between turns and rebuilt from events.
+        """
+        if not self.session.attention:
+            return ""
+
+        lines = [
+            f"  {char} → {focus}"
+            for char, focus in sorted(self.session.attention.items())
+        ]
+        logger.debug("[ATTN] _gather_attn_for_scene: %d entries", len(lines))
+        return (
+            "SCENE ATTENTION — who is looking at what right now.\n"
+            "Let this shape physical staging, eyeline, and what each character "
+            "can plausibly notice. Characters not looking at each other may miss "
+            "reactions; shared gaze creates shared witness:\n\n" + "\n".join(lines)
+        )
 
     def _gather_yomi_for_scene(self) -> str:
         """Gather stored yomi for all non-protagonist characters in the scene.
@@ -1177,9 +1206,10 @@ class RPJotEngine:
             if ctx_str:
                 intermediate_contexts.append({"location": stop, "context": ctx_str})
 
-        # Update session state
+        # Update session state; attention resets on location change
         self.session.location = to_loc
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{to_loc}")
+        self.session.attention = {}
 
         nav_tag = "nav"
         if self.session.current_scene:
@@ -1241,6 +1271,7 @@ class RPJotEngine:
         """Replace the scene's people list with the provided set."""
         logger.info("ENTER _tool_set_people_present: people=%r", people)
         self.session.people_present = set(people)
+        self.session.attention = {}  # cast changes; attention must be re-established
         logger.info("people_present updated: %s", self.session.people_present)
         present = ", ".join(sorted(self.session.people_present)) or "none"
         return f"Scene people updated: {present}"
@@ -1787,6 +1818,79 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
+            "Establish what each character in the current scene is focused on right "
+            "now — their gaze, object of attention, or mental preoccupation — based "
+            "on the most recent events. "
+            "Call this as the FIRST tool when processing any player action that "
+            "involves social interaction, observation, or physical activity. "
+            "Setting attention early is critical: divergent gazes create asymmetric "
+            "knowledge. If mc is watching aurora while evie's eyes dart between them, "
+            "mc may catch evie's reaction; if mc is staring at the floor, they miss it. "
+            "Attention informs what each character can plausibly observe before "
+            "record_knowledge or prepare_context is called. "
+            "Attention resets automatically on navigation and cast changes. "
+            "Examples of what to capture: a character watching the door after a knock, "
+            "the MC following a taxi out of sight, two guests exchanging a sidelong "
+            "glance, someone studying their own hands in embarrassment."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "attention": {
+                    "type": "array",
+                    "description": "Current focus state for every character in the scene",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "character": {
+                                "type": "string",
+                                "description": "Character slug (e.g. 'mc', 'evie', 'aurora')",
+                            },
+                            "focus": {
+                                "type": "string",
+                                "description": (
+                                    "What or whom they are currently looking at or thinking "
+                                    "about (e.g. 'evie', 'the door', 'their own feet', "
+                                    "'the window', 'the taxi pulling away')"
+                                ),
+                            },
+                        },
+                        "required": ["character", "focus"],
+                    },
+                },
+            },
+            "required": ["attention"],
+        },
+    )
+    def _tool_update_attn(self, attention: list) -> str:
+        """Store the scene's current attention state in session memory (not persisted)."""
+        logger.info("ENTER _tool_update_attn: %d entries", len(attention))
+
+        self.session.attention = {
+            item["character"]: item["focus"] for item in attention
+        }
+
+        summary = ", ".join(
+            f"{c}→{f}" for c, f in sorted(self.session.attention.items())
+        )
+        logger.info("attention updated: %s", summary)
+
+        return json.dumps(
+            {
+                "attention": self.session.attention,
+                "followup_instruction": (
+                    "Attention state captured. Use this map when deciding what each "
+                    "character can observe about the others: a character whose focus is "
+                    "on person X has clear line-of-sight to X's expressions and reactions; "
+                    "a character looking elsewhere may miss subtle signals from others. "
+                    "Let divergent gazes produce asymmetric observations before calling "
+                    "record_knowledge or prepare_context."
+                ),
+            }
+        )
+
+    @rp_tool(
+        description=(
             "Record the main character's intuitive reading of how another character "
             "perceives, feels about, or relates to them — the felt sense of social "
             "dynamics beneath the surface of spoken words. "
@@ -2322,18 +2426,22 @@ class RPJotEngine:
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                # ── Yomi + narrative synthesis injection ───────────────────
-                # Gather yomi for present characters (empty string when none saved).
-                # If tools ran at least once OR yomi exists, re-call the LLM so it
-                # generates clean prose primed by social intuition and canonical facts.
+                # ── Attn + Yomi + narrative synthesis injection ────────────
+                # Gather transient attention state and persisted yomi.
+                # If tools ran at least once OR either signal is present, re-call
+                # the LLM so it generates clean prose primed by staging, social
+                # intuition, and canonical facts.
+                attn_text = self._gather_attn_for_scene()
                 yomi_text = self._gather_yomi_for_scene()
 
-                if i > 0 or yomi_text:
+                if i > 0 or attn_text or yomi_text:
                     synthesis = self._build_narrative_synthesis(
                         accumulated_think, canonical_results
                     )
 
                     injection_parts = []
+                    if attn_text:
+                        injection_parts.append(attn_text)
                     if yomi_text:
                         injection_parts.append(yomi_text)
                     if synthesis:
@@ -2342,7 +2450,8 @@ class RPJotEngine:
                     injection = "\n\n".join(injection_parts)
                     if injection:
                         logger.debug(
-                            "[YOMI/SYNTH] injection: yomi=%s think=%d canonical=%d",
+                            "[ATTN/YOMI/SYNTH] injection: attn=%s yomi=%s think=%d canonical=%d",
+                            bool(attn_text),
                             bool(yomi_text),
                             len(accumulated_think),
                             len(canonical_results),

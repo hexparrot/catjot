@@ -110,7 +110,7 @@ def game_loop(engine):
     messages = build_initial_messages()
 
     print(
-        "Welcome. Type your action. Commands: /quit, /people, /location, /objects, /stats, /yomi <name>"
+        "Welcome. Type your action. Commands: /quit, /people, /location, /objects, /stats, /attn, /yomi <name>"
     )
     print("-" * 60)
 
@@ -145,6 +145,15 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            continue
+
+        if user_input.lower() == "/attn":
+            attn = engine.session.attention
+            if attn:
+                for char, focus in sorted(attn.items()):
+                    print(f"  {char} → {focus}")
+            else:
+                print("[no attention state set this turn]")
             continue
 
         if user_input.lower().startswith("/yomi"):
