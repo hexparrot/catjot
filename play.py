@@ -38,7 +38,9 @@ logger = logging.getLogger("play")
 # Known slash commands (for unknown-command guard)
 # ---------------------------------------------------------------------------
 
-_SLASH_EXACT = frozenset(["/quit", "/people", "/location", "/stats", "/mood", "/attn"])
+_SLASH_EXACT = frozenset(
+    ["/quit", "/people", "/location", "/stats", "/mood", "/attn", "/prompt"]
+)
 _SLASH_PREFIX = ("/objects", "/yomi")
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
@@ -64,7 +66,7 @@ _HELP_TEXT = (
     "  @name   — shift MC focus to person/object; tail is intent toward it\n"
     "  ^text   — MC inner monologue (can seed backstory)\n"
     "Commands: /quit, /people, /location, /objects [name], "
-    "/stats, /mood, /attn, /yomi <name>"
+    "/stats, /mood, /attn, /yomi <name>, /prompt [text]"
 )
 
 
@@ -356,6 +358,24 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            continue
+
+        if user_input.lower().startswith("/prompt"):
+            parts = user_input.split(maxsplit=1)
+            simulated_input = parts[1] if len(parts) > 1 else "[player input here]"
+            sys_msg = messages[0]
+            user_msg = engine.build_user_message(
+                classify_input(simulated_input), build_dynamic_context(engine)
+            )
+            divider = "─" * 60
+            print(f"\n{'═'*60}")
+            print("  FULL PROMPT PREVIEW")
+            print(f"{'═'*60}")
+            print(f"\n[SYSTEM MESSAGE]\n{divider}")
+            print(sys_msg["content"])
+            print(f"{divider}\n[USER MESSAGE]\n{divider}")
+            print(user_msg["content"])
+            print(f"{divider}\n")
             continue
 
         if user_input.lower() == "/mood":

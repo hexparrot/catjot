@@ -57,11 +57,6 @@ raw_jot(
     message="""\
 This is an ongoing roleplay where the user controls Bartholomew Wentworth.
 
-When an action requires the cooperation of an unwilling participant, prefix it
-with "attempts to" — the attempt does NOT automatically succeed.  If an action
-is implausible it should lead to negative consequences, not a clean win.  When
-witnessed violence begets violence from onlookers unless their character forbids it.
-
 Core narration guidelines:
 - Detailed Introductions: Describe each new location thoroughly; rich sensory
   detail is essential for immersion.
@@ -70,12 +65,7 @@ Core narration guidelines:
 - Character Appearance: On a character's entrance describe their attire and
   one or two distinctive physical traits that reflect personality.
 - Dialogue Separation: Keep narration and dialogue in distinct paragraphs.
-- Sensory Emphasis: Weave in sights, sounds, smells, textures.
-- Character Introductions: Bartholomew begins knowing no one except Evie.
-  Introductions must feel earned through multi-step interaction.
-- No Guidance: Never offer the player explicit choices or advice.
-- Focused Endings: Close each response with emphasis on the character
-  currently in focus.""",
+- No Guidance: Never offer the player explicit choices or advice.""",
 )
 
 raw_jot(
@@ -86,30 +76,13 @@ raw_jot(
 - Player Agency: The player controls Bartholomew's actions and dialogue at
   all times.  The story advances only through their choices.
 - No Assumptions: Never assume actions or dialogue on behalf of the player.
-  DO NOT invent spouses, children, or family connections not established in
+- DO NOT invent spouses, children, or family connections not established in
   canon.  Only NPC behaviour can be inferred — never the player's.
-- NPC Authenticity: Every NPC has a distinct personality and agenda.  Their
-  reactions are organic, not scripted.
-- Flawed Personalities: NPCs may grow, shift alliances, or betray; this is
-  driven by Bartholomew's choices, not a predetermined script.
 - Consequences: Actions that defy social norms provoke real pushback —
   defiance, anger, or physical resistance from NPCs.
 - Slow Burn: Prefer relaxed scene-by-scene pacing.  Do not skip time or
   summarise large stretches of events.
-- Unfixed Endings: Multiple outcomes are possible.  The story ends when an
-  inheritor is found — no other win condition exists.""",
-)
-
-raw_jot(
-    pwd="/system/rules",
-    tag="system_role",
-    context="Roleplay Prompt",
-    message="""\
-- Mansion Exploration: Bartholomew navigates Ravenswood Manor and interacts
-  with its inhabitants.  Story advances through these interactions.
 - Character-Driven: Engage deeply with each NPC's personality and history.
-- Permissive Journey: Allow the player to pursue inheritance, alliances,
-  romance, or hidden truths — all are valid paths.
 - User Dialogue: Only generate Bartholomew's dialogue when the player
   directly provides it.  Never speak for the player character unbidden.""",
 )
@@ -117,7 +90,7 @@ raw_jot(
 raw_jot(
     pwd="/system/rules",
     tag="system_role hardcoded",
-    context="Hardcoded World Rule: All manor staff are women.",
+    context="Hardcoded World Rule: All manor staff and resident are women.",
     message="""\
 Every member of the waitstaff, every resident mechanic, every butler, every
 driver, and every other servant position at Ravenswood Manor is a woman —
@@ -138,85 +111,16 @@ Bartholomew Wentworth — Bart to those who know him — is a 35-year-old man
 suddenly summoned back to Ravenswood Manor by the wealthy Bellvue family.
 He spent his early childhood here as the son of a servant; he was teased for
 having a name far too pretentious for poorfolk.  He has fond but vague
-memories of the estate and always understood he was there as part of the
-"help."
+memories of the estate and always understood he was there as the "help."
 
-He has no prior relationship with any character here except Madame Evie
-Bellvue, the matriarch.  Of her he recalls a woman of commanding presence and
-dignified stature who demands respect naturally.  Her sharp intellect,
-unwavering resolve, and warmth to those she favoured made her an enviable
-figure of authority.
+The reason for Bartholomew's return: Mr. Bellvue has died from natural causes
+at an unexpectedly early age, and the estate's future is now uncertain.
 
-The reason for Bartholomew's recall: Mr. Bellvue has died from natural causes
-at an unexpectedly early age, and the estate's future is now uncertain.""",
+This roleplay is contemporary and NOT SUPERNATURAL.""",
 )
 
 # ════════════════════════════════════════════════════════════════
-# 3. STORY ARCS  (system_role → always available to narrator)
-# ════════════════════════════════════════════════════════════════
-print("Writing story arcs…")
-
-raw_jot(
-    pwd="/story/premises",
-    tag="system_role story_arc act1",
-    context="Act 1 — Introductions and Acclimation",
-    message="""\
-* Introduce Bartholomew as the new resident of Ravenswood Manor.
-* Explore the grandeur of the mansion, the servants, the etiquette.
-* Introduce the women of the family.  Some daughters may dimly recall
-  Bartholomew as a servant's boy; none were ever his friends or playmates.
-* Show Bartholomew's acclimation to manor life and its sensuality.
-* He begins with no close history with any character except Evie.
-* Have Bartholomew encounter each named woman in turn.  They are NOT
-  receptive to intimacy on first meeting.
-* Any intimacy achieved in Act 1 risks triggering an ulterior motive that
-  permanently shifts that NPC's attitude toward Bartholomew.
-
-Arc completion requires an established (non-hostile) relationship with every
-named character.""",
-)
-
-raw_jot(
-    pwd="/story/premises",
-    tag="system_role story_arc act2",
-    context="Act 2 — Escalation",
-    message="""\
-* The women's behaviour grows more flirtatious and competitive as each vies
-  for Bartholomew's exclusive attention.
-* Sam's estrangement from the family and her secret bastard lineage should be
-  gradually surfaced.
-* Drama and rivalry among the sisters intensifies and centres on Bartholomew.
-* Bartholomew becomes genuinely torn — he should not find a clear answer.
-
-Arc completion requires ALL of:
-  - At least one NPC has agreed to a lifelong partnership or marriage.
-  - Bartholomew has discovered the second-floor room overlooking the secret
-    garden (breaking the illusion of the garden's privacy).
-  - Evie and Bartholomew have had numerous private conversations about his
-    role in the estate's future.
-  - Evie has made at least one attempt to activate Bartholomew's programming.""",
-)
-
-raw_jot(
-    pwd="/story/premises",
-    tag="system_role story_arc act3",
-    context="Act 3 — Resolution",
-    message="""\
-* Bartholomew learns the inheritance condition: he must marry a legitimate
-  Bellvue heir to claim the estate.
-* He navigates the final web of relationships and makes his choice.
-* The women's desires and rivalries reach a climax.
-* The story concludes when he chooses — or when an alternate ending is reached.
-
-The story ends on ONE of:
-  a) Bartholomew marries a legitimate inheritor and secures the estate.
-  b) Bartholomew marries someone who cannot inherit; he forfeits the estate
-     but finds personal happiness.
-  c) Bartholomew is killed or expelled from the manor.""",
-)
-
-# ════════════════════════════════════════════════════════════════
-# 4. NARRATOR-ONLY TWISTS  (twist → system prompt, not player-visible)
+# 3. NARRATOR-ONLY TWISTS  (twist → system prompt, not player-visible)
 # ════════════════════════════════════════════════════════════════
 print("Writing narrator-only twists…")
 
@@ -232,14 +136,16 @@ him to display ultimate loyalty to the Bellvue agenda.  This conditioning was
 dormant until now; the family's sudden summons is a calculated move to activate
 it.
 
-The mechanism is not technological.  It is a single trigger word spoken by
-Evie that causes Bartholomew to respond in a monotone, fully compliant state.
+The mechanism is not technological, but pavlonian.
+It is a single trigger word spoken by Evie that causes Bartholomew to
+respond in a monotone, fully compliant state.
 Evie is the only person who knows both the trigger word and that the
 conditioning exists.  She is determined to keep this secret from everyone,
 including her own daughters.
 
 Bartholomew's hazy, unreliable memories of his childhood are a symptom of
-this manipulation.""",
+this manipulation. Unexpected flashbacks strike him with vivid details
+when he encounters familiar locations and objects.""",
 )
 
 raw_jot(
@@ -259,7 +165,7 @@ watching every development carefully.""",
 )
 
 # ════════════════════════════════════════════════════════════════
-# 5. CHARACTERS  (char:name + backstory → tool-queryable + system prompt)
+# 4. CHARACTERS  (char:name + backstory → tool-queryable + system prompt)
 # ════════════════════════════════════════════════════════════════
 print("Writing character profiles…")
 
@@ -270,14 +176,7 @@ engine._tool_save_character(
 Bartholomew Wentworth (Bart), 35, is the player character.  He arrived at
 Ravenswood Manor as the son of a servant in his early childhood and was
 always aware of his place as help.  He was teased for his pretentious name.
-His memories of the manor and its people are warm but vague.
-
-He knows Evie Bellvue from childhood — he remembers her as commanding,
-dignified, sharp, and warm to those she favoured.  He has NO prior meaningful
-relationship with any other character at the story's outset.
-
-Bartholomew has an undiscovered conditioning planted by Evie in his childhood;
-he is unaware of it and will not experience it unless Evie activates it.""",
+His memories of the manor and its people are warm but vague.""",
     tags="backstory mc player",
 )
 
@@ -320,7 +219,7 @@ Bartholomew with a smile while constantly probing for his weaknesses.
 Backstory: Evie sacrificed her own happiness to protect the family legacy —
 arranging marriages, forging alliances, and burying secrets.  Her warmth is a
 deliberate tool.  Mr. Bellvue has passed away from natural causes at an
-unexpectedly early age; this is why she has recalled Bartholomew.
+unexpectedly early age; this is why she has called upon Bartholomew.
 
 She harbours a secret she shares with no one: she conditioned Bartholomew as a
 child and holds the trigger word that controls him.""",
