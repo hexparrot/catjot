@@ -17,6 +17,7 @@ from rpjot import (
     PWD_YOMI,
     PWD_REL,
     PWD_INTERIOR,
+    _STEP3_SYSTEM,
 )
 from catjot import Note, ContextBundle, call_llm
 
@@ -269,28 +270,28 @@ def display_think(think):
 # ---------------------------------------------------------------------------
 
 
-def build_initial_messages():
-    """Return the base system message list containing only narration rules.
+def build_step2_initial_messages():
+    """Return the Step 2 (ComplianceStep) initial message list.
 
-    /story/* content (premises, character profiles, twists) is excluded here
-    and injected dynamically per-turn by build_dynamic_context() so that only
-    scene-relevant material reaches the model each turn.
+    System message = gameplay rules (system_role notes).
+    Story/character content is injected per-turn by WorldStateStep.
     """
-    parts = []
-    bundle = ContextBundle("system_role")
-    text = str(bundle).strip()
-    if text:
-        parts.append(text)
-    return [{"role": "system", "content": "\n\n".join(parts)}]
+    text = str(ContextBundle("system_role")).strip()
+    return [{"role": "system", "content": text}]
 
 
-def refresh_system_message(engine, messages):
-    """Replace messages[0] with a high-temperature paraphrase of the original
-    system content.  Called after begin_scene so the model never sees the same
-    preamble token-sequence twice, breaking repetition patterns without losing
-    any factual content.
+def build_step3_initial_messages():
+    """Return the Step 3 (ProseStep) initial message list.
 
-    No-ops (logs a warning) if the LLM call fails so the game continues.
+    System message = prose craft prompt. No gameplay rules — pure narrative.
+    """
+    return [{"role": "system", "content": _STEP3_SYSTEM}]
+
+
+def refresh_system_message(engine, step2_messages):
+    """Paraphrase step2_messages[0] (gameplay rules) to break token-sequence repetition.
+
+    No-ops with a warning if the LLM call fails so the game continues.
     """
     original = str(ContextBundle("system_role")).strip()
     if not original:
@@ -314,14 +315,15 @@ def refresh_system_message(engine, messages):
         engine._system_refresh_pending = False
         return
 
-    messages[0] = {"role": "system", "content": refreshed}
+    step2_messages[0] = {"role": "system", "content": refreshed}
     engine._system_refresh_pending = False
     logger.info("[REFRESH] system message refreshed (%d tok)", len(refreshed.split()))
 
 
 def game_loop(engine):
-    """Main eternal game loop."""
-    messages = build_initial_messages()
+    """Main game loop using the 3-step pipeline."""
+    step2_messages = build_step2_initial_messages()
+    step3_messages = build_step3_initial_messages()
 
     print("Welcome.\n")
     print(_HELP_TEXT)
@@ -363,18 +365,19 @@ def game_loop(engine):
         if user_input.lower().startswith("/prompt"):
             parts = user_input.split(maxsplit=1)
             simulated_input = parts[1] if len(parts) > 1 else "[player input here]"
-            sys_msg = messages[0]
-            user_msg = engine.build_user_message(
-                classify_input(simulated_input), build_dynamic_context(engine)
-            )
+            classified_sim = classify_input(simulated_input)
             divider = "─" * 60
             print(f"\n{'═'*60}")
-            print("  FULL PROMPT PREVIEW")
+            print("  PROMPT PREVIEW (3-step architecture)")
             print(f"{'═'*60}")
-            print(f"\n[SYSTEM MESSAGE]\n{divider}")
-            print(sys_msg["content"])
-            print(f"{divider}\n[USER MESSAGE]\n{divider}")
-            print(user_msg["content"])
+            print(f"\n[STEP 2 SYSTEM (gameplay rules)]\n{divider}")
+            print(step2_messages[0]["content"][:800] + ("..." if len(step2_messages[0]["content"]) > 800 else ""))
+            print(f"{divider}\n[STEP 3 SYSTEM (prose craft)]\n{divider}")
+            print(step3_messages[0]["content"])
+            print(f"{divider}\n[NPC TRACKER]\n{divider}")
+            print(engine.npc_tracker.roster_summary())
+            print(f"{divider}\n[CLASSIFIED INPUT]\n{divider}")
+            print(classified_sim)
             print(f"{divider}\n")
             continue
 
@@ -417,29 +420,22 @@ def game_loop(engine):
                 print(_HELP_TEXT)
                 continue
 
-        # --- Normal player input -> LLM ---
-        dynamic_ctx = build_dynamic_context(engine)
-        messages.append(
-            engine.build_user_message(classify_input(user_input), dynamic_ctx)
-        )
+        # --- Normal player input → 3-step pipeline ---
+        classified = classify_input(user_input)
 
         try:
-            response = engine.run_tool_loop(messages)
+            narrative = engine.run_turn(classified, step2_messages, step3_messages)
         except LLMError as exc:
             print(f"[LLM error: {exc}]")
-            messages.pop()
             continue
 
-        think, narrative = RPJotEngine.strip_think_tags(response.get("content", ""))
-
-        display_think(think)
-
         if not narrative:
-            logger.warning(
-                "[NARRATIVE] empty narrative after stripping — model produced no prose"
-            )
-            messages.append({"role": "assistant", "content": "(no response)"})
+            logger.warning("[NARRATIVE] empty narrative from step 3")
             display_narrative("(The narrator fell silent.)")
+            step2_messages.append({"role": "user", "content": classified})
+            step2_messages.append({"role": "assistant", "content": "(no response)"})
+            step3_messages.append({"role": "user", "content": classified})
+            step3_messages.append({"role": "assistant", "content": "(no response)"})
             continue
 
         display_narrative(narrative)
@@ -447,16 +443,19 @@ def game_loop(engine):
         note = Note.jot(
             message=narrative,
             tag="summary",
-            context=think or user_input,
+            context=user_input,
             pwd=PWD_SUMMARIES,
         )
         Note.append(Note.NOTEFILE, note)
 
-        # Append the final assistant message to history
-        messages.append({"role": "assistant", "content": narrative})
+        # Both histories get the same player input + narrative output
+        step2_messages.append({"role": "user", "content": classified})
+        step2_messages.append({"role": "assistant", "content": narrative})
+        step3_messages.append({"role": "user", "content": classified})
+        step3_messages.append({"role": "assistant", "content": narrative})
 
         if engine._system_refresh_pending:
-            refresh_system_message(engine, messages)
+            refresh_system_message(engine, step2_messages)
 
 
 # ---------------------------------------------------------------------------
@@ -512,11 +511,9 @@ def main():
         people_present={"mc"},
     )
     engine.register_all_tools()
+    engine.init_pipeline()
 
     # Bootstrap the opening scene so current_scene is never empty from turn one.
-    # This ensures gather_pov_context includes scene notes and the entropy
-    # refresh cycle is primed.  The flag is cleared to avoid a gratuitous
-    # paraphrase call before the first player input.
     engine._tool_begin_scene(
         "opening",
         "The story opens at the exterior of Ravenwood Manor. The player character has just arrived "

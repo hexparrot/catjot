@@ -224,18 +224,144 @@ _WRITE_TOOLS = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def rp_tool(description, parameters):
+def rp_tool(description, parameters, *, step: int = 2):
     """Mark a method as an LLM-callable tool.
 
     register_all_tools() discovers all decorated methods and registers them.
     Tool name is derived from the method name by stripping the '_tool_' prefix.
+
+    step=1: read-only world lookup (WorldStateStep)
+    step=2: write / state-change (ComplianceStep) — default
     """
 
     def decorator(fn):
-        fn._rp_tool_meta = (description, parameters)
+        fn._rp_tool_meta = (description, parameters, step)
         return fn
 
     return decorator
+
+
+# ---------------------------------------------------------------------------
+# NPC Tracker
+# ---------------------------------------------------------------------------
+
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class NPCRecord:
+    """In-memory record for one NPC encountered during a play session."""
+
+    slug: str
+    display_name: str
+    named: bool = True
+    central: bool = False
+    location_introduced: str = ""
+    location_last_seen: str = ""
+    intro_purpose: str = ""
+    interacted: bool = False
+    mentioned: bool = False
+    saved: bool = False
+    turns_present: int = 0
+    turns_mentioned: int = 0
+    turn_introduced: int = 0
+    turn_last_active: int = 0
+
+
+class NPCTracker:
+    """In-memory NPC roster for one play session. Not persisted to disk."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, NPCRecord] = {}
+
+    def get(self, slug: str) -> NPCRecord | None:
+        return self._records.get(slug)
+
+    def all(self) -> list[NPCRecord]:
+        return list(self._records.values())
+
+    def named_npcs(self) -> list[NPCRecord]:
+        return [r for r in self._records.values() if r.named]
+
+    def is_registered(self, slug: str) -> bool:
+        return slug in self._records
+
+    def register(
+        self,
+        slug: str,
+        display_name: str,
+        *,
+        named: bool = True,
+        central: bool = False,
+        location: str = "",
+        intro_purpose: str = "",
+        turn: int = 0,
+    ) -> NPCRecord:
+        if slug in self._records:
+            return self._records[slug]
+        rec = NPCRecord(
+            slug=slug,
+            display_name=display_name,
+            named=named,
+            central=central,
+            location_introduced=location,
+            location_last_seen=location,
+            intro_purpose=intro_purpose,
+            turn_introduced=turn,
+        )
+        self._records[slug] = rec
+        return rec
+
+    def mark_interacted(self, slug: str, turn: int = 0) -> None:
+        if r := self._records.get(slug):
+            r.interacted = True
+            r.turn_last_active = turn
+
+    def mark_mentioned(self, slug: str, turn: int = 0) -> None:
+        if r := self._records.get(slug):
+            r.mentioned = True
+            r.turns_mentioned += 1
+            r.turn_last_active = turn
+
+    def mark_saved(self, slug: str) -> None:
+        if r := self._records.get(slug):
+            r.saved = True
+
+    def mark_present(self, slug: str, location: str, turn: int = 0) -> None:
+        if r := self._records.get(slug):
+            r.turns_present += 1
+            r.location_last_seen = location
+            r.turn_last_active = turn
+
+    def mark_central(self, slug: str) -> None:
+        if r := self._records.get(slug):
+            r.central = True
+
+    def roster_summary(self) -> str:
+        if not self._records:
+            return "(no NPCs registered yet)"
+        lines = []
+        for r in sorted(self._records.values(), key=lambda x: x.turn_introduced):
+            flags = []
+            if r.central:
+                flags.append("central")
+            if r.interacted:
+                flags.append("interacted")
+            if r.mentioned and not r.interacted:
+                flags.append("mentioned-only")
+            if not r.named:
+                flags.append("unnamed")
+            if not r.saved:
+                flags.append("not-yet-saved")
+            flag_str = f" [{', '.join(flags)}]" if flags else ""
+            purpose = r.intro_purpose[:60].replace("\n", " ")
+            lines.append(
+                f"- {r.slug} ({r.display_name}){flag_str}"
+                f" | last: {r.location_last_seen}"
+                f" | {purpose}"
+            )
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +423,281 @@ class SessionState:
 
 
 # ---------------------------------------------------------------------------
+# 3-Step pipeline classes
+# ---------------------------------------------------------------------------
+
+# System prompt for Step 1: World State Resolution
+_STEP1_SYSTEM = (
+    "You are a scene intelligence system for a text-based RPG. "
+    "Your only job is to retrieve facts — not to narrate, not to decide what happens. "
+    "Given the player's input and current scene state, call lookup tools to gather "
+    "everything relevant: character profiles, relationships, location details, "
+    "story context, yomi, and conscience constraints. "
+    "After gathering all relevant information, output a structured WORLD STATE document "
+    "summarizing what you found. Be comprehensive — this document feeds both the "
+    "compliance step and the prose step."
+)
+
+# System prompt for Step 3: Narrative Prose
+_STEP3_SYSTEM = (
+    "You are a vivid literary narrator for an immersive text-based roleplay experience. "
+    "Write in second person. Respond to exactly what the player just did — no more, no less. "
+    "Use the World State for atmospheric detail, sensory imagery, and character voice. "
+    "Use the Narrative Facts as the factual skeleton: these things happened this turn and "
+    "must appear in your prose. Do not call tools. Do not plan. Only narrate. "
+    "Write prose that is immersive, sensory, and character-voiced. "
+    "Vary sentence structure and rhythm. Show, do not tell."
+)
+
+MAX_TOKENS_STEP1 = 4_096   # encyclopedic lookup — needs room to gather
+MAX_TOKENS_STEP3 = 3_072   # prose — invest output budget here
+STEP3_TEMPERATURE = 1.2    # higher than legacy NARRATIVE_TEMPERATURE for richer variance
+
+
+class WorldStateStep:
+    """Step 1: Read-only world lookup using step=1 tools.
+
+    Uses its own isolated message list — never touches the main conversation.
+    Output is a WorldStateDoc string injected into ComplianceStep and ProseStep.
+    """
+
+    def __init__(self, engine: "RPJotEngine") -> None:
+        self.engine = engine
+
+    def _build_initial_message(self, classified_input: str) -> str:
+        sess = self.engine.session
+        present = ", ".join(sorted(sess.people_present)) or "none"
+        roster = self.engine.npc_tracker.roster_summary()
+        return (
+            f"SCENE STATE:\n"
+            f"  location: {sess.location}\n"
+            f"  scene: {sess.current_scene or '(none)'}\n"
+            f"  people_present: {present}\n\n"
+            f"NPC TRACKER (session memory):\n{roster}\n\n"
+            f"PLAYER INPUT:\n{classified_input}\n\n"
+            "Gather all relevant facts for this turn using the available tools. "
+            "Then output a WORLD STATE document covering: relevant characters "
+            "(with their profile, conscience, yomi, and relationship notes), "
+            "location atmosphere and objects, and story/scene context."
+        )
+
+    def run(self, classified_input: str) -> str:
+        """Run Step 1 and return the WorldStateDoc string."""
+        engine = self.engine
+        messages = [
+            {"role": "system", "content": _STEP1_SYSTEM},
+            {"role": "user", "content": self._build_initial_message(classified_input)},
+        ]
+
+        tool_results_collected: list[str] = []
+        max_iter = 8
+
+        for i in range(max_iter):
+            messages = engine._guard_payload(
+                messages, schema_overhead=engine._cached_schema_toks
+            )
+            try:
+                response_msg = call_llm(
+                    messages,
+                    tools=engine._step1_schemas,
+                    tool_choice="auto",
+                    max_tokens=MAX_TOKENS_STEP1,
+                    temperature=0.1,
+                )
+            except requests.exceptions.RequestException as exc:
+                logger.warning("[STEP1] LLM call failed: %s", exc)
+                break
+
+            tool_calls = response_msg.get("tool_calls")
+            if not tool_calls:
+                # Final text output from Step 1 is the WorldStateDoc
+                content = response_msg.get("content", "")
+                _, world_doc = engine.strip_think_tags(content)
+                logger.info(
+                    "[STEP1] complete: %d tool rounds, world_doc=%d tok",
+                    i,
+                    _tok(world_doc),
+                )
+                return world_doc.strip() or self._fallback_doc()
+
+            messages.append(response_msg)
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                fn_args = tc["function"]["arguments"]
+                tool_id = tc.get("id", fn_name)
+
+                if fn_name in engine._step1_handlers:
+                    result = engine._step1_handlers[fn_name](
+                        **json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                    )
+                else:
+                    result = json.dumps({"error": f"step1 unknown tool: {fn_name}"})
+
+                logger.debug("[STEP1] tool %s → %s", fn_name, result[:120])
+                tool_results_collected.append(f"[{fn_name}]: {result}")
+                messages.append(
+                    {"role": "tool", "tool_call_id": tool_id, "content": result}
+                )
+
+        logger.warning("[STEP1] max iterations reached; using collected results")
+        return self._fallback_doc(tool_results_collected)
+
+    def _fallback_doc(self, collected: list[str] | None = None) -> str:
+        sess = self.engine.session
+        base = (
+            f"WORLD STATE — {sess.location} | scene: {sess.current_scene or 'none'}\n\n"
+        )
+        if collected:
+            base += "\n\n".join(collected)
+        return base
+
+
+class ComplianceStep:
+    """Step 2: Narrative decisions using step=2 (write) tools.
+
+    Receives the WorldStateDoc from Step 1 as context.
+    Operates on the main step2_messages history (system=gameplay rules).
+    Returns (canonical_results, accumulated_think) for ProseStep.
+    """
+
+    def __init__(self, engine: "RPJotEngine") -> None:
+        self.engine = engine
+
+    def run(
+        self,
+        classified_input: str,
+        world_doc: str,
+        step2_messages: list,
+        max_iterations: int = 10,
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Run Step 2 tool loop. Returns (canonical_results, accumulated_think)."""
+        engine = self.engine
+        canonical_results: list[tuple[str, str]] = []
+        accumulated_think: list[str] = []
+
+        narrator_rule = engine._NARRATOR_RULE
+        user_content_parts = []
+        if world_doc.strip():
+            user_content_parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
+        user_content_parts.append(f"NARRATOR RULE: {narrator_rule}")
+        user_content_parts.append(classified_input)
+
+        messages = list(step2_messages) + [
+            {"role": "user", "content": "\n\n".join(user_content_parts)}
+        ]
+
+        for i in range(max_iterations):
+            messages = engine._guard_payload(messages)
+            try:
+                response_msg = call_llm(
+                    messages,
+                    tools=engine._step2_schemas,
+                    tool_choice="auto",
+                    max_tokens=MAX_TOKENS_TOOL_DISPATCH,
+                )
+            except requests.exceptions.RequestException as exc:
+                logger.warning("[STEP2] LLM call failed: %s", exc)
+                break
+
+            tool_calls = response_msg.get("tool_calls")
+            if not tool_calls:
+                think, _ = engine.strip_think_tags(response_msg.get("content", "") or "")
+                if think.strip():
+                    accumulated_think.append(think.strip())
+                logger.info(
+                    "[STEP2] complete: %d tool rounds, canonical=%d think=%d",
+                    i,
+                    len(canonical_results),
+                    len(accumulated_think),
+                )
+                return canonical_results, accumulated_think
+
+            think, _ = engine.strip_think_tags(response_msg.get("content", "") or "")
+            if think.strip():
+                accumulated_think.append(think.strip())
+
+            messages.append(response_msg)
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                fn_args = tc["function"]["arguments"]
+                tool_id = tc.get("id", fn_name)
+
+                logger.info("[STEP2] tool %s", fn_name)
+                result = engine._dispatch_step2(fn_name, fn_args)
+
+                if fn_name in _WRITE_TOOLS:
+                    canonical_results.append((fn_name, result))
+
+                instruction, tool_msg = engine.build_tool_result_message(tool_id, result)
+                messages.append(tool_msg)
+                if instruction:
+                    messages.append({"role": "user", "content": instruction})
+
+        logger.warning("[STEP2] max iterations reached")
+        return canonical_results, accumulated_think
+
+
+class ProseStep:
+    """Step 3: Pure narrative prose generation. No tools."""
+
+    def __init__(self, engine: "RPJotEngine") -> None:
+        self.engine = engine
+
+    def run(
+        self,
+        classified_input: str,
+        world_doc: str,
+        canonical_results: list[tuple[str, str]],
+        accumulated_think: list[str],
+        step3_messages: list,
+    ) -> str:
+        """Generate final narrative prose. Returns narrative string."""
+        engine = self.engine
+
+        synthesis = engine._build_narrative_synthesis(accumulated_think, canonical_results)
+        attn_text = engine._gather_attn_for_scene()
+        mood_text = engine._gather_mood_for_scene()
+
+        injection_parts = [
+            "PROSE PHASE — write the narrative response now. "
+            "Do not plan or invoke any tools; this is the final prose generation step."
+        ]
+        if world_doc.strip():
+            injection_parts.append(f"WORLD STATE (for atmospheric detail):\n{world_doc}")
+        if attn_text:
+            injection_parts.append(attn_text)
+        if mood_text:
+            injection_parts.append(mood_text)
+        if synthesis:
+            injection_parts.append(synthesis)
+        injection_parts.append(classified_input)
+
+        prose_messages = list(step3_messages) + [
+            {"role": "user", "content": "\n\n".join(injection_parts)}
+        ]
+
+        prose_messages = engine._guard_payload(
+            prose_messages, schema_overhead=engine._cached_bare_schema_toks
+        )
+
+        try:
+            response_msg = call_llm(
+                prose_messages,
+                tools=engine._bare_tool_schemas,
+                tool_choice="none",
+                temperature=STEP3_TEMPERATURE,
+                max_tokens=MAX_TOKENS_STEP3,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise LLMError(str(exc)) from None
+
+        content = response_msg.get("content", "")
+        _, narrative = engine.strip_think_tags(content)
+        logger.info("[STEP3] prose: %d tok", _tok(narrative))
+        return narrative.strip()
+
+
+# ---------------------------------------------------------------------------
 # RPJotEngine
 # ---------------------------------------------------------------------------
 
@@ -313,13 +714,17 @@ class RPJotEngine:
     """
 
     def __init__(self, location, people_present=None, main_character="mc"):
+        # Step-partitioned tool registries
+        self._step1_schemas: list = []   # read-only: WorldStateStep
+        self._step2_schemas: list = []   # write: ComplianceStep
+        self._step1_handlers: dict = {}
+        self._step2_handlers: dict = {}
+        # Legacy alias kept for any code that still references _tool_schemas
         self._tool_schemas: list = []
         self._tool_handlers: dict = {}
-        self._last_payload_toks: int = 0  # updated by _guard_payload each iteration
-        self._cached_schema_toks: int = (
-            0  # full schema overhead, set by register_all_tools
-        )
-        self._cached_bare_schema_toks: int = 0  # stub-only overhead for narrative calls
+        self._last_payload_toks: int = 0
+        self._cached_schema_toks: int = 0
+        self._cached_bare_schema_toks: int = 0
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
         self.main_character = main_character
@@ -327,6 +732,10 @@ class RPJotEngine:
             location=location,
             people_present=people_present or set(),
         )
+        # NPC tracker — grows organically as characters appear via tool calls
+        self.npc_tracker = NPCTracker()
+        for slug in (people_present or set()):
+            self.npc_tracker.register(slug, slug, location=location, turn=0)
         logger.info(
             "RPJotEngine init: loc=%s people=%s mc=%s",
             location,
@@ -340,12 +749,7 @@ class RPJotEngine:
 
     @property
     def _bare_tool_schemas(self) -> list:
-        """Minimal tool stubs — just names, no descriptions or parameter schemas.
-
-        Servers that require a non-empty tools array with tool_choice='none'
-        accept these (~10x fewer tokens than full schemas).  Used for the
-        narrative synthesis call where no tool will actually be invoked.
-        """
+        """Minimal tool stubs (names only) for tool_choice='none' synthesis calls."""
         return [
             {
                 "type": "function",
@@ -354,11 +758,24 @@ class RPJotEngine:
                     "parameters": {"type": "object", "properties": {}},
                 },
             }
-            for s in self._tool_schemas
+            for s in self._step2_schemas
         ]
 
-    def _register_tool(self, name, description, parameters, handler):
-        """Register a tool in the instance-local schema + handler dicts."""
+    @property
+    def _bare_step1_schemas(self) -> list:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": s["function"]["name"],
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for s in self._step1_schemas
+        ]
+
+    def _register_tool(self, name, description, parameters, handler, *, step: int = 2):
+        """Register a tool into the step-partitioned schema + handler dicts."""
         schema = {
             "type": "function",
             "function": {
@@ -367,9 +784,16 @@ class RPJotEngine:
                 "parameters": parameters,
             },
         }
-        self._tool_schemas = [
-            s for s in self._tool_schemas if s["function"]["name"] != name
-        ]
+        if step == 1:
+            self._step1_schemas = [s for s in self._step1_schemas if s["function"]["name"] != name]
+            self._step1_schemas.append(schema)
+            self._step1_handlers[name] = handler
+        else:
+            self._step2_schemas = [s for s in self._step2_schemas if s["function"]["name"] != name]
+            self._step2_schemas.append(schema)
+            self._step2_handlers[name] = handler
+        # Keep legacy flat list for any code still using _tool_schemas/_tool_handlers
+        self._tool_schemas = [s for s in self._tool_schemas if s["function"]["name"] != name]
         self._tool_schemas.append(schema)
         self._tool_handlers[name] = handler
 
@@ -379,6 +803,69 @@ class RPJotEngine:
             return json.dumps({"error": f"unknown tool: {name}"})
         args = json.loads(args_json) if isinstance(args_json, str) else args_json
         return self._tool_handlers[name](**args)
+
+    def _dispatch_step2(self, name: str, args_json) -> str:
+        """Dispatch a Step 2 (write) tool call."""
+        if name not in self._step2_handlers:
+            return json.dumps({"error": f"step2 unknown tool: {name}"})
+        args = json.loads(args_json) if isinstance(args_json, str) else args_json
+        return self._step2_handlers[name](**args)
+
+    def run_turn(
+        self,
+        classified_input: str,
+        step2_messages: list,
+        step3_messages: list,
+    ) -> str:
+        """Orchestrate the 3-step pipeline for one player turn.
+
+        Step 1: WorldStateStep  — encyclopedic read-only lookup
+        Step 2: ComplianceStep  — write tools, state changes
+        Step 3: ProseStep       — pure narrative prose
+
+        Returns the narrative string (Step 3 output). Advances turn counter.
+        The caller is responsible for appending the narrative to both
+        step2_messages and step3_messages as the assistant turn.
+        """
+        logger.info("[TURN %d] run_turn: START", self._turn_count + 1)
+
+        # Step 1
+        world_doc = self._world_state_step.run(classified_input)
+        logger.info("[TURN] step1 done: world_doc=%d tok", _tok(world_doc))
+
+        # Step 2
+        canonical_results, accumulated_think = self._compliance_step.run(
+            classified_input, world_doc, step2_messages
+        )
+        logger.info(
+            "[TURN] step2 done: canonical=%d think=%d",
+            len(canonical_results),
+            len(accumulated_think),
+        )
+
+        # Step 3
+        narrative = self._prose_step.run(
+            classified_input, world_doc, canonical_results, accumulated_think, step3_messages
+        )
+        logger.info("[TURN] step3 done: narrative=%d tok", _tok(narrative))
+
+        # Advance turn counter; schedule entropy refresh
+        self._turn_count += 1
+        if (
+            not self._system_refresh_pending
+            and self._turn_count % SYSTEM_REFRESH_INTERVAL == 0
+        ):
+            self._system_refresh_pending = True
+            logger.info("[ENTROPY] turn %d: scheduling system message refresh", self._turn_count)
+
+        return narrative
+
+    def init_pipeline(self) -> None:
+        """Instantiate the 3-step pipeline objects. Call after register_all_tools()."""
+        self._world_state_step = WorldStateStep(self)
+        self._compliance_step = ComplianceStep(self)
+        self._prose_step = ProseStep(self)
+        logger.info("[PIPELINE] WorldStateStep + ComplianceStep + ProseStep initialized")
 
     # ------------------------------------------------------------------
     # Utility: think-tag stripping
@@ -1145,6 +1632,41 @@ class RPJotEngine:
             "  because condensation is not applied here."
         )
 
+        # ── NPC TRACKER ──────────────────────────────────────────────────
+        lines.append(f"\n{HDR}")
+        lines.append("  NPC TRACKER (session memory)")
+        lines.append(HDR)
+        tracker_records = self.npc_tracker.all()
+        if tracker_records:
+            for rec in sorted(tracker_records, key=lambda r: r.turn_introduced):
+                flags = []
+                if rec.central:
+                    flags.append("central")
+                if rec.interacted:
+                    flags.append("interacted")
+                if rec.mentioned and not rec.interacted:
+                    flags.append("mentioned-only")
+                if not rec.named:
+                    flags.append("unnamed")
+                if not rec.saved:
+                    flags.append("not-yet-saved")
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
+                # Rough backstory token cost
+                char_bundle = list(ContextBundle(f"{PWD_CHARS}/{rec.slug}"))
+                char_toks = _note_toks(char_bundle)
+                lines.append(
+                    f"    {rec.slug:<20}{flag_str:<30}"
+                    f"  last: {rec.location_last_seen:<25}"
+                    f"  backstory: {char_toks:>5} tok"
+                )
+        else:
+            lines.append("    (no NPCs registered yet)")
+        lines.append(HDR)
+
+        # ── STEP TOOL COUNTS ─────────────────────────────────────────────
+        lines.append(f"\n  Step 1 tools: {len(self._step1_schemas)}")
+        lines.append(f"  Step 2 tools: {len(self._step2_schemas)}")
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -1231,6 +1753,7 @@ class RPJotEngine:
             "type": "object",
             "properties": {},
         },
+        step=1,
     )
     def _tool_get_people_present(self):
         """Return who is currently in the scene."""
@@ -1259,6 +1782,7 @@ class RPJotEngine:
             "type": "object",
             "properties": {},
         },
+        step=1,
     )
     def _tool_examine_location(self):
         """Return the objects and people in the current location."""
@@ -1352,6 +1876,11 @@ class RPJotEngine:
         self.session.mood = {}
         self._cache_drop("social_map")
 
+        # NPC tracker: update last-seen location for all present NPCs
+        for slug in self.session.people_present:
+            if slug != self.main_character:
+                self.npc_tracker.mark_present(slug, to_loc, self._turn_count)
+
         nav_tag = "nav"
         if self.session.current_scene:
             nav_tag += f" {TAG_SCENE}{self.session.current_scene}"
@@ -1412,11 +1941,19 @@ class RPJotEngine:
         """Replace the scene's people list with the provided set."""
         logger.info("ENTER _tool_set_people_present: people=%r", people)
         self.session.people_present = set(people)
-        self.session.attention = (
-            {}
-        )  # cast change; attention and mood must be re-established
+        self.session.attention = {}
         self.session.mood = {}
         self._cache_drop("social_map")
+
+        # NPC tracker: register any new characters and mark them as present
+        for slug in people:
+            if slug != self.main_character:
+                if not self.npc_tracker.is_registered(slug):
+                    self.npc_tracker.register(
+                        slug, slug, location=self.session.location, turn=self._turn_count
+                    )
+                self.npc_tracker.mark_present(slug, self.session.location, self._turn_count)
+
         logger.info("people_present updated: %s", self.session.people_present)
         present = ", ".join(sorted(self.session.people_present)) or "none"
         return f"Scene people updated: {present}"
@@ -1462,6 +1999,14 @@ class RPJotEngine:
         )
         Note.append(Note.NOTEFILE, note)
         self._cache_drop(f"char:{name}")
+
+        # NPC tracker: register if new, mark as saved and central
+        if not self.npc_tracker.is_registered(name):
+            self.npc_tracker.register(
+                name, name, location=self.session.location, turn=self._turn_count
+            )
+        self.npc_tracker.mark_saved(name)
+        self.npc_tracker.mark_central(name)
 
         logger.info("character saved: %s", name)
         return f"Character saved: {name}"
@@ -1584,6 +2129,7 @@ class RPJotEngine:
             },
             "required": ["name"],
         },
+        step=1,
     )
     def _tool_get_character(self, name: str):
         """Return saved character notes as context for the LLM."""
@@ -1627,6 +2173,7 @@ class RPJotEngine:
             },
             "required": ["role"],
         },
+        step=1,
     )
     def _tool_find_character(self, role: str):
         """Scan /story/character for established characters matching a role description."""
@@ -1656,6 +2203,18 @@ class RPJotEngine:
                             "profile": note.message.strip(),
                         }
                     )
+
+        # NPC tracker: register any roster characters not yet tracked
+        for char_name in roster:
+            if not self.npc_tracker.is_registered(char_name):
+                self.npc_tracker.register(
+                    char_name,
+                    char_name,
+                    named=True,
+                    location=self.session.location,
+                    turn=self._turn_count,
+                )
+            self.npc_tracker.mark_saved(char_name)
 
         logger.info(
             "find_character: role=%r roster=%d matches=%d",
@@ -1700,6 +2259,7 @@ class RPJotEngine:
             },
             "required": ["query"],
         },
+        step=1,
     )
     def _tool_search_world(self, query: str):
         """Search world notes and return matching context for the LLM."""
@@ -1914,6 +2474,7 @@ class RPJotEngine:
             },
             "required": [],
         },
+        step=1,
     )
     def _tool_get_scene(self, name: str = "") -> str:
         """Return all notes for a named (or current) scene."""
@@ -2204,6 +2765,7 @@ class RPJotEngine:
             },
             "required": ["character"],
         },
+        step=1,
     )
     def _tool_get_yomi(self, character: str) -> str:
         """Return stored yomi insights for a character."""
@@ -2250,6 +2812,7 @@ class RPJotEngine:
             },
             "required": [],
         },
+        step=1,
     )
     def _tool_get_conscience(self, character: str = "mc") -> str:
         """Return all conscience constraints recorded for a character."""
@@ -2300,6 +2863,7 @@ class RPJotEngine:
             },
             "required": [],
         },
+        step=1,
     )
     def _tool_prepare_context(self, focus_hint: str = "") -> str:
         """Assemble and condense per-character POV context for the current scene."""
@@ -3280,6 +3844,7 @@ class RPJotEngine:
             },
             "required": ["char_a", "char_b"],
         },
+        step=1,
     )
     def _tool_get_relationship_arc(self, char_a: str, char_b: str) -> str:
         logger.info("ENTER _tool_get_relationship_arc: %r ↔ %r", char_a, char_b)
@@ -3324,6 +3889,7 @@ class RPJotEngine:
             "type": "object",
             "properties": {},
         },
+        step=1,
     )
     def _tool_get_social_map(self) -> str:
         logger.info("ENTER _tool_get_social_map")
@@ -3387,57 +3953,30 @@ class RPJotEngine:
     # Tool registration
     # ------------------------------------------------------------------
 
-    # Tools listed here are skipped during registration.  Remove a name to re-enable it.
-    _DISABLED_TOOLS: frozenset = frozenset(
-        {
-            "record_bond",
-            "record_history",
-            "record_dynamic",
-            "record_power_dynamic",
-            "record_wound",
-            "record_promise",
-            "record_debt",
-            "record_lie",
-            "record_leverage",
-            "record_impression",
-            "record_secret",
-            "record_desire",
-            "record_longing",
-            "record_jealousy",
-            "record_mask",
-            "record_subtext",
-            "record_reputation",
-            "record_trigger",
-            "record_unspoken",
-            "record_mood",
-            "get_relationship_arc",
-            "get_social_map",
-        }
-    )
-
     def register_all_tools(self):
-        """
-        Discover and register all @rp_tool-decorated methods.
-        Must be called before run_tool_loop.
+        """Discover and register all @rp_tool-decorated methods into step partitions.
+
+        step=1 tools → _step1_schemas/_step1_handlers  (WorldStateStep)
+        step=2 tools → _step2_schemas/_step2_handlers  (ComplianceStep)
+        All tools also populate the legacy _tool_schemas/_tool_handlers for
+        backward compatibility with run_tool_loop.
         """
         logger.info("ENTER register_all_tools")
 
         for attr_name in dir(self.__class__):
             fn = getattr(self.__class__, attr_name)
             if callable(fn) and hasattr(fn, "_rp_tool_meta"):
-                description, parameters = fn._rp_tool_meta
+                description, parameters, step = fn._rp_tool_meta
                 bound = getattr(self, attr_name)
                 tool_name = attr_name.removeprefix("_tool_")
-                if tool_name in self._DISABLED_TOOLS:
-                    logger.debug("skipping disabled tool: %s", tool_name)
-                    continue
-                self._register_tool(tool_name, description, parameters, bound)
+                self._register_tool(tool_name, description, parameters, bound, step=step)
 
         self._cached_schema_toks = _tok(json.dumps(self._tool_schemas))
         self._cached_bare_schema_toks = _tok(json.dumps(self._bare_tool_schemas))
         logger.info(
-            "registered %d tool(s) | schema overhead: %d tok (bare: %d tok)",
-            len(self._tool_schemas),
+            "registered step1=%d step2=%d tools | schema overhead: %d tok (bare: %d tok)",
+            len(self._step1_schemas),
+            len(self._step2_schemas),
             self._cached_schema_toks,
             self._cached_bare_schema_toks,
         )
