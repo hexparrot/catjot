@@ -3456,15 +3456,25 @@ class RPJotEngine:
         "the player chooses whether to comply on their next turn."
     )
 
-    def build_user_message(self, user_input):
+    def build_user_message(self, user_input, dynamic_context=""):
         """
         Augment raw user input with the current session state header.
+
+        Args:
+            user_input:       classified player input string.
+            dynamic_context:  optional per-turn story context from build_dynamic_context();
+                              prepended as a SCENE CONTEXT block when non-empty.
 
         Returns:
             dict suitable for appending to a messages list.
         """
-        augmented = f"{self.session.header()}\n{self._NARRATOR_RULE}\n{user_input}"
-        return {"role": "user", "content": augmented}
+        parts = []
+        if dynamic_context:
+            parts.append(f"SCENE CONTEXT:\n{dynamic_context}")
+        parts.append(self.session.header())
+        parts.append(self._NARRATOR_RULE)
+        parts.append(user_input)
+        return {"role": "user", "content": "\n\n".join(parts)}
 
     def build_tool_result_message(self, tool_call_id, result_str):
         """
@@ -3823,6 +3833,9 @@ class RPJotEngine:
                 #   2. transient state (attn/mood/yomi) is present
                 #   3. dispatch response had no clean prose (model only thought,
                 #      wrote nothing) — avoids returning an empty narrative
+                #   4. model produced a think block (even alongside prose) —
+                #      ensures high-temperature re-generation to prevent the
+                #      low-temp dispatch prose from repeating across turns
                 attn_text = self._gather_attn_for_scene()
                 mood_text = self._gather_mood_for_scene()
                 yomi_text = self._gather_yomi_for_scene()
@@ -3833,6 +3846,7 @@ class RPJotEngine:
                     or mood_text
                     or yomi_text
                     or not dispatch_prose.strip()
+                    or bool(accumulated_think)
                 ):
                     synthesis = self._build_narrative_synthesis(
                         accumulated_think, canonical_results
@@ -3863,15 +3877,16 @@ class RPJotEngine:
                         len(accumulated_think),
                         len(canonical_results),
                     )
-                    messages.append({"role": "user", "content": injection})
-                    # Narrative guard uses bare schema overhead — stubs are sent,
-                    # not full descriptions, so the real payload is smaller.
-                    messages = self._guard_payload(
-                        messages, schema_overhead=self._cached_bare_schema_toks
+                    # Build a private copy for the synthesis call so the
+                    # injection directive is never written into the shared
+                    # message history (it is a one-shot prompt, not canon).
+                    synth_messages = self._guard_payload(
+                        list(messages) + [{"role": "user", "content": injection}],
+                        schema_overhead=self._cached_bare_schema_toks,
                     )
                     try:
                         response_msg = call_llm(
-                            messages,
+                            synth_messages,
                             tools=self._bare_tool_schemas,
                             tool_choice="none",
                             temperature=NARRATIVE_TEMPERATURE,

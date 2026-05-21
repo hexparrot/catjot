@@ -138,6 +138,112 @@ def query_object_context(engine, object_name=None):
     return str(ctx) or "[no object notes found in current scene]"
 
 
+def build_dynamic_context(engine) -> str:
+    """Return /story/* context relevant to the current scene.
+
+    Strategy (all naive, no LLM calls):
+      1. Location notes for the current location hierarchy — always included.
+      2. "Domain tags" extracted from those location notes (descriptive tags
+         like 'bellvue_family', 'manor', excluding structural/prefixed tags).
+         Character backstory notes and premise/twist notes that share any
+         domain tag are included.
+      3. Characters explicitly present in the scene (people_present) are
+         always included regardless of tag overlap.
+      4. Text-based fallback: notes whose text contains a present NPC name
+         or the current scene slug are also included.
+      5. The MC profile is always included (domain_tags seeded with 'mc').
+    """
+    _STRUCTURAL_PREFIXES = (
+        "loc:",
+        "scene:",
+        "char:",
+        "exp:",
+        "know:",
+        "cons:",
+        "yomi:",
+        "rel:",
+        "int:",
+    )
+    _STRUCTURAL_TAGS = frozenset(
+        {
+            "backstory",
+            "system_role",
+            "story_premise",
+            "twist",
+            "hardcoded",
+            "fixed_story",
+            "alternate_story",
+        }
+    )
+
+    parts = []
+
+    # 1. Location hierarchy notes (always included)
+    ancestor_dirs = [f"{PWD_WORLD}/{a}" for a in engine.session.location_ancestors]
+    loc_bundle = engine.gather_context(ancestor_dirs) if ancestor_dirs else None
+    if loc_bundle:
+        loc_text = str(loc_bundle).strip()
+        if loc_text:
+            parts.append(loc_text)
+
+    # Seed domain tags with MC sentinel so the MC's backstory is always loaded
+    domain_tags: set = {"mc", "player"}
+    if loc_bundle:
+        for note in loc_bundle:
+            for word in note.tag.split():
+                if (
+                    not any(word.startswith(p) for p in _STRUCTURAL_PREFIXES)
+                    and word not in _STRUCTURAL_TAGS
+                ):
+                    domain_tags.add(word)
+
+    # Text-based fallback terms: present NPCs + current scene slug
+    present_npcs = {c for c in engine.session.people_present if c != "mc"}
+    text_terms: set = set(present_npcs)
+    if engine.session.current_scene:
+        text_terms.add(engine.session.current_scene)
+
+    # 2. Character backstory notes: domain-tag overlap OR present in scene OR text match
+    char_matched: list = []
+    seen_chars: set = set()
+    for note in ContextBundle("backstory"):
+        char_name = next(
+            (
+                w[5:]
+                for w in note.tag.split()
+                if w.startswith("char:") and w != "char:mc"
+            ),
+            None,
+        )
+        if not char_name or char_name in seen_chars:
+            continue
+        note_tags = set(note.tag.split())
+        note_text = f"{note.context} {note.message}".lower()
+        if (
+            char_name in present_npcs
+            or bool(note_tags & domain_tags)
+            or any(t.lower() in note_text for t in text_terms)
+        ):
+            seen_chars.add(char_name)
+            char_matched.append(f"{note.context.strip()}\n\n{note.message.strip()}")
+    if char_matched:
+        parts.append("\n\n".join(char_matched))
+
+    # 3. Premise/twist notes: domain-tag overlap OR text match
+    premise_matched: list = []
+    for note in ContextBundle(["story_premise", "twist"]):
+        note_tags = set(note.tag.split())
+        note_text = f"{note.context} {note.message}".lower()
+        if bool(note_tags & domain_tags) or any(
+            t.lower() in note_text for t in text_terms
+        ):
+            premise_matched.append(f"{note.context.strip()}\n\n{note.message.strip()}")
+    if premise_matched:
+        parts.append("\n\n".join(premise_matched))
+
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Display helpers
 # ---------------------------------------------------------------------------
@@ -162,50 +268,17 @@ def display_think(think):
 
 
 def build_initial_messages():
-    """Return the base system message list, seeded with Bellvue campaign data.
+    """Return the base system message list containing only narration rules.
 
-    Loads four groups from the canonical seed into the system prompt so the
-    LLM narrator has authoritative context from turn one without tool calls:
-
-      system_role  — RP/gameplay rules, story arcs, hardcoded world facts,
-                     and narrator-only twist secrets
-      story_premise — who mc is and why theyre where they are
-      twist        — additional narrator secrets (belt-and-suspenders query
-                     in case a twist note loses the system_role tag)
-      backstory    — every named character's public profile (8 notes), giving
-                     the narrator the canonical character roster upfront so it
-                     never invents people who do not exist
+    /story/* content (premises, character profiles, twists) is excluded here
+    and injected dynamically per-turn by build_dynamic_context() so that only
+    scene-relevant material reaches the model each turn.
     """
     parts = []
-    backstory_bundle = None
-
-    for tag in ("system_role", "story_premise", "twist", "backstory"):
-        bundle = ContextBundle(tag)
-        if tag == "backstory":
-            backstory_bundle = bundle
-        text = str(bundle).strip()
-        if text:
-            parts.append(text)
-
-    # Derive a roster lock from backstory so the LLM never invents new named NPCs.
-    # Extract every "char:name" token from backstory note tags, skip "mc" (engine alias).
-    if backstory_bundle:
-        names = sorted(
-            {
-                word[5:]
-                for note in backstory_bundle
-                for word in note.tag.split()
-                if word.startswith("char:") and word != "char:mc"
-            }
-        )
-        if names:
-            parts.append(
-                "NARRATOR RULE — Character Roster Check:\n"
-                f"There are many pre-named characters in this story: {', '.join(names)}.\n"
-                "Verify whether not-yet-named NPCs should adopt any of these characters "
-                "since they might correspond to a created person, but just unknown to mc."
-            )
-
+    bundle = ContextBundle("system_role")
+    text = str(bundle).strip()
+    if text:
+        parts.append(text)
     return [{"role": "system", "content": "\n\n".join(parts)}]
 
 
@@ -217,18 +290,11 @@ def refresh_system_message(engine, messages):
 
     No-ops (logs a warning) if the LLM call fails so the game continues.
     """
-    parts = []
-    for tag in ("system_role", "story_premise", "twist", "backstory"):
-        text = str(ContextBundle(tag)).strip()
-        if text:
-            parts.append(text)
-
-    if not parts:
+    original = str(ContextBundle("system_role")).strip()
+    if not original:
         logger.warning("[REFRESH] no system content found; skipping refresh")
         engine._system_refresh_pending = False
         return
-
-    original = "\n\n".join(parts)
     prompt_messages = [
         {"role": "system", "content": _PARAPHRASE_INSTRUCTION},
         {"role": "user", "content": original},
@@ -332,7 +398,10 @@ def game_loop(engine):
                 continue
 
         # --- Normal player input -> LLM ---
-        messages.append(engine.build_user_message(classify_input(user_input)))
+        dynamic_ctx = build_dynamic_context(engine)
+        messages.append(
+            engine.build_user_message(classify_input(user_input), dynamic_ctx)
+        )
 
         try:
             response = engine.run_tool_loop(messages)
