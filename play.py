@@ -371,7 +371,10 @@ def game_loop(engine):
             print("  PROMPT PREVIEW (3-step architecture)")
             print(f"{'═'*60}")
             print(f"\n[STEP 2 SYSTEM (gameplay rules)]\n{divider}")
-            print(step2_messages[0]["content"][:800] + ("..." if len(step2_messages[0]["content"]) > 800 else ""))
+            print(
+                step2_messages[0]["content"][:800]
+                + ("..." if len(step2_messages[0]["content"]) > 800 else "")
+            )
             print(f"{divider}\n[STEP 3 SYSTEM (prose craft)]\n{divider}")
             print(step3_messages[0]["content"])
             print(f"{divider}\n[NPC TRACKER]\n{divider}")

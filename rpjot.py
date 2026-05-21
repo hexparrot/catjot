@@ -11,12 +11,17 @@ Gameplay logic lives elsewhere. This class owns:
 __author__ = "William Dizon"
 __version__ = "0.2.0"
 
+# ---------------------------------------------------------------------------
+# Imports
+# ---------------------------------------------------------------------------
+
 import json
 import logging
 import re
 import sys
 
 import requests
+from dataclasses import dataclass, field as _dc_field
 
 from catjot import (
     Note,
@@ -32,8 +37,9 @@ class LLMError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Tokenizer
+# Constants
 # ---------------------------------------------------------------------------
+# Tokenizer
 # Use the cl100k_base pre-tokenizer regex (same pattern tiktoken uses before
 # applying BPE merges).  For English prose this gives token counts within ~5%
 # of the real BPE count without needing the vocab file or any network access.
@@ -185,7 +191,7 @@ NARRATIVE_TEMPERATURE = (
 # For models without thinking, these are simple output length caps.
 # Tune per model: a local non-thinking model can use smaller values.
 MAX_TOKENS_CONDENSE = 2_048  # context distillation / scene-object extraction
-MAX_TOKENS_TOOL_DISPATCH = 2_048  # tool selection + JSON arguments
+MAX_TOKENS_STEP2 = 4_096  # ComplianceStep — more room for multi-tool chains
 MAX_TOKENS_NARRATIVE = 2_048  # final prose generation
 
 # ---------------------------------------------------------------------------
@@ -196,28 +202,32 @@ MAX_TOKENS_NARRATIVE = 2_048  # final prose generation
 # paraphrased at least every N player turns even if the scene never changes.
 SYSTEM_REFRESH_INTERVAL = 8
 
-# Tools whose results contain newly written canonical material worth surfacing to the narrative.
-# Query tools (get_character, search_world, prepare_context, etc.) are excluded because
-# they return existing lore already visible in the context window.
-_WRITE_TOOLS = frozenset(
-    {
-        "record_event",
-        "navigate_to",
-        "set_people_present",
-        "save_character",
-        "save_location",
-        "save_object",
-        "begin_scene",
-        "record_knowledge",
-        "record_conscience",
-        # interpersonal — high narrative salience when established mid-scene
-        "record_bond",
-        "record_history",
-        "record_wound",
-        "record_promise",
-        "record_impression",
-    }
+# System prompt for Step 1: World State Resolution
+_STEP1_SYSTEM = (
+    "You are a scene intelligence system for a text-based RPG. "
+    "Your only job is to retrieve facts — not to narrate, not to decide what happens. "
+    "Given the player's input and current scene state, call lookup tools to gather "
+    "everything relevant: character profiles, relationships, location details, "
+    "story context, yomi, and conscience constraints. "
+    "After gathering all relevant information, output a structured WORLD STATE document "
+    "summarizing what you found. Be comprehensive — this document feeds both the "
+    "compliance step and the prose step."
 )
+
+# System prompt for Step 3: Narrative Prose
+_STEP3_SYSTEM = (
+    "You are a vivid literary narrator for an immersive text-based roleplay experience. "
+    "Write in second person. Respond to exactly what the player just did — no more, no less. "
+    "Use the World State for atmospheric detail, sensory imagery, and character voice. "
+    "Use the Narrative Facts as the factual skeleton: these things happened this turn and "
+    "must appear in your prose. Do not call tools. Do not plan. Only narrate. "
+    "Write prose that is immersive, sensory, and character-voiced. "
+    "Vary sentence structure and rhythm. Show, do not tell."
+)
+
+MAX_TOKENS_STEP1 = 4_096  # encyclopedic lookup — needs room to gather
+MAX_TOKENS_STEP3 = 3_072  # prose — invest output budget here
+STEP3_TEMPERATURE = 1.2  # higher than legacy NARRATIVE_TEMPERATURE for richer variance
 
 # ---------------------------------------------------------------------------
 # Tool decorator
@@ -244,9 +254,6 @@ def rp_tool(description, parameters, *, step: int = 2):
 # ---------------------------------------------------------------------------
 # NPC Tracker
 # ---------------------------------------------------------------------------
-
-
-from dataclasses import dataclass, field as _dc_field
 
 
 @dataclass
@@ -426,33 +433,6 @@ class SessionState:
 # 3-Step pipeline classes
 # ---------------------------------------------------------------------------
 
-# System prompt for Step 1: World State Resolution
-_STEP1_SYSTEM = (
-    "You are a scene intelligence system for a text-based RPG. "
-    "Your only job is to retrieve facts — not to narrate, not to decide what happens. "
-    "Given the player's input and current scene state, call lookup tools to gather "
-    "everything relevant: character profiles, relationships, location details, "
-    "story context, yomi, and conscience constraints. "
-    "After gathering all relevant information, output a structured WORLD STATE document "
-    "summarizing what you found. Be comprehensive — this document feeds both the "
-    "compliance step and the prose step."
-)
-
-# System prompt for Step 3: Narrative Prose
-_STEP3_SYSTEM = (
-    "You are a vivid literary narrator for an immersive text-based roleplay experience. "
-    "Write in second person. Respond to exactly what the player just did — no more, no less. "
-    "Use the World State for atmospheric detail, sensory imagery, and character voice. "
-    "Use the Narrative Facts as the factual skeleton: these things happened this turn and "
-    "must appear in your prose. Do not call tools. Do not plan. Only narrate. "
-    "Write prose that is immersive, sensory, and character-voiced. "
-    "Vary sentence structure and rhythm. Show, do not tell."
-)
-
-MAX_TOKENS_STEP1 = 4_096   # encyclopedic lookup — needs room to gather
-MAX_TOKENS_STEP3 = 3_072   # prose — invest output budget here
-STEP3_TEMPERATURE = 1.2    # higher than legacy NARRATIVE_TEMPERATURE for richer variance
-
 
 class WorldStateStep:
     """Step 1: Read-only world lookup using step=1 tools.
@@ -468,18 +448,67 @@ class WorldStateStep:
         sess = self.engine.session
         present = ", ".join(sorted(sess.people_present)) or "none"
         roster = self.engine.npc_tracker.roster_summary()
+
+        baseline = self._build_baseline_context(classified_input)
+
         return (
             f"SCENE STATE:\n"
             f"  location: {sess.location}\n"
             f"  scene: {sess.current_scene or '(none)'}\n"
             f"  people_present: {present}\n\n"
-            f"NPC TRACKER (session memory):\n{roster}\n\n"
+            f"NPC TRACKER (session memory — every named character on file):\n{roster}\n\n"
+            f"{baseline}\n"
             f"PLAYER INPUT:\n{classified_input}\n\n"
-            "Gather all relevant facts for this turn using the available tools. "
-            "Then output a WORLD STATE document covering: relevant characters "
-            "(with their profile, conscience, yomi, and relationship notes), "
-            "location atmosphere and objects, and story/scene context."
+            "The BASELINE CONTEXT above is a deterministic snapshot of the current scene "
+            "and the characters present. Use it as the foundation of your WORLD STATE "
+            "document. Then enrich it via tool calls: look up any character mentioned in "
+            "the player input but not yet present, fetch yomi/conscience/relationships as "
+            "needed, search for relevant lore. Output a WORLD STATE document covering "
+            "every character in the scene, location atmosphere, and story/scene context."
         )
+
+    def _build_baseline_context(self, classified_input: str) -> str:
+        """Deterministic per-scene context — pulled directly from notes.
+
+        Guarantees that the LLM always sees the present characters' full
+        backstories and the shared location snapshot exactly once, even if
+        every tool call is skipped.
+        """
+        engine = self.engine
+        sess = engine.session
+        focus = classified_input or None
+
+        parts = ["BASELINE CONTEXT (deterministic — already loaded from notes):"]
+
+        try:
+            shared_terms = [f"{PWD_WORLD}/{a}" for a in sess.location_ancestors]
+            shared_bundle = engine.gather_context(shared_terms)
+            shared = engine.render_context(
+                shared_bundle, focus_hint=focus or ""
+            ).strip()
+        except Exception as exc:
+            logger.warning("[STEP1] baseline shared-context build failed: %s", exc)
+            shared = ""
+        if shared:
+            parts.append(f"\n[LOCATION & SHARED LORE]\n{shared}")
+
+        empty = []
+        for name in sorted(sess.people_present):
+            try:
+                bundle = engine.gather_character_knowledge(name)
+                pov = engine.render_context(bundle, focus_hint=name).strip()
+            except Exception as exc:
+                logger.warning(
+                    "[STEP1] baseline char-context build failed (%s): %s", name, exc
+                )
+                pov = ""
+            if pov:
+                parts.append(f"\n[{name.upper()} — CHARACTER PROFILE]\n{pov}")
+            else:
+                empty.append(name)
+        if empty:
+            parts.append(f"\n[NO CHARACTER NOTES ON FILE FOR]: {', '.join(empty)}")
+        return "\n".join(parts) + "\n"
 
     def run(self, classified_input: str) -> str:
         """Run Step 1 and return the WorldStateDoc string."""
@@ -494,7 +523,7 @@ class WorldStateStep:
 
         for i in range(max_iter):
             messages = engine._guard_payload(
-                messages, schema_overhead=engine._cached_schema_toks
+                messages, schema_overhead=engine._cached_step1_schema_toks
             )
             try:
                 response_msg = call_llm(
@@ -543,13 +572,21 @@ class WorldStateStep:
         return self._fallback_doc(tool_results_collected)
 
     def _fallback_doc(self, collected: list[str] | None = None) -> str:
+        """Deterministic worst-case WorldStateDoc when the LLM fails or stalls.
+
+        Always includes the baseline scene context so downstream steps have at
+        least the established character POVs and location lore for present NPCs.
+        """
         sess = self.engine.session
-        base = (
-            f"WORLD STATE — {sess.location} | scene: {sess.current_scene or 'none'}\n\n"
-        )
+        parts = [
+            f"WORLD STATE — {sess.location} | scene: {sess.current_scene or 'none'}",
+        ]
+        baseline = self._build_baseline_context(classified_input="")
+        if baseline.strip():
+            parts.append(baseline)
         if collected:
-            base += "\n\n".join(collected)
-        return base
+            parts.append("COLLECTED TOOL RESULTS:\n" + "\n\n".join(collected))
+        return "\n\n".join(parts)
 
 
 class ComplianceStep:
@@ -587,13 +624,15 @@ class ComplianceStep:
         ]
 
         for i in range(max_iterations):
-            messages = engine._guard_payload(messages)
+            messages = engine._guard_payload(
+                messages, schema_overhead=engine._cached_compact_step2_schema_toks
+            )
             try:
                 response_msg = call_llm(
                     messages,
-                    tools=engine._step2_schemas,
+                    tools=engine._compact_step2_schemas,
                     tool_choice="auto",
-                    max_tokens=MAX_TOKENS_TOOL_DISPATCH,
+                    max_tokens=MAX_TOKENS_STEP2,
                 )
             except requests.exceptions.RequestException as exc:
                 logger.warning("[STEP2] LLM call failed: %s", exc)
@@ -601,7 +640,9 @@ class ComplianceStep:
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
-                think, _ = engine.strip_think_tags(response_msg.get("content", "") or "")
+                think, _ = engine.strip_think_tags(
+                    response_msg.get("content", "") or ""
+                )
                 if think.strip():
                     accumulated_think.append(think.strip())
                 logger.info(
@@ -625,10 +666,12 @@ class ComplianceStep:
                 logger.info("[STEP2] tool %s", fn_name)
                 result = engine._dispatch_step2(fn_name, fn_args)
 
-                if fn_name in _WRITE_TOOLS:
-                    canonical_results.append((fn_name, result))
+                # All step=2 tools mutate state — surface every result to the prose step.
+                canonical_results.append((fn_name, result))
 
-                instruction, tool_msg = engine.build_tool_result_message(tool_id, result)
+                instruction, tool_msg = engine.build_tool_result_message(
+                    tool_id, result
+                )
                 messages.append(tool_msg)
                 if instruction:
                     messages.append({"role": "user", "content": instruction})
@@ -654,7 +697,9 @@ class ProseStep:
         """Generate final narrative prose. Returns narrative string."""
         engine = self.engine
 
-        synthesis = engine._build_narrative_synthesis(accumulated_think, canonical_results)
+        synthesis = engine._build_narrative_synthesis(
+            accumulated_think, canonical_results
+        )
         attn_text = engine._gather_attn_for_scene()
         mood_text = engine._gather_mood_for_scene()
 
@@ -663,7 +708,9 @@ class ProseStep:
             "Do not plan or invoke any tools; this is the final prose generation step."
         ]
         if world_doc.strip():
-            injection_parts.append(f"WORLD STATE (for atmospheric detail):\n{world_doc}")
+            injection_parts.append(
+                f"WORLD STATE (for atmospheric detail):\n{world_doc}"
+            )
         if attn_text:
             injection_parts.append(attn_text)
         if mood_text:
@@ -710,21 +757,24 @@ class RPJotEngine:
     Usage:
         engine = RPJotEngine(location="ravenwood-manor", people={"mc"})
         engine.register_all_tools()
-        response = engine.run_tool_loop(messages)
+        narrative = engine.run_turn(classified_input, step2_messages, step3_messages)
     """
+
+    # ===================================================================
+    # === 1. Construction & Initialization ===
+    # ===================================================================
 
     def __init__(self, location, people_present=None, main_character="mc"):
         # Step-partitioned tool registries
-        self._step1_schemas: list = []   # read-only: WorldStateStep
-        self._step2_schemas: list = []   # write: ComplianceStep
+        self._step1_schemas: list = []  # read-only: WorldStateStep
+        self._step2_schemas: list = []  # write: ComplianceStep
         self._step1_handlers: dict = {}
         self._step2_handlers: dict = {}
-        # Legacy alias kept for any code that still references _tool_schemas
-        self._tool_schemas: list = []
-        self._tool_handlers: dict = {}
         self._last_payload_toks: int = 0
         self._cached_schema_toks: int = 0
         self._cached_bare_schema_toks: int = 0
+        self._cached_step1_schema_toks: int = 0
+        self._cached_compact_step2_schema_toks: int = 0
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
         self.main_character = main_character
@@ -732,16 +782,48 @@ class RPJotEngine:
             location=location,
             people_present=people_present or set(),
         )
-        # NPC tracker — grows organically as characters appear via tool calls
+        # NPC tracker — pre-populated from established character notes,
+        # then grows further as new characters appear via tool calls.
         self.npc_tracker = NPCTracker()
-        for slug in (people_present or set()):
-            self.npc_tracker.register(slug, slug, location=location, turn=0)
+        self._preload_npc_tracker_from_notes(location)
+        for slug in people_present or set():
+            if not self.npc_tracker.is_registered(slug):
+                self.npc_tracker.register(slug, slug, location=location, turn=0)
+            self.npc_tracker.mark_present(slug, location=location, turn=0)
         logger.info(
-            "RPJotEngine init: loc=%s people=%s mc=%s",
+            "RPJotEngine init: loc=%s people=%s mc=%s npcs_preloaded=%d",
             location,
             self.session.people_present,
             self.main_character,
+            len(self.npc_tracker.all()),
         )
+
+    def _preload_npc_tracker_from_notes(self, location: str) -> None:
+        """Scan PWD_CHARS in the notes file and register every established character.
+
+        This guarantees the NPC roster_summary reflects all known characters from
+        turn 1, so WorldStateStep's LLM never has to guess who exists.
+        """
+        seen_pwds = set()
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, PWD_CHARS)) as nc:
+            for note in nc:
+                if note.pwd in seen_pwds:
+                    continue
+                seen_pwds.add(note.pwd)
+                char_name = note.pwd.rstrip("/").split("/")[-1]
+                if char_name and not self.npc_tracker.is_registered(char_name):
+                    self.npc_tracker.register(
+                        char_name,
+                        char_name,
+                        named=True,
+                        location=location,
+                        turn=0,
+                    )
+                    self.npc_tracker.mark_saved(char_name)
+
+    # ===================================================================
+    # === 2. Tool Registry ===
+    # ===================================================================
 
     # ------------------------------------------------------------------
     # Private tool registry
@@ -774,6 +856,56 @@ class RPJotEngine:
             for s in self._step1_schemas
         ]
 
+    @property
+    def _compact_step2_schemas(self) -> list:
+        """Step 2 schemas with string descriptions stripped from parameters.
+
+        Preserves tool name, parameter names, types, and required fields so the
+        model can still call tools correctly — just without the verbose English
+        descriptions that inflate schema overhead from ~7,700 tok to ~2,000 tok.
+        """
+        result = []
+        for s in self._step2_schemas:
+            fn = s["function"]
+            params = fn.get("parameters", {})
+            stripped_props = {
+                k: {pk: pv for pk, pv in pdef.items() if pk != "description"}
+                for k, pdef in params.get("properties", {}).items()
+            }
+            result.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": fn["name"],
+                        "parameters": {
+                            "type": "object",
+                            "properties": stripped_props,
+                            "required": params.get("required", []),
+                        },
+                    },
+                }
+            )
+        return result
+
+    @property
+    def _tool_schemas(self) -> list:
+        """Flat view of all registered tool schemas (step1 + step2).
+
+        Computed on demand from the step-partitioned registries so there is
+        only one source of truth. Retained for legacy callers/tests.
+        """
+        return list(self._step1_schemas) + list(self._step2_schemas)
+
+    @property
+    def _tool_handlers(self) -> dict:
+        """Flat view of all registered tool handlers (step1 + step2).
+
+        Computed on demand from the step-partitioned registries. Retained for
+        legacy callers/tests that dispatch by tool name without caring which
+        step the tool belongs to.
+        """
+        return {**self._step1_handlers, **self._step2_handlers}
+
     def _register_tool(self, name, description, parameters, handler, *, step: int = 2):
         """Register a tool into the step-partitioned schema + handler dicts."""
         schema = {
@@ -785,24 +917,25 @@ class RPJotEngine:
             },
         }
         if step == 1:
-            self._step1_schemas = [s for s in self._step1_schemas if s["function"]["name"] != name]
+            self._step1_schemas = [
+                s for s in self._step1_schemas if s["function"]["name"] != name
+            ]
             self._step1_schemas.append(schema)
             self._step1_handlers[name] = handler
         else:
-            self._step2_schemas = [s for s in self._step2_schemas if s["function"]["name"] != name]
+            self._step2_schemas = [
+                s for s in self._step2_schemas if s["function"]["name"] != name
+            ]
             self._step2_schemas.append(schema)
             self._step2_handlers[name] = handler
-        # Keep legacy flat list for any code still using _tool_schemas/_tool_handlers
-        self._tool_schemas = [s for s in self._tool_schemas if s["function"]["name"] != name]
-        self._tool_schemas.append(schema)
-        self._tool_handlers[name] = handler
 
     def _dispatch(self, name: str, args_json) -> str:
-        """Dispatch a tool call using the instance-local handler dict."""
-        if name not in self._tool_handlers:
+        """Dispatch a tool call by name across step1 + step2 handlers."""
+        handlers = self._tool_handlers
+        if name not in handlers:
             return json.dumps({"error": f"unknown tool: {name}"})
         args = json.loads(args_json) if isinstance(args_json, str) else args_json
-        return self._tool_handlers[name](**args)
+        return handlers[name](**args)
 
     def _dispatch_step2(self, name: str, args_json) -> str:
         """Dispatch a Step 2 (write) tool call."""
@@ -810,6 +943,47 @@ class RPJotEngine:
             return json.dumps({"error": f"step2 unknown tool: {name}"})
         args = json.loads(args_json) if isinstance(args_json, str) else args_json
         return self._step2_handlers[name](**args)
+
+    # ===================================================================
+    # === 3. Run Orchestration ===
+    # ===================================================================
+
+    def register_all_tools(self):
+        """Discover and register all @rp_tool-decorated methods into step partitions.
+
+        step=1 tools → _step1_schemas/_step1_handlers  (WorldStateStep)
+        step=2 tools → _step2_schemas/_step2_handlers  (ComplianceStep)
+        `_tool_schemas`/`_tool_handlers` are computed properties that combine
+        the two partitions on demand — there is no separate flat registry.
+        """
+        logger.info("ENTER register_all_tools")
+
+        for attr_name in dir(self.__class__):
+            fn = getattr(self.__class__, attr_name)
+            if callable(fn) and hasattr(fn, "_rp_tool_meta"):
+                description, parameters, step = fn._rp_tool_meta
+                bound = getattr(self, attr_name)
+                tool_name = attr_name.removeprefix("_tool_")
+                self._register_tool(
+                    tool_name, description, parameters, bound, step=step
+                )
+
+        self._cached_schema_toks = _tok(json.dumps(self._tool_schemas))
+        self._cached_bare_schema_toks = _tok(json.dumps(self._bare_tool_schemas))
+        self._cached_step1_schema_toks = _tok(json.dumps(self._step1_schemas))
+        self._cached_compact_step2_schema_toks = _tok(
+            json.dumps(self._compact_step2_schemas)
+        )
+        logger.info(
+            "registered step1=%d step2=%d tools | "
+            "schema overhead: step1=%d tok, step2_compact=%d tok (full=%d), bare=%d tok",
+            len(self._step1_schemas),
+            len(self._step2_schemas),
+            self._cached_step1_schema_toks,
+            self._cached_compact_step2_schema_toks,
+            self._cached_schema_toks,
+            self._cached_bare_schema_toks,
+        )
 
     def run_turn(
         self,
@@ -826,7 +1000,15 @@ class RPJotEngine:
         Returns the narrative string (Step 3 output). Advances turn counter.
         The caller is responsible for appending the narrative to both
         step2_messages and step3_messages as the assistant turn.
+
+        Auto-initializes the pipeline (and registers tools, if needed) so
+        callers do not have to remember the construction sequence.
         """
+        if not self._step1_schemas and not self._step2_schemas:
+            self.register_all_tools()
+        if not hasattr(self, "_world_state_step"):
+            self.init_pipeline()
+
         logger.info("[TURN %d] run_turn: START", self._turn_count + 1)
 
         # Step 1
@@ -845,7 +1027,11 @@ class RPJotEngine:
 
         # Step 3
         narrative = self._prose_step.run(
-            classified_input, world_doc, canonical_results, accumulated_think, step3_messages
+            classified_input,
+            world_doc,
+            canonical_results,
+            accumulated_think,
+            step3_messages,
         )
         logger.info("[TURN] step3 done: narrative=%d tok", _tok(narrative))
 
@@ -856,7 +1042,9 @@ class RPJotEngine:
             and self._turn_count % SYSTEM_REFRESH_INTERVAL == 0
         ):
             self._system_refresh_pending = True
-            logger.info("[ENTROPY] turn %d: scheduling system message refresh", self._turn_count)
+            logger.info(
+                "[ENTROPY] turn %d: scheduling system message refresh", self._turn_count
+            )
 
         return narrative
 
@@ -865,7 +1053,13 @@ class RPJotEngine:
         self._world_state_step = WorldStateStep(self)
         self._compliance_step = ComplianceStep(self)
         self._prose_step = ProseStep(self)
-        logger.info("[PIPELINE] WorldStateStep + ComplianceStep + ProseStep initialized")
+        logger.info(
+            "[PIPELINE] WorldStateStep + ComplianceStep + ProseStep initialized"
+        )
+
+    # ===================================================================
+    # === 4. Static Utilities ===
+    # ===================================================================
 
     # ------------------------------------------------------------------
     # Utility: think-tag stripping
@@ -929,6 +1123,10 @@ class RPJotEngine:
                 results.append(think_content)
 
         return results
+
+    # ===================================================================
+    # === 5. Cache ===
+    # ===================================================================
 
     # ------------------------------------------------------------------
     # Query result cache (session-scoped, invalidated on write)
@@ -1073,6 +1271,10 @@ class RPJotEngine:
         # Genuinely separate locations — direct transport.
         return destination, "direct"
 
+    # ===================================================================
+    # === 6. Context Building ===
+    # ===================================================================
+
     # ------------------------------------------------------------------
     # Context assembly
     # ------------------------------------------------------------------
@@ -1158,6 +1360,10 @@ class RPJotEngine:
             len(self.session.people_present),
         )
         return result
+
+    # ===================================================================
+    # === 7. Scene State Queries ===
+    # ===================================================================
 
     def _gather_attn_for_scene(self) -> str:
         """Format the current in-memory attention state for pre-narrative injection.
@@ -1451,227 +1657,13 @@ class RPJotEngine:
             "established_props": parsed.get("established_props", []),
         }
 
-    # ------------------------------------------------------------------
-    # Scene debug report
-    # ------------------------------------------------------------------
+    # ===================================================================
+    # === 8. Step 1 Tools: World Lookup ===
+    # ===================================================================
 
-    def scene_debug_report(self) -> str:
-        """Token-budget diagnostic for all entities in the current scene.
-
-        Walks the same note sources that prepare_context and gather_pov_context
-        use, so the numbers reflect the actual LLM token spend.  A note that
-        carries multiple tags (e.g. exp:evie and exp:bartholomew) will be counted
-        under each character — the per-category numbers are independent, not
-        deduplicated.
-
-        Returns a formatted multi-section string suitable for printing directly.
-        """
-        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
-        W = 72  # total line width
-
-        def _note_toks(notes: list) -> int:
-            text = "\n\n".join(
-                n.context.strip() + "\n\n" + n.message.strip() for n in notes
-            ).strip()
-            return _tok(text)
-
-        def _row(label: str, n_notes: int, toks: int, indent: int = 4) -> str:
-            pct = 100.0 * toks / cap if cap else 0.0
-            return (
-                f"{'':>{indent}}{label:<34}"
-                f"  {n_notes:>4} notes"
-                f"  {toks:>6} tok"
-                f"  {pct:>5.1f}%"
-            )
-
-        SEP = "─" * W
-        HDR = "═" * W
-
-        lines: list[str] = []
-        grand_n = 0
-        grand_toks = 0
-
-        def _accum(notes: list) -> tuple[int, int]:
-            nonlocal grand_n, grand_toks
-            t = _note_toks(notes)
-            grand_n += len(notes)
-            grand_toks += t
-            return len(notes), t
-
-        lines.append(HDR)
-        lines.append(
-            f"  SCENE DEBUG REPORT"
-            f"  |  location: {self.session.location}"
-            f"  |  cap: {cap:,} tok"
-        )
-        lines.append(HDR)
-
-        # ── LOCATION HIERARCHY ───────────────────────────────────────────
-        lines.append("\nLOCATION HIERARCHY")
-        for ancestor in self.session.location_ancestors:
-            all_notes = list(ContextBundle(f"{PWD_WORLD}/{ancestor}"))
-            loc_notes = [
-                n
-                for n in all_notes
-                if not any(t.startswith("obj:") for t in n.tag.split())
-            ]
-            obj_notes = [
-                n for n in all_notes if any(t.startswith("obj:") for t in n.tag.split())
-            ]
-            ln, lt = _accum(loc_notes)
-            on, ot = _accum(obj_notes)
-            lines.append(f"\n  {ancestor}")
-            lines.append(_row("description notes", ln, lt))
-            lines.append(_row("object notes (obj:)", on, ot))
-
-        # ── CHARACTERS IN SCENE ──────────────────────────────────────────
-        lines.append(f"\n{SEP}")
-        lines.append(
-            f"\nCHARACTERS IN SCENE"
-            f"  ({len(self.session.people_present)} present:"
-            f" {', '.join(sorted(self.session.people_present)) or 'none'})"
-        )
-        for char in sorted(self.session.people_present):
-            profile = list(ContextBundle([f"{PWD_CHARS}/{char}"]))
-            conscience = list(ContextBundle([f"{PWD_CONSCIENCE}/{char}"]))
-            private = list(ContextBundle([f"{TAG_KNOW}{char}"]))
-            shared = list(ContextBundle([f"{TAG_EXP}{char}"]))
-
-            pn, pt = _accum(profile)
-            cn, ct = _accum(conscience)
-            kn, kt = _accum(private)
-            en, et = _accum(shared)
-            char_toks = pt + ct + kt + et
-            char_pct = 100.0 * char_toks / cap if cap else 0.0
-
-            lines.append(
-                f"\n  {char}"
-                f"  →  {pn+cn+kn+en} notes  {char_toks} tok  {char_pct:.1f}%"
-            )
-            lines.append(_row(f"profile (char:{char})", pn, pt))
-            lines.append(_row("conscience (cons:)", cn, ct))
-            lines.append(_row("private knowledge (know:)", kn, kt))
-            lines.append(_row("shared experience (exp:)", en, et))
-
-        # ── ALL OTHER KNOWN CHARACTERS ───────────────────────────────────
-        all_known: set[str] = set()
-        with NoteContext(Note.NOTEFILE, (SearchType.ALL, "")) as nc:
-            for note in nc:
-                for word in note.tag.split():
-                    if word.startswith(TAG_CHAR):
-                        all_known.add(word[len(TAG_CHAR) :])
-
-        others = sorted(all_known - self.session.people_present)
-        if others:
-            lines.append(f"\n  OTHER KNOWN CHARACTERS (not in scene)")
-            for char in others:
-                profile = list(ContextBundle([f"{PWD_CHARS}/{char}"]))
-                conscience = list(ContextBundle([f"{PWD_CONSCIENCE}/{char}"]))
-                pn, pt = len(profile), _note_toks(profile)
-                cn, ct = len(conscience), _note_toks(conscience)
-                total_t = pt + ct
-                pct = 100.0 * total_t / cap if cap else 0.0
-                lines.append(
-                    f"    {char:<30}  {pn+cn:>4} notes  {total_t:>6} tok  {pct:>5.1f}%"
-                    f"  (profile={pn}, conscience={cn})"
-                )
-
-        # ── ACTIVE SCENE ─────────────────────────────────────────────────
-        lines.append(f"\n{SEP}")
-        scene_label = self.session.current_scene or "(none)"
-        lines.append(f"\nACTIVE SCENE  {scene_label}")
-        if self.session.current_scene:
-            scene_notes = list(
-                ContextBundle([f"{TAG_SCENE}{self.session.current_scene}"])
-            )
-            sn, st = _accum(scene_notes)
-            lines.append(_row("scene notes", sn, st))
-        else:
-            lines.append("    (no active scene — call begin_scene to set one)")
-
-        # ── EVENTS AT CURRENT LOCATION ───────────────────────────────────
-        lines.append(f"\n{SEP}")
-        lines.append(f"\nEVENTS  at {self.session.location}")
-        event_notes = list(ContextBundle([f"{PWD_EVENTS}/{self.session.location}"]))
-        en2, et2 = _accum(event_notes)
-        lines.append(_row("event notes", en2, et2))
-
-        # ── SYSTEM ───────────────────────────────────────────────────────
-        lines.append(f"\n{SEP}")
-        lines.append("\nSYSTEM")
-        for tag in ("system_role", "story_premise", "twist", "backstory"):
-            bundle = list(ContextBundle(tag))
-            bn, bt = _accum(bundle)
-            lines.append(_row(tag, bn, bt))
-
-        # ── SUMMARY ──────────────────────────────────────────────────────
-        lines.append(f"\n{HDR}")
-        pct_total = 100.0 * grand_toks / cap if cap else 0.0
-        lines.append(
-            f"  {'TOTAL ENUMERATED':<34}"
-            f"  {grand_n:>4} notes"
-            f"  {grand_toks:>6} tok"
-            f"  {pct_total:>5.1f}%"
-        )
-        lines.append(
-            f"  {'model cap (- response reserve)':<34}"
-            f"  {'':>10}"
-            f"  {cap:>6} tok"
-            f"  100.0%"
-        )
-        lines.append(
-            f"  {'remaining headroom':<34}"
-            f"  {'':>10}"
-            f"  {cap - grand_toks:>6} tok"
-            f"  {100.0 * (cap - grand_toks) / cap:>5.1f}%"
-        )
-        lines.append(HDR)
-        lines.append(
-            "  NOTE: notes appearing under multiple characters are counted once per\n"
-            "  category entry. The total may exceed a single prepare_context call\n"
-            "  because condensation is not applied here."
-        )
-
-        # ── NPC TRACKER ──────────────────────────────────────────────────
-        lines.append(f"\n{HDR}")
-        lines.append("  NPC TRACKER (session memory)")
-        lines.append(HDR)
-        tracker_records = self.npc_tracker.all()
-        if tracker_records:
-            for rec in sorted(tracker_records, key=lambda r: r.turn_introduced):
-                flags = []
-                if rec.central:
-                    flags.append("central")
-                if rec.interacted:
-                    flags.append("interacted")
-                if rec.mentioned and not rec.interacted:
-                    flags.append("mentioned-only")
-                if not rec.named:
-                    flags.append("unnamed")
-                if not rec.saved:
-                    flags.append("not-yet-saved")
-                flag_str = f" [{', '.join(flags)}]" if flags else ""
-                # Rough backstory token cost
-                char_bundle = list(ContextBundle(f"{PWD_CHARS}/{rec.slug}"))
-                char_toks = _note_toks(char_bundle)
-                lines.append(
-                    f"    {rec.slug:<20}{flag_str:<30}"
-                    f"  last: {rec.location_last_seen:<25}"
-                    f"  backstory: {char_toks:>5} tok"
-                )
-        else:
-            lines.append("    (no NPCs registered yet)")
-        lines.append(HDR)
-
-        # ── STEP TOOL COUNTS ─────────────────────────────────────────────
-        lines.append(f"\n  Step 1 tools: {len(self._step1_schemas)}")
-        lines.append(f"  Step 2 tools: {len(self._step2_schemas)}")
-
-        return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # Tool handlers
-    # ------------------------------------------------------------------
+    # ===================================================================
+    # === 9. Step 2 Tools: Write / State Change ===
+    # ===================================================================
 
     @rp_tool(
         description=(
@@ -1950,9 +1942,14 @@ class RPJotEngine:
             if slug != self.main_character:
                 if not self.npc_tracker.is_registered(slug):
                     self.npc_tracker.register(
-                        slug, slug, location=self.session.location, turn=self._turn_count
+                        slug,
+                        slug,
+                        location=self.session.location,
+                        turn=self._turn_count,
                     )
-                self.npc_tracker.mark_present(slug, self.session.location, self._turn_count)
+                self.npc_tracker.mark_present(
+                    slug, self.session.location, self._turn_count
+                )
 
         logger.info("people_present updated: %s", self.session.people_present)
         present = ", ".join(sorted(self.session.people_present)) or "none"
@@ -2896,6 +2893,10 @@ class RPJotEngine:
                 "followup_instruction": FOLLOWUP_CONTEXT_SNAPSHOT,
             }
         )
+
+    # ===================================================================
+    # === 10. Step 2 Tools: Relationships ===
+    # ===================================================================
 
     # ------------------------------------------------------------------
     # Interpersonal tools — relationships, interior life, social query
@@ -3949,37 +3950,9 @@ class RPJotEngine:
             }
         )
 
-    # ------------------------------------------------------------------
-    # Tool registration
-    # ------------------------------------------------------------------
-
-    def register_all_tools(self):
-        """Discover and register all @rp_tool-decorated methods into step partitions.
-
-        step=1 tools → _step1_schemas/_step1_handlers  (WorldStateStep)
-        step=2 tools → _step2_schemas/_step2_handlers  (ComplianceStep)
-        All tools also populate the legacy _tool_schemas/_tool_handlers for
-        backward compatibility with run_tool_loop.
-        """
-        logger.info("ENTER register_all_tools")
-
-        for attr_name in dir(self.__class__):
-            fn = getattr(self.__class__, attr_name)
-            if callable(fn) and hasattr(fn, "_rp_tool_meta"):
-                description, parameters, step = fn._rp_tool_meta
-                bound = getattr(self, attr_name)
-                tool_name = attr_name.removeprefix("_tool_")
-                self._register_tool(tool_name, description, parameters, bound, step=step)
-
-        self._cached_schema_toks = _tok(json.dumps(self._tool_schemas))
-        self._cached_bare_schema_toks = _tok(json.dumps(self._bare_tool_schemas))
-        logger.info(
-            "registered step1=%d step2=%d tools | schema overhead: %d tok (bare: %d tok)",
-            len(self._step1_schemas),
-            len(self._step2_schemas),
-            self._cached_schema_toks,
-            self._cached_bare_schema_toks,
-        )
+    # ===================================================================
+    # === 11. Message Construction ===
+    # ===================================================================
 
     # ------------------------------------------------------------------
     # Message construction helpers
@@ -4082,6 +4055,10 @@ class RPJotEngine:
             Note.append(Note.NOTEFILE, note)
             logger.debug("tool-call note written: %s -> %s", fn_name, tool_id)
 
+    # ===================================================================
+    # === 12. Narrative Synthesis ===
+    # ===================================================================
+
     # ------------------------------------------------------------------
     # Narrative synthesis helpers
     # ------------------------------------------------------------------
@@ -4172,9 +4149,231 @@ class RPJotEngine:
 
         return "\n\n".join(parts)
 
+    # ===================================================================
+    # === 13. Debug ===
+    # ===================================================================
+
     # ------------------------------------------------------------------
-    # LLM tool loop
+    # Scene debug report
     # ------------------------------------------------------------------
+
+    def scene_debug_report(self) -> str:
+        """Token-budget diagnostic for all entities in the current scene.
+
+        Walks the same note sources that prepare_context and gather_pov_context
+        use, so the numbers reflect the actual LLM token spend.  A note that
+        carries multiple tags (e.g. exp:evie and exp:bartholomew) will be counted
+        under each character — the per-category numbers are independent, not
+        deduplicated.
+
+        Returns a formatted multi-section string suitable for printing directly.
+        """
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        W = 72  # total line width
+
+        def _note_toks(notes: list) -> int:
+            text = "\n\n".join(
+                n.context.strip() + "\n\n" + n.message.strip() for n in notes
+            ).strip()
+            return _tok(text)
+
+        def _row(label: str, n_notes: int, toks: int, indent: int = 4) -> str:
+            pct = 100.0 * toks / cap if cap else 0.0
+            return (
+                f"{'':>{indent}}{label:<34}"
+                f"  {n_notes:>4} notes"
+                f"  {toks:>6} tok"
+                f"  {pct:>5.1f}%"
+            )
+
+        SEP = "─" * W
+        HDR = "═" * W
+
+        lines: list[str] = []
+        grand_n = 0
+        grand_toks = 0
+
+        def _accum(notes: list) -> tuple[int, int]:
+            nonlocal grand_n, grand_toks
+            t = _note_toks(notes)
+            grand_n += len(notes)
+            grand_toks += t
+            return len(notes), t
+
+        lines.append(HDR)
+        lines.append(
+            f"  SCENE DEBUG REPORT"
+            f"  |  location: {self.session.location}"
+            f"  |  cap: {cap:,} tok"
+        )
+        lines.append(HDR)
+
+        # ── LOCATION HIERARCHY ───────────────────────────────────────────
+        lines.append("\nLOCATION HIERARCHY")
+        for ancestor in self.session.location_ancestors:
+            all_notes = list(ContextBundle(f"{PWD_WORLD}/{ancestor}"))
+            loc_notes = [
+                n
+                for n in all_notes
+                if not any(t.startswith("obj:") for t in n.tag.split())
+            ]
+            obj_notes = [
+                n for n in all_notes if any(t.startswith("obj:") for t in n.tag.split())
+            ]
+            ln, lt = _accum(loc_notes)
+            on, ot = _accum(obj_notes)
+            lines.append(f"\n  {ancestor}")
+            lines.append(_row("description notes", ln, lt))
+            lines.append(_row("object notes (obj:)", on, ot))
+
+        # ── CHARACTERS IN SCENE ──────────────────────────────────────────
+        lines.append(f"\n{SEP}")
+        lines.append(
+            f"\nCHARACTERS IN SCENE"
+            f"  ({len(self.session.people_present)} present:"
+            f" {', '.join(sorted(self.session.people_present)) or 'none'})"
+        )
+        for char in sorted(self.session.people_present):
+            profile = list(ContextBundle([f"{PWD_CHARS}/{char}"]))
+            conscience = list(ContextBundle([f"{PWD_CONSCIENCE}/{char}"]))
+            private = list(ContextBundle([f"{TAG_KNOW}{char}"]))
+            shared = list(ContextBundle([f"{TAG_EXP}{char}"]))
+
+            pn, pt = _accum(profile)
+            cn, ct = _accum(conscience)
+            kn, kt = _accum(private)
+            en, et = _accum(shared)
+            char_toks = pt + ct + kt + et
+            char_pct = 100.0 * char_toks / cap if cap else 0.0
+
+            lines.append(
+                f"\n  {char}"
+                f"  →  {pn+cn+kn+en} notes  {char_toks} tok  {char_pct:.1f}%"
+            )
+            lines.append(_row(f"profile (char:{char})", pn, pt))
+            lines.append(_row("conscience (cons:)", cn, ct))
+            lines.append(_row("private knowledge (know:)", kn, kt))
+            lines.append(_row("shared experience (exp:)", en, et))
+
+        # ── ALL OTHER KNOWN CHARACTERS ───────────────────────────────────
+        all_known: set[str] = set()
+        with NoteContext(Note.NOTEFILE, (SearchType.ALL, "")) as nc:
+            for note in nc:
+                for word in note.tag.split():
+                    if word.startswith(TAG_CHAR):
+                        all_known.add(word[len(TAG_CHAR) :])
+
+        others = sorted(all_known - self.session.people_present)
+        if others:
+            lines.append(f"\n  OTHER KNOWN CHARACTERS (not in scene)")
+            for char in others:
+                profile = list(ContextBundle([f"{PWD_CHARS}/{char}"]))
+                conscience = list(ContextBundle([f"{PWD_CONSCIENCE}/{char}"]))
+                pn, pt = len(profile), _note_toks(profile)
+                cn, ct = len(conscience), _note_toks(conscience)
+                total_t = pt + ct
+                pct = 100.0 * total_t / cap if cap else 0.0
+                lines.append(
+                    f"    {char:<30}  {pn+cn:>4} notes  {total_t:>6} tok  {pct:>5.1f}%"
+                    f"  (profile={pn}, conscience={cn})"
+                )
+
+        # ── ACTIVE SCENE ─────────────────────────────────────────────────
+        lines.append(f"\n{SEP}")
+        scene_label = self.session.current_scene or "(none)"
+        lines.append(f"\nACTIVE SCENE  {scene_label}")
+        if self.session.current_scene:
+            scene_notes = list(
+                ContextBundle([f"{TAG_SCENE}{self.session.current_scene}"])
+            )
+            sn, st = _accum(scene_notes)
+            lines.append(_row("scene notes", sn, st))
+        else:
+            lines.append("    (no active scene — call begin_scene to set one)")
+
+        # ── EVENTS AT CURRENT LOCATION ───────────────────────────────────
+        lines.append(f"\n{SEP}")
+        lines.append(f"\nEVENTS  at {self.session.location}")
+        event_notes = list(ContextBundle([f"{PWD_EVENTS}/{self.session.location}"]))
+        en2, et2 = _accum(event_notes)
+        lines.append(_row("event notes", en2, et2))
+
+        # ── SYSTEM ───────────────────────────────────────────────────────
+        lines.append(f"\n{SEP}")
+        lines.append("\nSYSTEM")
+        for tag in ("system_role", "story_premise", "twist", "backstory"):
+            bundle = list(ContextBundle(tag))
+            bn, bt = _accum(bundle)
+            lines.append(_row(tag, bn, bt))
+
+        # ── SUMMARY ──────────────────────────────────────────────────────
+        lines.append(f"\n{HDR}")
+        pct_total = 100.0 * grand_toks / cap if cap else 0.0
+        lines.append(
+            f"  {'TOTAL ENUMERATED':<34}"
+            f"  {grand_n:>4} notes"
+            f"  {grand_toks:>6} tok"
+            f"  {pct_total:>5.1f}%"
+        )
+        lines.append(
+            f"  {'model cap (- response reserve)':<34}"
+            f"  {'':>10}"
+            f"  {cap:>6} tok"
+            f"  100.0%"
+        )
+        lines.append(
+            f"  {'remaining headroom':<34}"
+            f"  {'':>10}"
+            f"  {cap - grand_toks:>6} tok"
+            f"  {100.0 * (cap - grand_toks) / cap:>5.1f}%"
+        )
+        lines.append(HDR)
+        lines.append(
+            "  NOTE: notes appearing under multiple characters are counted once per\n"
+            "  category entry. The total may exceed a single prepare_context call\n"
+            "  because condensation is not applied here."
+        )
+
+        # ── NPC TRACKER ──────────────────────────────────────────────────
+        lines.append(f"\n{HDR}")
+        lines.append("  NPC TRACKER (session memory)")
+        lines.append(HDR)
+        tracker_records = self.npc_tracker.all()
+        if tracker_records:
+            for rec in sorted(tracker_records, key=lambda r: r.turn_introduced):
+                flags = []
+                if rec.central:
+                    flags.append("central")
+                if rec.interacted:
+                    flags.append("interacted")
+                if rec.mentioned and not rec.interacted:
+                    flags.append("mentioned-only")
+                if not rec.named:
+                    flags.append("unnamed")
+                if not rec.saved:
+                    flags.append("not-yet-saved")
+                flag_str = f" [{', '.join(flags)}]" if flags else ""
+                # Rough backstory token cost
+                char_bundle = list(ContextBundle(f"{PWD_CHARS}/{rec.slug}"))
+                char_toks = _note_toks(char_bundle)
+                lines.append(
+                    f"    {rec.slug:<20}{flag_str:<30}"
+                    f"  last: {rec.location_last_seen:<25}"
+                    f"  backstory: {char_toks:>5} tok"
+                )
+        else:
+            lines.append("    (no NPCs registered yet)")
+        lines.append(HDR)
+
+        # ── STEP TOOL COUNTS ─────────────────────────────────────────────
+        lines.append(f"\n  Step 1 tools: {len(self._step1_schemas)}")
+        lines.append(f"  Step 2 tools: {len(self._step2_schemas)}")
+
+        return "\n".join(lines)
+
+    # ===================================================================
+    # === 14. LLM Payload Management ===
+    # ===================================================================
 
     def _guard_payload(
         self, messages: list, schema_overhead: int | None = None
@@ -4291,214 +4490,3 @@ class RPJotEngine:
             total - new_total,
         )
         return messages
-
-    def run_tool_loop(self, messages, max_iterations=10):
-        """
-        Send the conversation to the LLM with registered tools.
-        Loop until the LLM returns a narrative (no tool calls) or
-        max_iterations is reached.
-
-        Before the final narrative call the loop injects a synthesis message
-        that consolidates two sources of material the vanilla response would
-        otherwise under-use:
-
-          1. Think blocks from tool-calling turns — the narrator's unspoken
-             planning notes, which often contain story advances that never
-             make it to the prose.
-          2. Results from write-type tools (record_event, navigate_to, etc.)
-             — canonical facts just established this turn that must appear in
-             the narrative.
-
-        The narrative call itself uses NARRATIVE_TEMPERATURE (not the lower
-        temperature used for tool dispatch), adding entropy that counteracts
-        the repetition caused by stationary lore in the context window.
-        When no tools were called at all (iter 0), the original response is
-        returned unchanged to avoid a redundant LLM call.
-
-        Args:
-            messages:       list of message dicts (mutated in place).
-            max_iterations: safety cap on tool-call rounds.
-
-        Returns:
-            The final LLM response dict (always has a "content" key).
-        """
-        logger.info(
-            "ENTER run_tool_loop: max_iterations=%d message_count=%d",
-            max_iterations,
-            len(messages),
-        )
-
-        accumulated_think: list[str] = []
-        canonical_results: list[tuple[str, str]] = []
-
-        for i in range(max_iterations):
-            messages = self._guard_payload(messages)
-            logger.debug(
-                "[CTX] run_tool_loop iter %d/%d: %d message(s), %d tok total payload",
-                i + 1,
-                max_iterations,
-                len(messages),
-                self._last_payload_toks,
-            )
-            try:
-                response_msg = call_llm(
-                    messages,
-                    tools=self._tool_schemas,
-                    tool_choice="auto",
-                    max_tokens=MAX_TOKENS_TOOL_DISPATCH,
-                )
-            except requests.exceptions.RequestException as exc:
-                raise LLMError(str(exc)) from None
-
-            tool_calls = response_msg.get("tool_calls")
-            if not tool_calls:
-                # Capture any think block from the dispatch response itself.
-                # When the model decides not to call tools, its reasoning is
-                # still valuable synthesis material — and we must harvest it
-                # here because the tool-call path below won't run.
-                dispatch_think, dispatch_prose = self.strip_think_tags(
-                    response_msg.get("content", "") or ""
-                )
-                if dispatch_think.strip():
-                    accumulated_think.append(dispatch_think.strip())
-                    logger.debug(
-                        "[SYNTH] captured think block from no-tool dispatch (%d tok)",
-                        _tok(dispatch_think),
-                    )
-
-                # ── Narrative synthesis injection ──────────────────────────
-                # Trigger re-call when:
-                #   1. tools ran at least once this turn (i > 0)
-                #   2. transient state (attn/mood/yomi) is present
-                #   3. dispatch response had no clean prose (model only thought,
-                #      wrote nothing) — avoids returning an empty narrative
-                #   4. model produced a think block (even alongside prose) —
-                #      ensures high-temperature re-generation to prevent the
-                #      low-temp dispatch prose from repeating across turns
-                attn_text = self._gather_attn_for_scene()
-                mood_text = self._gather_mood_for_scene()
-                yomi_text = self._gather_yomi_for_scene()
-
-                if (
-                    i > 0
-                    or attn_text
-                    or mood_text
-                    or yomi_text
-                    or not dispatch_prose.strip()
-                    or bool(accumulated_think)
-                ):
-                    synthesis = self._build_narrative_synthesis(
-                        accumulated_think, canonical_results
-                    )
-
-                    # Lead with the prose directive so the model does not
-                    # spend output tokens re-planning tool calls.
-                    injection_parts = [
-                        "PROSE PHASE — write the narrative response now. "
-                        "Do not plan or invoke any tools; this is the final "
-                        "prose generation step."
-                    ]
-                    if attn_text:
-                        injection_parts.append(attn_text)
-                    if mood_text:
-                        injection_parts.append(mood_text)
-                    if yomi_text:
-                        injection_parts.append(yomi_text)
-                    if synthesis:
-                        injection_parts.append(synthesis)
-
-                    injection = "\n\n".join(injection_parts)
-                    logger.debug(
-                        "[ATTN/MOOD/YOMI/SYNTH] injection: attn=%s mood=%s yomi=%s think=%d canonical=%d",
-                        bool(attn_text),
-                        bool(mood_text),
-                        bool(yomi_text),
-                        len(accumulated_think),
-                        len(canonical_results),
-                    )
-                    # Build a private copy for the synthesis call so the
-                    # injection directive is never written into the shared
-                    # message history (it is a one-shot prompt, not canon).
-                    synth_messages = self._guard_payload(
-                        list(messages) + [{"role": "user", "content": injection}],
-                        schema_overhead=self._cached_bare_schema_toks,
-                    )
-                    try:
-                        response_msg = call_llm(
-                            synth_messages,
-                            tools=self._bare_tool_schemas,
-                            tool_choice="none",
-                            temperature=NARRATIVE_TEMPERATURE,
-                            max_tokens=MAX_TOKENS_NARRATIVE,
-                        )
-                    except requests.exceptions.RequestException as exc:
-                        raise LLMError(str(exc)) from None
-
-                content = response_msg.get("content", "")
-                history_toks = self._last_payload_toks
-
-                # Advance turn counter; schedule entropy refresh on interval.
-                self._turn_count += 1
-                if (
-                    not self._system_refresh_pending
-                    and self._turn_count % SYSTEM_REFRESH_INTERVAL == 0
-                ):
-                    self._system_refresh_pending = True
-                    logger.info(
-                        "[ENTROPY] turn %d: scheduling system message refresh",
-                        self._turn_count,
-                    )
-
-                logger.info(
-                    "[CTX] run_tool_loop EXIT: narrative=%d tok | history=%d tok "
-                    "across %d messages | think_blocks=%d canonical_writes=%d | turn=%d",
-                    _tok(content),
-                    history_toks,
-                    len(messages),
-                    len(accumulated_think),
-                    len(canonical_results),
-                    self._turn_count,
-                )
-                return response_msg
-
-            # ── Extract think from this tool-calling response ──────────────
-            think, _ = self.strip_think_tags(response_msg.get("content", "") or "")
-            if think.strip():
-                accumulated_think.append(think.strip())
-                logger.debug("[SYNTH] captured think block (%d tok)", _tok(think))
-
-            messages.append(response_msg)
-
-            for tc in tool_calls:
-                fn_name = tc["function"]["name"]
-                fn_args = tc["function"]["arguments"]
-                tool_id = tc.get("id", fn_name)
-
-                logger.info("TOOL CALL [iter %d]: %s(%s)", i + 1, fn_name, fn_args)
-                result = self._dispatch(fn_name, fn_args)
-
-                # Track canonical write results for synthesis injection
-                if fn_name in _WRITE_TOOLS:
-                    canonical_results.append((fn_name, result))
-                    logger.debug("[SYNTH] captured canonical result from %s", fn_name)
-
-                if DEBUG_AUDIT_NOTES:
-                    self.create_notes_from_tool_calls(
-                        tool_calls=[tc],
-                        tool_results={tool_id: result},
-                    )
-
-                instruction, tool_msg = self.build_tool_result_message(tool_id, result)
-                if instruction:
-                    logger.debug(
-                        "followup_instruction from %s: %s", fn_name, instruction[:120]
-                    )
-
-                logger.debug("TOOL RESULT [%s]: %s", fn_name, tool_msg["content"][:200])
-                messages.append(tool_msg)
-
-                if instruction:
-                    messages.append({"role": "user", "content": instruction})
-
-        logger.warning("max iterations (%d) reached", max_iterations)
-        return {"content": "(The narrator deliberated too long and could not decide.)"}
