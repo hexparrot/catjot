@@ -579,8 +579,7 @@ class Note(object):
         last_record = None
         for inst in Note.match(src, [(SearchType.DIRECTORY, path)]):
             last_record = inst.now
-        else:
-            cls.delete(src, last_record)
+        cls.delete(src, last_record)
 
     @classmethod
     def commit(cls, src):
@@ -615,13 +614,11 @@ class Note(object):
 
         Fault tolerance
         ───────────────
-        If the first line of a record doesn't look like a Directory: header
-        (which happens when a raw "^-^" separator ends up inside a note's
-        message body, e.g. from `cat file.jot | jot`), the parser salvages
-        what it can: it borrows the pwd/now/tag from the previous valid record,
-        injects a synthetic context explaining what happened, and continues
-        collecting lines.  The corrupted segment is preserved in the message
-        body so nothing is silently discarded.
+        If the first line of a new record doesn't look like a Directory:
+        header (which happens when a raw "^-^" separator ends up inside a
+        previous note's message body, e.g. from `cat file.jot | jot`), the
+        malformed fragment is silently discarded so it doesn't poison the
+        rest of the file.  Parsing resumes at the next valid record boundary.
 
         Yields:
             Note objects, one per valid record.
@@ -657,7 +654,6 @@ class Note(object):
                 return current_read
 
         current_record = []
-        last_record = None
         last_line = ""
 
         with open(src, "r") as file:
@@ -671,31 +667,19 @@ class Note(object):
                 else:
                     if current_record and Note.LABEL_PWD not in current_record[0]:
                         # We're mid-record but the first line doesn't look like
-                        # a Directory: header — the separator ended up inside
-                        # note data.  Salvage by inheriting the previous record's
-                        # metadata and flagging it in the context field.
-                        try:
-                            current_record = last_record[0:3]  # pwd, now, tag lines
-                        except TypeError:
-                            # No previous record to borrow from (corrupted start
-                            # of file).  Discard this fragment and move on.
-                            current_record = []
-                            last_line = ""
-                            continue
-                        else:
-                            current_record.append(
-                                f"{Note.LABEL_CTX}Unexpected new-record line found in data.\n"
-                                + f"Salvaging remaining note into this new note.\n"
-                                + f"Ignore this line up to and including Date above, to restore original form."
-                            )
+                        # a Directory: header — a separator landed inside the
+                        # previous note's data.  Drop this fragment silently
+                        # and wait for the next valid record boundary.
+                        current_record = []
+                        last_line = ""
+                        continue
 
                     current_record.append(line)
                     last_line = line.strip()
-            else:
-                # End of file: no trailing separator, so flush the last record
-                # manually if one is in progress.
-                if last_line == "" and len(current_record):
-                    yield Note(parse(current_record))
+            # End of file: no trailing separator, so flush the last record
+            # manually if one is in progress.
+            if last_line == "" and len(current_record):
+                yield Note(parse(current_record))
 
     @classmethod
     def match(cls, src, criteria, logic="and", time_only=False):
@@ -991,9 +975,12 @@ class ContextBundle(object):
         new_obj = copy.deepcopy(self)
 
         if isinstance(item, ContextBundle):
-            [new_obj.suppress(t) for t in item.tags]
-            [new_obj.suppress(t) for t in item.ts]
-            [new_obj.suppress(t) for t in item.dirs]
+            for t in item.tags:
+                new_obj.suppress(t)
+            for t in item.ts:
+                new_obj.suppress(t)
+            for t in item.dirs:
+                new_obj.suppress(t)
         else:
             # Identifies and removes matching notes
             new_obj -= item
@@ -1010,10 +997,6 @@ class ContextBundle(object):
     def _visible_notes(self):
         """Yield notes that pass all suppression filters, without duplicates.
 
-        Walks self.notes three times — once for each term type (tags, ts,
-        dirs) — and yields each qualifying note at most once by tracking
-        already-seen notes in a local list.
-
         A note is hidden if any of the following is true:
           • one of its tag words appears in self.blocks["tag"]
           • its pwd is in self.blocks["directory"]
@@ -1022,23 +1005,18 @@ class ContextBundle(object):
         This is used by __iter__, __len__, and __str__ — everything that
         needs to respect the current suppression state goes through here.
         """
-        seen = []
-
-        def iterate_notes(values):
-            for value in values:
-                for n in self.notes:
-                    if (
-                        set(n.tag.split()).isdisjoint(self.blocks["tag"])
-                        and n.pwd not in self.blocks["directory"]
-                        and n.now not in self.blocks["timestamp"]
-                        and n not in seen
-                    ):
-                        seen.append(n)
-                        yield n
-
-        yield from iterate_notes(self.tags)
-        yield from iterate_notes(self.ts)
-        yield from iterate_notes(self.dirs)
+        seen = set()
+        for n in self.notes:
+            if id(n) in seen:
+                continue
+            if not set(n.tag.split()).isdisjoint(self.blocks["tag"]):
+                continue
+            if n.pwd in self.blocks["directory"]:
+                continue
+            if n.now in self.blocks["timestamp"]:
+                continue
+            seen.add(id(n))
+            yield n
 
     def _regen_notes(self):
         """Rebuild self.notes by re-reading Note.NOTEFILE from disk.
@@ -1586,45 +1564,50 @@ _SEARCH_PARAM_SCHEMA = {
     "required": ["query"],
 }
 
-register_tool(
-    name="search_by_tag",
-    description=(
-        "Search catjot notes by the tag field. "
-        "Returns a JSON list of note IDs (Note.now values)."
-    ),
-    parameters=_SEARCH_PARAM_SCHEMA,
-    handler=make_tag_search_handler(),
-)
 
-register_tool(
-    name="search_by_context",
-    description=(
-        "Search catjot notes by the context field (case-insensitive). "
-        "Returns a JSON list of note IDs (Note.now values)."
-    ),
-    parameters=_SEARCH_PARAM_SCHEMA,
-    handler=make_context_search_handler(),
-)
+def register_search_tools():
+    """Register the four field-search tools used by ``jot llm``.
 
-register_tool(
-    name="search_by_message",
-    description=(
-        "Search catjot notes by the message body (case-insensitive). "
-        "Returns a JSON list of note IDs (Note.now values)."
-    ),
-    parameters=_SEARCH_PARAM_SCHEMA,
-    handler=make_message_search_handler(),
-)
-
-register_tool(
-    name="search_by_directory",
-    description=(
-        "Search catjot notes by the directory/pwd field. "
-        "Returns a JSON list of note IDs (Note.now values)."
-    ),
-    parameters=_SEARCH_PARAM_SCHEMA,
-    handler=make_directory_search_handler(),
-)
+    Called lazily from ``run_tool_loop`` so simply importing this module
+    does not mutate the global tool registry.  Idempotent — calling it
+    repeatedly only updates the entries already present.
+    """
+    register_tool(
+        name="search_by_tag",
+        description=(
+            "Search catjot notes by the tag field. "
+            "Returns a JSON list of note IDs (Note.now values)."
+        ),
+        parameters=_SEARCH_PARAM_SCHEMA,
+        handler=make_tag_search_handler(),
+    )
+    register_tool(
+        name="search_by_context",
+        description=(
+            "Search catjot notes by the context field (case-insensitive). "
+            "Returns a JSON list of note IDs (Note.now values)."
+        ),
+        parameters=_SEARCH_PARAM_SCHEMA,
+        handler=make_context_search_handler(),
+    )
+    register_tool(
+        name="search_by_message",
+        description=(
+            "Search catjot notes by the message body (case-insensitive). "
+            "Returns a JSON list of note IDs (Note.now values)."
+        ),
+        parameters=_SEARCH_PARAM_SCHEMA,
+        handler=make_message_search_handler(),
+    )
+    register_tool(
+        name="search_by_directory",
+        description=(
+            "Search catjot notes by the directory/pwd field. "
+            "Returns a JSON list of note IDs (Note.now values)."
+        ),
+        parameters=_SEARCH_PARAM_SCHEMA,
+        handler=make_directory_search_handler(),
+    )
 
 
 # --- aggregation helpers ---
@@ -1710,6 +1693,7 @@ def run_tool_loop(user_query, max_iterations=10):
 
     Returns a plain-text answer string suitable for ``print_ascii_cat_with_text``.
     """
+    register_search_tools()
     CATGPT_ROLE = getenv("openai_api_sysrole", "")
 
     system_prompt = (
@@ -1904,6 +1888,10 @@ def is_binary_string(data):
     """
     Determine if a string is binary or text by checking for non-text characters.
 
+    Treats any printable Unicode character as text — only control characters
+    (other than common whitespace) count as binary.  This keeps non-ASCII
+    content like emoji and non-Latin scripts from being misclassified.
+
     :param data: A string to be checked
     :return: True if the string is binary, False if it is text
     """
@@ -1913,11 +1901,12 @@ def is_binary_string(data):
     if "\x00" in data:
         return True
 
-    # Heuristic: if more than 30% of the characters are non-text characters, it's binary
-    text_characters = "".join(map(chr, range(32, 127))) + "\n\r\t\b"
-    non_text_chars = "".join([char for char in data if char not in text_characters])
+    allowed_whitespace = "\n\r\t\b"
+    non_text_count = sum(
+        1 for ch in data if ch not in allowed_whitespace and not ch.isprintable()
+    )
 
-    return len(non_text_chars) / len(data) > 0.3
+    return non_text_count / len(data) > 0.3
 
 
 def print_ascii_cat_with_text(
@@ -2396,8 +2385,7 @@ def main():
                     print(char, end="", flush=True)
                     response += char
                     time.sleep(0.01)
-                else:
-                    print()
+                print()
 
                 if response:
                     Note.append(NOTEFILE, Note.jot(response, **params))
@@ -2699,8 +2687,7 @@ def main():
                         print(char, end="", flush=True)
                         response += char
                         time.sleep(0.01)
-                    else:
-                        print()
+                    print()
 
                     if response:
                         messages.append(
@@ -2748,20 +2735,24 @@ def main():
         elif len(args.additional_args) == 1:
             if args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
                 # only display the most recently created note in this PWD
-                last_note = "No notes to show.\n"
+                last_note = None
                 with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                     for inst in nc:
                         last_note = inst
-                    else:
-                        printout(last_note)
+                if last_note is None:
+                    print("No notes to show.")
+                else:
+                    printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]:
                 # only display the most recently created note in this PWD
-                last_note = "No notes to show.\n"
+                last_note = None
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     for inst in nc:
                         last_note = inst
-                    else:
-                        printout(last_note)
+                if last_note is None:
+                    print("No notes to show.")
+                else:
+                    printout(last_note)
             elif args.additional_args[0] in SHORTCUTS["DELETE_MOST_RECENT_PWD"]:
                 # always deletes the most recently created note in this PWD
                 try:
@@ -2807,8 +2798,10 @@ def main():
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     for inst in nc:
                         last_note = inst
-                    else:
-                        printout(last_note, message_only=True)
+                if last_note is None:
+                    print("No notes to show.")
+                else:
+                    printout(last_note, message_only=True)
             elif args.additional_args[0] in SHORTCUTS["SLEEPING_CAT"]:
 
                 def alternate_last_n_lines(text, n):
@@ -2845,7 +2838,6 @@ def main():
                 import subprocess
                 import os
 
-                last_note = None
                 records = []  # will consist of (timestamp, message[0])
                 with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
                     for inst in nc:
@@ -2928,7 +2920,8 @@ def main():
                 # -> {"pwd": "/home/willy"}
                 # when invoked without a pipe, e.g., "jot ql", it gives all notes+child notes of the pwd
 
-                QUERY = """
+                # Trimmed projection: omit pwd/now fields the CLI doesn't display.
+                CLI_QUERY = """
                 query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
                   notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
                     tag
@@ -2952,7 +2945,9 @@ def main():
                 from pprint import pprint
 
                 pprint(parsed_vars)
-                pprint(catjot_graphql().execute_query(parsed_vars, query=QUERY).data)
+                pprint(
+                    catjot_graphql().execute_query(parsed_vars, query=CLI_QUERY).data
+                )
             elif args.additional_args[0] in SHORTCUTS["CREATE_SPACED_REPETITION"]:
                 print("Enter note prompt/hint:")
                 prompt = flatten_pipe(sys.stdin.readlines())  # this matches context
@@ -3171,8 +3166,10 @@ def main():
                     with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
                         for inst in nc:
                             last_note = inst
-                        else:
-                            printout(last_note, message_only=True)
+                    if last_note is None:
+                        print("No notes to show.")
+                    else:
+                        printout(last_note, message_only=True)
             elif args.additional_args[0] in SHORTCUTS["SIDE_BY_SIDE"]:
                 # prints a note and allows you to rewrite the line/accept line as-is
                 # Acceptable Input:
@@ -3261,20 +3258,19 @@ def main():
                             # value is changed from original, keep provided value
                             last_mark = MARKS["x"]
                             newnote_lines.append(usr_in.rstrip() + "\n")
-                    else:  # after all the iterating
-                        addl_context = f"rewritten note from {last_note.now}"
-                        new_note = {
-                            "message": "".join(newnote_lines),
-                            "pwd": last_note.pwd,
-                            "now": None,
-                            "tag": last_note.tag,
-                            "context": (
-                                addl_context
-                                if not last_note.context
-                                else f"{last_note.context};{addl_context}"
-                            ),
-                        }
-                        Note.append(NOTEFILE, Note.jot(**new_note))
+                    addl_context = f"rewritten note from {last_note.now}"
+                    new_note = {
+                        "message": "".join(newnote_lines),
+                        "pwd": last_note.pwd,
+                        "now": None,
+                        "tag": last_note.tag,
+                        "context": (
+                            addl_context
+                            if not last_note.context
+                            else f"{last_note.context};{addl_context}"
+                        ),
+                    }
+                    Note.append(NOTEFILE, Note.jot(**new_note))
                 else:
                     print(
                         f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting"
