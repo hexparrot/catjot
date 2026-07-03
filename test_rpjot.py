@@ -1553,6 +1553,232 @@ class TestHistoryCompaction(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12c. Cast-drift detection — RPJotEngine._scan_cast_drift (W5 / T1)
+# ---------------------------------------------------------------------------
+
+
+class TestCastDrift(unittest.TestCase):
+    """Named-but-absent NPCs must be detected (never auto-added to the cast)."""
+
+    def _engine(self, people):
+        return _make_engine(location="ravenwood-manor", people=people)
+
+    def test_mentioned_but_absent_npc_warns(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I look around", "Evie beckons you closer from the doorway."
+        )
+        self.assertIn("evie", warnings)
+        self.assertIn("evie", eng._cast_warning_line())
+
+    def test_present_npc_no_warning(self):
+        eng = self._engine({"player", "evie"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC speaks aloud]: hello", "Evie smiles warmly at you."
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(eng._cast_warning_line(), "")
+
+    def test_known_absent_but_unmentioned_no_warning(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I sit down", "The room is empty and still."
+        )
+        self.assertEqual(warnings, [])
+
+    def test_main_character_never_warns(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register(eng.main_character, eng.main_character)
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I move", f"{eng.main_character} steps into the light."
+        )
+        self.assertNotIn(eng.main_character, warnings)
+
+    def test_word_boundary_avoids_substring_false_positive(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("eve", "Eve", location="ravenwood-manor")
+        # 'eventually' contains 'eve' but must not match on a word boundary.
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I wait", "Eventually the clock chimes; nobody appears."
+        )
+        self.assertEqual(warnings, [])
+
+    def test_warning_clears_when_cast_resolves(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng._scan_cast_drift("x", "Evie appears in the hall.")
+        self.assertTrue(eng._cast_warnings)
+        eng.session.people_present.add("evie")
+        eng._scan_cast_drift("x", "Evie is still here.")
+        self.assertEqual(eng._cast_warnings, [])
+
+
+# ---------------------------------------------------------------------------
+# 12d. Zero-canonical nudge — ComplianceStep (W6 / T2)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroCanonicalNudge(unittest.TestCase):
+    """An empty-canonical action/dialogue turn gets exactly one corrective round."""
+
+    def _run(self, rounds, classified):
+        import rpjot as rpjot_module
+
+        calls = {"i": 0, "msgs": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["msgs"].append(
+                [str(m.get("content") or "") for m in messages]
+            )
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng.init_pipeline()
+            step2 = [{"role": "system", "content": "rules"}]
+            canonical, think = eng._compliance_step.run(
+                classified, "WORLD STATE: a room", step2
+            )
+        finally:
+            rpjot_module.call_llm = original
+        return canonical, calls
+
+    def _record_event_round(self):
+        return {
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "record_event",
+                        "arguments": json.dumps(
+                            {"description": "opened the door", "tags": "exp:player"}
+                        ),
+                    },
+                }
+            ]
+        }
+
+    def _injected_nudge(self, calls):
+        joined = " ".join(c for msgs in calls["msgs"] for c in msgs if c)
+        return "No canonical record was written" in joined
+
+    def test_prose_only_then_record_event_after_nudge(self):
+        rounds = [
+            {"content": "The door is only a door."},  # prose, no canon
+            self._record_event_round(),  # responds to the nudge
+            {"content": "All set."},  # exits
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertIn("record_event", [fn for fn, _ in canonical])
+        self.assertEqual(calls["i"], 3)
+        self.assertTrue(self._injected_nudge(calls))
+
+    def test_done_reply_completes_with_zero_canonical(self):
+        rounds = [
+            {"content": "nothing of note happens"},
+            {"content": "DONE"},
+        ]
+        canonical, calls = self._run(rounds, "[MC speaks aloud]: anyone there?")
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 2)  # initial + single nudge round
+        self.assertTrue(self._injected_nudge(calls))
+
+    def test_no_nudge_for_inner_monologue(self):
+        rounds = [{"content": "a quiet private thought"}]
+        canonical, calls = self._run(
+            rounds, "[MC inner monologue — private, unspoken]: I wonder if…"
+        )
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 1)  # no nudge
+        self.assertFalse(self._injected_nudge(calls))
+
+    def test_no_nudge_for_attention_shift(self):
+        rounds = [{"content": "the gaze settles"}]
+        canonical, calls = self._run(
+            rounds, '[MC attention → "window"]: Shift focus to the window.'
+        )
+        self.assertEqual(calls["i"], 1)
+        self.assertFalse(self._injected_nudge(calls))
+
+    def test_never_nudges_twice(self):
+        rounds = [
+            {"content": "nope"},
+            {"content": "still nothing"},
+            {"content": "and nothing again"},
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I keep waiting")
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 2)  # nudged once, then returned
+
+    def test_no_nudge_when_canon_already_written(self):
+        rounds = [
+            self._record_event_round(),  # writes canon on round 1
+            {"content": "narrated"},  # exits, canon present → no nudge
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertEqual(calls["i"], 2)
+        self.assertFalse(self._injected_nudge(calls))
+
+
+# ---------------------------------------------------------------------------
+# 12e. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# ---------------------------------------------------------------------------
+
+
+class TestCompactSchemaKeepList(unittest.TestCase):
+    """Critical argument contracts survive step-2 schema compaction."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.compact = {
+            s["function"]["name"]: s for s in self.engine._compact_step2_schemas
+        }
+
+    def _props(self, tool):
+        return self.compact[tool]["function"]["parameters"]["properties"]
+
+    def test_record_event_tags_keeps_grammar(self):
+        desc = self._props("record_event")["tags"].get("description", "")
+        self.assertIn("exp:", desc)
+        self.assertIn("know:", desc)
+
+    def test_record_knowledge_keeps_witness_and_observable_contracts(self):
+        props = self._props("record_knowledge")
+        self.assertIn("description", props["witnesses"])
+        self.assertIn("description", props["observable_act"])
+
+    def test_navigate_and_save_location_keeps_path_grammar(self):
+        self.assertIn("description", self._props("navigate_to")["location_name"])
+        self.assertIn("description", self._props("save_location")["name"])
+
+    def test_non_keeplist_tool_has_no_param_descriptions(self):
+        for tool in ("record_bond", "record_mood", "save_object"):
+            for k, pdef in self._props(tool).items():
+                self.assertNotIn(
+                    "description", pdef, f"{tool}.{k} kept a description"
+                )
+
+    def test_compact_budget_under_3000(self):
+        self.assertLessEqual(self.engine._cached_compact_step2_schema_toks, 3000)
+
+    def test_compact_smaller_than_full_schema(self):
+        self.assertLess(
+            self.engine._cached_compact_step2_schema_toks,
+            self.engine._cached_schema_toks,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 13. _condense_context -- live LLM + fallback behavior
 # ---------------------------------------------------------------------------
 

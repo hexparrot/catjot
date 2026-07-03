@@ -469,11 +469,15 @@ class WorldStateStep:
 
         baseline = self._build_baseline_context(classified_input)
 
+        cast_warning = self.engine._cast_warning_line()
+        cast_block = f"\n{cast_warning}\n" if cast_warning else ""
+
         return (
             f"SCENE STATE:\n"
             f"  location: {sess.location}\n"
             f"  scene: {sess.current_scene or '(none)'}\n"
-            f"  people_present: {present}\n\n"
+            f"  people_present: {present}\n"
+            f"{cast_block}\n"
             f"NPC TRACKER (session memory — every named character on file):\n{roster}\n\n"
             f"{baseline}\n"
             f"PLAYER INPUT:\n{classified_input}\n\n"
@@ -612,8 +616,32 @@ class ComplianceStep:
     Returns (canonical_results, accumulated_think) for ProseStep.
     """
 
+    # Corrective directive for the zero-canonical nudge (T2/D4). Prefixed
+    # [DIRECTIVE] so the model does not confuse it with player input (T5).
+    _ZERO_CANONICAL_NUDGE = (
+        "[DIRECTIVE] No canonical record was written this turn. If anything "
+        "happened — an action, dialogue, or discovery — call record_event or "
+        "record_knowledge now. If truly nothing canonical occurred, reply "
+        "exactly: DONE."
+    )
+
+    # Classified-input prefixes that warrant a nudge when the turn wrote no
+    # canon. Actions and spoken/likely-spoken lines usually establish canon;
+    # inner monologue and pure attention shifts often do not (D4).
+    _NUDGE_PREFIXES = (
+        "[MC action]",
+        "[MC speaks aloud]",
+        "[MC — likely spoken aloud",
+    )
+
     def __init__(self, engine: "RPJotEngine") -> None:
         self.engine = engine
+
+    @classmethod
+    def _should_nudge_zero_canonical(cls, classified_input: str) -> bool:
+        """True when an empty-canonical turn should get one corrective round."""
+        s = (classified_input or "").lstrip()
+        return s.startswith(cls._NUDGE_PREFIXES)
 
     def run(
         self,
@@ -638,7 +666,12 @@ class ComplianceStep:
             {"role": "user", "content": "\n\n".join(user_content_parts)}
         ]
 
-        for i in range(max_iterations):
+        # `bound` is bumped by exactly one if the zero-canonical nudge fires, so
+        # the corrective round always has room even on the last iteration (D4).
+        i = 0
+        bound = max_iterations
+        nudged = False
+        while i < bound:
             messages = engine._guard_payload(
                 messages, schema_overhead=engine._cached_compact_step2_schema_toks
             )
@@ -660,6 +693,29 @@ class ComplianceStep:
                 )
                 if think.strip():
                     accumulated_think.append(think.strip())
+
+                if (
+                    not canonical_results
+                    and not nudged
+                    and self._should_nudge_zero_canonical(classified_input)
+                ):
+                    nudged = True
+                    bound += 1
+                    messages.append(response_msg)
+                    messages.append(
+                        {"role": "user", "content": self._ZERO_CANONICAL_NUDGE}
+                    )
+                    logger.info("[STEP2] zero-canonical nudge → injected")
+                    i += 1
+                    continue
+
+                if nudged:
+                    outcome = (
+                        f"recorded {len(canonical_results)}"
+                        if canonical_results
+                        else "acknowledged (no canon)"
+                    )
+                    logger.info("[STEP2] zero-canonical nudge → %s", outcome)
                 logger.info(
                     "[STEP2] complete: %d tool rounds, canonical=%d think=%d",
                     i,
@@ -690,6 +746,8 @@ class ComplianceStep:
                 messages.append(tool_msg)
                 if instruction:
                     messages.append({"role": "user", "content": instruction})
+
+            i += 1
 
         logger.warning("[STEP2] max iterations reached")
         return canonical_results, accumulated_think
@@ -792,6 +850,10 @@ class RPJotEngine:
         self._cached_compact_step2_schema_toks: int = 0
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
+        # Cast-drift warnings (T1): NPC slugs named in the turn's text but absent
+        # from people_present. Detection only; surfaced in /stats and the next
+        # step-1 SCENE STATE header, cleared when the discrepancy resolves.
+        self._cast_warnings: list = []
         self.main_character = main_character
         self.session = SessionState(
             location=location,
@@ -871,22 +933,46 @@ class RPJotEngine:
             for s in self._step1_schemas
         ]
 
+    # Parameter descriptions that survive step-2 schema compaction (T3/D3).
+    # These carry load-bearing argument contracts — the exp:/know: tag grammar,
+    # witness/observable-act semantics, hierarchical path rules — whose loss
+    # silently corrupts the knowledge-asymmetry engine. Ordered so the keep-list
+    # can be trimmed from the bottom if the compact budget ever exceeds ~3,000
+    # tok (never drop the first three entries).
+    _COMPACT_KEEP_PARAM_DESCRIPTIONS = [
+        ("record_event", "tags"),
+        ("record_knowledge", "witnesses"),
+        ("record_knowledge", "observable_act"),
+        ("navigate_to", "location_name"),
+        ("save_location", "name"),
+    ]
+
     @property
     def _compact_step2_schemas(self) -> list:
-        """Step 2 schemas with string descriptions stripped from parameters.
+        """Step 2 schemas with most parameter descriptions stripped.
 
         Preserves tool name, parameter names, types, and required fields so the
         model can still call tools correctly — just without the verbose English
         descriptions that inflate schema overhead from ~7,700 tok to ~2,000 tok.
+        The critical argument contracts in _COMPACT_KEEP_PARAM_DESCRIPTIONS are
+        retained (T3): without them the model has to guess the exp:/know: tag
+        grammar and witness semantics, silently producing notes POV queries
+        cannot find.
         """
+        keep = set(self._COMPACT_KEEP_PARAM_DESCRIPTIONS)
         result = []
         for s in self._step2_schemas:
             fn = s["function"]
+            name = fn["name"]
             params = fn.get("parameters", {})
-            stripped_props = {
-                k: {pk: pv for pk, pv in pdef.items() if pk != "description"}
-                for k, pdef in params.get("properties", {}).items()
-            }
+            stripped_props = {}
+            for k, pdef in params.get("properties", {}).items():
+                if (name, k) in keep:
+                    stripped_props[k] = dict(pdef)
+                else:
+                    stripped_props[k] = {
+                        pk: pv for pk, pv in pdef.items() if pk != "description"
+                    }
             result.append(
                 {
                     "type": "function",
@@ -1115,6 +1201,10 @@ class RPJotEngine:
         )
         logger.info("[TURN] step3 done: narrative=%d tok", _tok(narrative))
 
+        # Cast-drift detection (T1): compare who the turn's text names against
+        # who the session thinks is present. Detection only — never mutates cast.
+        self._scan_cast_drift(classified_input, narrative)
+
         # Advance turn counter; schedule entropy refresh
         self._turn_count += 1
         if (
@@ -1127,6 +1217,53 @@ class RPJotEngine:
             )
 
         return narrative
+
+    def _scan_cast_drift(self, classified_input: str, narrative: str) -> list:
+        """Detect NPCs named in the turn's text but absent from people_present.
+
+        The highest-stakes silent failure in the system: if the narrative
+        introduces or dismisses a character without set_people_present firing,
+        every downstream deterministic guarantee (baseline profiles, POV
+        contexts, exp: witness tagging) keys off the wrong cast. This only
+        *detects* the drift — it never mutates the cast, because a wrong guess
+        would corrupt canon exactly the way a miss does (T1 rationale).
+
+        Matching is case-insensitive and word-boundary anchored on each known
+        NPC's display_name and slug; the main character is skipped. Results
+        replace self._cast_warnings, so the warning clears automatically once
+        the named character is added to the cast or stops being mentioned.
+        """
+        text = f"{classified_input}\n{narrative}".lower()
+        present = {p.lower() for p in self.session.people_present}
+        mentioned_absent: list = []
+        for rec in self.npc_tracker.all():
+            if rec.slug == self.main_character:
+                continue
+            if rec.slug.lower() in present:
+                continue
+            for name in {rec.display_name, rec.slug}:
+                if not name:
+                    continue
+                if re.search(r"\b" + re.escape(name.lower()) + r"\b", text):
+                    mentioned_absent.append(rec.slug)
+                    break
+        self._cast_warnings = sorted(set(mentioned_absent))
+        if self._cast_warnings:
+            logger.warning(
+                "[CAST] mentioned-but-absent: %s", ", ".join(self._cast_warnings)
+            )
+        return self._cast_warnings
+
+    def _cast_warning_line(self) -> str:
+        """One-line cast-drift warning for headers/reports, or '' if none."""
+        if not self._cast_warnings:
+            return ""
+        return (
+            "CAST WARNING: narrative mentions "
+            f"{', '.join(self._cast_warnings)} who "
+            f"{'is' if len(self._cast_warnings) == 1 else 'are'} "
+            "not in people_present — call set_people_present if the cast changed."
+        )
 
     def init_pipeline(self) -> None:
         """Instantiate the 3-step pipeline objects. Call after register_all_tools()."""
@@ -4287,6 +4424,11 @@ class RPJotEngine:
             f"  |  cap: {cap:,} tok"
         )
         lines.append(HDR)
+
+        # ── CAST DRIFT WARNING ───────────────────────────────────────────
+        cast_warning = self._cast_warning_line()
+        if cast_warning:
+            lines.append(f"\n⚠  {cast_warning}")
 
         # ── LOCATION HIERARCHY ───────────────────────────────────────────
         lines.append("\nLOCATION HIERARCHY")
