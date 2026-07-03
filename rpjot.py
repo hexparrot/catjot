@@ -1095,16 +1095,23 @@ class RPJotEngine:
     # Compaction strips ALL function descriptions by default (§3.1), so the model
     # selects among 31 step-2 tools essentially by name. This map is EMPTY unless
     # a description is load-bearing for tool *selection* (not argument shape,
-    # which _COMPACT_KEEP_PARAM_DESCRIPTIONS covers). Populate the navigate_to
-    # one-liner here — the `nudge_pos_desc` upgrade — only if the bakeoff shows it
-    # beats the stationary nudge alone at closing the neg_invite residual. Each
-    # entry costs ~30 tok; test_compact_budget_under_3000 guards the ceiling.
-    #   "navigate_to": (
-    #       "Move the scene when the MC's own body travels (or is physically "
-    #       "carried) to a new place; never for places merely mentioned, "
-    #       "offered, or thought about."
-    #   ),
-    _COMPACT_KEEP_FUNCTION_DESCRIPTIONS: dict = {}
+    # which _COMPACT_KEEP_PARAM_DESCRIPTIONS covers). Each entry costs ~30 tok;
+    # test_compact_budget_under_3000 guards the ceiling.
+    #
+    # navigate_to — the `nudge_pos_desc` upgrade. The 2026-07-03 re-sweep
+    # (bakeoff_navnudge) showed this one-liner ON TOP OF the stationary nudge
+    # strictly beats the nudge alone: vs the shipped v2 it lifts stationary
+    # 97%→100% (closes the neg_invite residual) and forced 33%→58% with no
+    # per-model regression — the "or is physically carried" clause reinforces the
+    # nudge's dragged/carried escape hatch. Text kept identical to
+    # bakeoff_navnudge.NAV_FUNCTION_DESC so production == the swept harness.
+    _COMPACT_KEEP_FUNCTION_DESCRIPTIONS: dict = {
+        "navigate_to": (
+            "Move the scene when the MC's own body travels (or is physically "
+            "carried) to a new place; never for places merely mentioned, "
+            "offered, or thought about."
+        ),
+    }
 
     @property
     def _compact_step2_schemas(self) -> list:
