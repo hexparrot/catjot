@@ -2,6 +2,7 @@
 """play.py -- Main game loop for the text-based RP engine."""
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -137,12 +138,34 @@ def query_location_context(engine):
 
 
 def query_object_context(engine, object_name=None):
-    """Return notes about objects in the scene or a specific named object."""
+    """Return object info via the engine's deterministic object registry.
+
+    /objects name → get_object render (residence + description + newest-first
+    timeline). /objects (bare) → registry residents of the current room.
+    """
     if object_name:
-        ctx = engine.gather_context([f"obj:{object_name}"])
-        return str(ctx) or f"[no notes found for object: {object_name}]"
-    ctx = engine.gather_context([f"{TAG_LOC}{engine.session.location}"])
-    return str(ctx) or "[no object notes found in current scene]"
+        data = json.loads(engine._tool_get_object(object_name))
+        if "known_objects" in data:  # miss — never guess a residence
+            roster = ", ".join(data["known_objects"]) or "(none)"
+            return f"[no object matching '{object_name}'] known objects: {roster}"
+        res = data.get("residence") or {}
+        if res.get("held_by"):
+            where = f"held by {res['held_by']}"
+        elif res.get("room"):
+            where = f"in {res['room']}"
+        else:
+            where = "location unknown"
+        parts = [f"OBJECT: {data['object']} ({where})"]
+        if data.get("canonical_description"):
+            parts.append(data["canonical_description"])
+        if data.get("timeline"):
+            parts.append("\nHISTORY (newest first):\n" + data["timeline"])
+        return "\n".join(parts).strip()
+
+    lines = engine._objects_here_lines(
+        engine.session.location, engine.session.people_present
+    )
+    return "\n".join(lines) if lines else "[no objects known in current scene]"
 
 
 def build_dynamic_context(engine) -> str:

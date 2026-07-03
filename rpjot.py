@@ -594,6 +594,20 @@ class WorldStateStep:
                 empty.append(name)
         if empty:
             parts.append(f"\n[NO CHARACTER NOTES ON FILE FOR]: {', '.join(empty)}")
+
+        # [OBJECTS HERE] — deterministic canonical-slug vocabulary (OBJECT_TOOLING
+        # §3.6): objects whose newest residence is this room, plus those held by
+        # present cast. Authoritative over stale room-blob sightings (I7).
+        try:
+            obj_lines = engine._objects_here_lines(sess.location, sess.people_present)
+        except Exception as exc:
+            logger.warning("[STEP1] baseline objects-here build failed: %s", exc)
+            obj_lines = []
+        if obj_lines:
+            parts.append(
+                "\n[OBJECTS HERE] (canonical slugs — reuse these exact names):\n"
+                + "\n".join(obj_lines)
+            )
         return "\n".join(parts) + "\n"
 
     def run(self, classified_input: str) -> str:
@@ -1920,6 +1934,79 @@ class RPJotEngine:
         # 4. Create-new — the normal path.
         return slug
 
+    @staticmethod
+    def _newest_by_now(notes):
+        """Return the newest note (max Note.now; equal-now → later-in-file).
+
+        `notes` must be in file/append order (NoteContext yields that order), so
+        the >= scan reproduces the OT §3.1 tie-break without an unstable sort.
+        """
+        best = None
+        for n in notes:
+            if best is None or n.now >= best.now:
+                best = n
+        return best
+
+    def _bundle_from_notes(self, notes) -> ContextBundle:
+        """Wrap an explicit note list in a transient ContextBundle (LM §3.6).
+
+        ContextBundle term-matching cannot express "exactly these notes", so build
+        an empty bundle and assign .notes directly — used to route an object's
+        timeline through render_context's recency/size caps.
+        """
+        bundle = ContextBundle([])
+        bundle.notes = list(notes)
+        return bundle
+
+    def _object_sightings(self, slug: str) -> list:
+        """Non-canonical obj:{slug} sighting notes, in file/append order."""
+        with NoteContext(Note.NOTEFILE, (SearchType.TAG, f"{TAG_OBJ}{slug}")) as nc:
+            return [n for n in nc if not n.pwd.startswith(PWD_OBJECTS + "/")]
+
+    def _object_canonical_description(self, slug: str) -> str:
+        """Canonical description: newest note at the canonical pwd, with a legacy
+        fallback to the newest sighting message (OBJECT_TOOLING §3.5 / §4)."""
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_OBJECTS}/{slug}")
+        ) as nc:
+            canon = self._newest_by_now(list(nc))
+        if canon is not None:
+            return canon.message.strip()
+        sighting = self._newest_by_now(self._object_sightings(slug))
+        return sighting.message.strip() if sighting is not None else ""
+
+    def _objects_here(self, location: str, present):
+        """Structured registry residents of `location` (OBJECT_TOOLING §3.6).
+
+        Returns (in_room_slugs, {holder: [slugs]}). Only the NEWEST residence
+        counts — an object moved out of `location` is excluded even though its
+        stale sighting note still sits in the room's ContextBundle blob; this is
+        the authoritative correction layer (invariant I7).
+        """
+        registry = self._object_registry()
+        in_room = []
+        held: dict = {}
+        present_set = set(present or [])
+        for slug in sorted(registry):
+            res = registry[slug]["residence"]
+            if not res:
+                continue
+            if res.get("room") == location:
+                in_room.append(slug)
+            elif res.get("held_by") in present_set:
+                held.setdefault(res["held_by"], []).append(slug)
+        return in_room, held
+
+    def _objects_here_lines(self, location: str, present) -> list:
+        """[OBJECTS HERE] body lines (in-room slugs, then held-by-present)."""
+        in_room, held = self._objects_here(location, present)
+        lines = []
+        if in_room:
+            lines.append(f"in this room: {', '.join(in_room)}")
+        for holder in sorted(held):
+            lines.append(f"held — {holder}: {', '.join(sorted(held[holder]))}")
+        return lines
+
     # ===================================================================
     # === 6. Context Building ===
     # ===================================================================
@@ -2443,6 +2530,11 @@ class RPJotEngine:
         state = {
             "people": list(self.session.people_present),
             "location": self.session.location,
+            # Deterministic registry residents (OBJECT_TOOLING §3.6): wins over the
+            # LLM-extracted noteworthy_objects on conflict.
+            "objects_here": self._objects_here_lines(
+                self.session.location, self.session.people_present
+            ),
             "noteworthy_objects": objects.get("noteworthy_objects", []),
             "established_props": objects.get("established_props", []),
             "followup_instruction": FOLLOWUP_QUERY,
@@ -2800,6 +2892,79 @@ class RPJotEngine:
             }
         )
         logger.info("get_character result: %d chars of context", len(context_str))
+        return result
+
+    @rp_tool(
+        description=(
+            "Retrieve a saved object's canonical description, its current residence "
+            "(the room it is in, or the character holding it), and its sighting "
+            "history newest-first. Call this to recall where an established object "
+            "is and what state it is in before writing it into the narrative."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Object name or slug to look up "
+                        "(e.g. 'iron-key', 'the iron key')"
+                    ),
+                },
+            },
+            "required": ["name"],
+        },
+        step=1,
+    )
+    def _tool_get_object(self, name: str):
+        """Return an object's residence + description + timeline as step-1 context.
+
+        Newest-wins residence read deterministically from the object registry;
+        never invents a residence on a miss (invariant I5) — returns the known
+        roster with a find_character-style "use an existing name" followup.
+        """
+        logger.info("ENTER _tool_get_object: name=%r", name)
+
+        slug = self._canonicalize_object(name)
+        cache_key = f"{TAG_OBJ}{slug}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        registry = self._object_registry()
+        entry = registry.get(slug)
+        if not slug or entry is None:
+            result = json.dumps(
+                {
+                    "object": f"[no object on file matching: {name!r}]",
+                    "known_objects": sorted(registry),
+                    "followup_instruction": (
+                        "No saved object matches. Use an existing name from "
+                        "known_objects, or introduce it with save_object. Do NOT "
+                        "invent where it is."
+                    ),
+                }
+            )
+            self._cache_put(cache_key, result)
+            return result
+
+        timeline = self.render_context(
+            self._bundle_from_notes(self._object_sightings(slug)), focus_hint=slug
+        )
+        result = json.dumps(
+            {
+                "object": slug,
+                "canonical_description": self._object_canonical_description(slug),
+                "residence": entry["residence"],
+                "timeline": timeline or "[no sightings recorded]",
+                "followup_instruction": (
+                    "Ground the object in its newest residence and state; a later "
+                    "sighting supersedes an earlier one."
+                ),
+            }
+        )
+        self._cache_put(cache_key, result)
+        logger.info("get_object result: %s → %s", slug, entry["residence"])
         return result
 
     @rp_tool(
@@ -4884,10 +5049,10 @@ class RPJotEngine:
             loc_notes = [
                 n
                 for n in all_notes
-                if not any(t.startswith("obj:") for t in n.tag.split())
+                if not any(t.startswith(TAG_OBJ) for t in n.tag.split())
             ]
             obj_notes = [
-                n for n in all_notes if any(t.startswith("obj:") for t in n.tag.split())
+                n for n in all_notes if any(t.startswith(TAG_OBJ) for t in n.tag.split())
             ]
             ln, lt = _accum(loc_notes)
             on, ot = _accum(obj_notes)

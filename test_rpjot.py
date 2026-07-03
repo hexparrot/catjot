@@ -589,11 +589,12 @@ class TestWorldEntityTools(unittest.TestCase):
     # --- navigate_to ---
 
     def test_navigate_to_updates_session_location(self):
-        # G4 fix (LM §3.3): from the single-component root "test-chamber", a bare
-        # destination that is NOT a known saved root nests as a child rather than
-        # becoming a detached top-level location (which would break
-        # location_ancestors recall). "dungeon" has no saved node here.
-        self.engine._tool_navigate_to("dungeon")
+        # A hierarchical destination (shared prefix) is resolved deterministically
+        # regardless of known_roots — this asserts the core "navigate updates
+        # session.location" contract without depending on the shared fixture's
+        # mutable root set. The G4 bare-name-nesting branch is covered
+        # deterministically by test_resolve_bare_name_from_root_unknown_nests_as_child.
+        self.engine._tool_navigate_to("test-chamber/dungeon")
         self.assertEqual(self.engine.session.location, "test-chamber/dungeon")
 
     def test_navigate_to_strips_loc_prefix(self):
@@ -3351,6 +3352,308 @@ class TestPrivateConversationKnowledge(unittest.TestCase):
             c_ctx,
             "actor_c's context map entry must contain the observable act",
         )
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — the permanence contract (OBJECT_PERMANENCE §4.1), zero LLM
+# ---------------------------------------------------------------------------
+
+
+class TestObjectPermanence(unittest.TestCase):
+    """Deterministic recall of whatever was written; stale-never-wrong-place.
+
+    A tarnished locket travels ravenwood-manor: it is introduced in the foyer,
+    restated in place, moved to the secret garden, pocketed by Evie, cracks in
+    her keeping, has its canonical description re-saved, and is finally merely
+    *talked about* back in the foyer. Each phase is seeded with an exact Note.now
+    so the timeline is deterministic; each test seeds only the history it asserts
+    against (_seed_through) and builds a fresh engine over that seeded file so the
+    object registry is never stale. Invariant IDs from §2 are named per assertion.
+    """
+
+    SLUG = "tarnished-locket"
+    ROOM_A = "ravenwood-manor/foyer"
+    ROOM_B = "ravenwood-manor/secret-garden"
+    HOLDER = "evie"
+    T = 1_750_000_000  # base epoch; phases step by 100
+
+    # PHASES[i] = list of Note.jot kwargs seeded for phase i.
+    PHASES = [
+        # P0 — genesis: canonical node + genesis sighting (both at T+0)
+        [
+            dict(
+                now=T + 0,
+                message="A tarnished silver locket, clasp worn, holding a faded portrait.",
+                tag="obj:tarnished-locket",
+                context="object canon: tarnished-locket",
+                pwd="/story/object/tarnished-locket",
+            ),
+            dict(
+                now=T + 0,
+                message="A tarnished silver locket, clasp worn, holding a faded portrait.",
+                tag="obj:tarnished-locket",
+                context="object sighting: tarnished-locket at ravenwood-manor/foyer",
+                pwd="/story/location/ravenwood-manor/foyer",
+            ),
+        ],
+        # P1 — restate in place (place_object, no destination)
+        [
+            dict(
+                now=T + 100,
+                message="tarnished-locket is here.",
+                tag="obj:tarnished-locket",
+                pwd="/story/location/ravenwood-manor/foyer",
+            )
+        ],
+        # P2 — moved to room B
+        [
+            dict(
+                now=T + 200,
+                message="The locket lies on the garden bench.",
+                tag="obj:tarnished-locket",
+                pwd="/story/location/ravenwood-manor/secret-garden",
+            )
+        ],
+        # P3 — picked up by NPC (possession is a residence)
+        [
+            dict(
+                now=T + 300,
+                message="Evie pockets the locket.",
+                tag="obj:tarnished-locket",
+                pwd="/story/character/evie/inventory",
+            )
+        ],
+        # P4 — state change files AT the current residence
+        [
+            dict(
+                now=T + 400,
+                message="The locket is now cracked across the portrait glass.",
+                tag="obj:tarnished-locket",
+                pwd="/story/character/evie/inventory",
+            )
+        ],
+        # P5 — canonical re-save: the GLOBALLY NEWEST note
+        [
+            dict(
+                now=T + 500,
+                message="A tarnished silver locket, now cracked across the portrait glass.",
+                tag="obj:tarnished-locket",
+                context="object canon: tarnished-locket",
+                pwd="/story/object/tarnished-locket",
+            )
+        ],
+        # P6 — mention-pollution tripwire (event that only DISCUSSES it)
+        [
+            dict(
+                now=T + 600,
+                message="Evie talks about the locket she lost years ago.",
+                tag="exp:evie obj:tarnished-locket",
+                pwd="/story/events/ravenwood-manor/foyer",
+            )
+        ],
+    ]
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    # --- helpers ---
+
+    def _seed(self, **kw):
+        Note.append(TMP_CATNOTE, Note.jot(**kw))
+
+    def _seed_through(self, k):
+        """Append phases 0..k inclusive."""
+        for phase in self.PHASES[: k + 1]:
+            for kw in phase:
+                self._seed(**kw)
+
+    def _engine(self, location=None, people=None):
+        """Fresh engine over the currently-seeded file (cold registry cache)."""
+        return _make_engine(
+            location=location or self.ROOM_A,
+            people=people if people is not None else {"player", self.HOLDER},
+        )
+
+    def _residence(self, engine, slug=None):
+        return engine._object_registry()[slug or self.SLUG]["residence"]
+
+    def _get_object(self, engine, name=None):
+        return json.loads(engine._tool_get_object(name or self.SLUG))
+
+    # --- P0: genesis in the foyer (I2) ---
+
+    def test_p0_residence_is_foyer(self):
+        self._seed_through(0)
+        eng = self._engine()
+        self.assertEqual(self._residence(eng), {"room": self.ROOM_A})
+
+    def test_p0_canonical_description_has_faded_portrait(self):
+        self._seed_through(0)
+        eng = self._engine()
+        self.assertIn("faded portrait", self._get_object(eng)["canonical_description"])
+
+    def test_p0_objects_here_lists_locket_in_foyer(self):
+        self._seed_through(0)
+        eng = self._engine()
+        lines = eng._objects_here_lines(self.ROOM_A, {"player", self.HOLDER})
+        self.assertTrue(any(self.SLUG in ln for ln in lines), lines)
+
+    # --- P1: restate in place — history, not corruption (I1) ---
+
+    def test_p1_residence_unchanged(self):
+        self._seed_through(1)
+        eng = self._engine()
+        self.assertEqual(self._residence(eng), {"room": self.ROOM_A})
+
+    def test_p1_two_sightings_newest_first(self):
+        self._seed_through(1)
+        eng = self._engine()
+        sightings = eng._object_sightings(self.SLUG)
+        self.assertEqual(len(sightings), 2)  # both foyer notes; canonical excluded
+        self.assertEqual(eng._newest_by_now(sightings).now, self.T + 100)
+
+    # --- P2: moved to room B; [OBJECTS HERE] is authoritative (I2, I7) ---
+
+    def test_p2_residence_is_secret_garden(self):
+        self._seed_through(2)
+        eng = self._engine()
+        self.assertEqual(self._residence(eng), {"room": self.ROOM_B})
+
+    def test_p2_objects_here_foyer_excludes_but_blob_still_has_stale_notes(self):
+        self._seed_through(2)
+        eng = self._engine()
+        # authoritative correction layer excludes the moved object from the foyer
+        foyer_lines = eng._objects_here_lines(self.ROOM_A, {"player", self.HOLDER})
+        self.assertFalse(any(self.SLUG in ln for ln in foyer_lines), foyer_lines)
+        # ...while the stale foyer sighting notes still sit in the room blob
+        blob = [n.message for n in ContextBundle(f"/story/location/{self.ROOM_A}")]
+        self.assertTrue(any("tarnished-locket is here." in m for m in blob), blob)
+        # ...and the secret-garden block lists it
+        garden_lines = eng._objects_here_lines(self.ROOM_B, {"player", self.HOLDER})
+        self.assertTrue(any(self.SLUG in ln for ln in garden_lines), garden_lines)
+
+    # --- P3: possession is a residence; profile stays clean (I2, OT §3.1) ---
+
+    def test_p3_residence_is_held_by_evie(self):
+        self._seed_through(3)
+        eng = self._engine()
+        self.assertEqual(self._residence(eng), {"held_by": self.HOLDER})
+
+    def test_p3_objects_here_shows_held_by_evie(self):
+        self._seed_through(3)
+        eng = self._engine()
+        lines = eng._objects_here_lines(self.ROOM_B, {"player", self.HOLDER})
+        self.assertIn(f"held — {self.HOLDER}: {self.SLUG}", lines)
+
+    def test_p3_inventory_note_absent_from_pov_context(self):
+        self._seed_through(3)
+        eng = self._engine()
+        pov = [n.message for n in eng.gather_pov_context(self.HOLDER)]
+        self.assertFalse(any("Evie pockets the locket." in m for m in pov), pov)
+
+    # --- P4: state change at residence; graceful without canon update (I1, I3) ---
+
+    def test_p4_timeline_newest_is_cracked_while_canon_still_worn(self):
+        self._seed_through(4)
+        eng = self._engine()
+        self.assertIn(
+            "cracked", eng._newest_by_now(eng._object_sightings(self.SLUG)).message
+        )
+        self.assertIn("clasp worn", self._get_object(eng)["canonical_description"])
+        self.assertEqual(self._residence(eng), {"held_by": self.HOLDER})
+
+    # --- P5: FLAGSHIP — canonical re-save does not move residence (I3) ---
+
+    def test_p5_canonical_resave_does_not_move_residence(self):
+        self._seed_through(5)
+        eng = self._engine()
+        # canonical note is now the GLOBALLY newest, yet residence stays with Evie
+        self.assertEqual(self._residence(eng), {"held_by": self.HOLDER})
+
+    def test_p5_canonical_description_is_newest_canon_text(self):
+        self._seed_through(5)
+        eng = self._engine()
+        self.assertIn("now cracked", self._get_object(eng)["canonical_description"])
+
+    # --- P6: mention-pollution tripwire (documented limitation, §2 caveat) ---
+
+    def test_p6_mention_pollution_tripwire_moves_residence(self):
+        # An obj:-tagged event that merely DISCUSSES the locket moves its parsed
+        # residence to the foyer — the mention≠presence twin of neg_navto. This
+        # asserts the CURRENT behavior so any future change is deliberate (§2).
+        self._seed_through(6)
+        eng = self._engine()
+        self.assertEqual(self._residence(eng), {"room": self.ROOM_A})
+
+    # --- Side fixtures (separate slugs) ---
+
+    def test_equal_now_later_in_file_wins(self):
+        # I6 tie-break: two sightings, both now=T+50, foyer then garden.
+        self._seed(
+            now=self.T + 50,
+            message="iron key on the sill.",
+            tag="obj:iron-key",
+            pwd="/story/location/ravenwood-manor/foyer",
+        )
+        self._seed(
+            now=self.T + 50,
+            message="iron key on the bench.",
+            tag="obj:iron-key",
+            pwd="/story/location/ravenwood-manor/secret-garden",
+        )
+        eng = self._engine()
+        self.assertEqual(self._residence(eng, "iron-key"), {"room": self.ROOM_B})
+
+    def test_event_tag_is_room_sighting(self):
+        # I8 fallback channel: an obj:-tagged record_event note is a room sighting.
+        self._seed(
+            now=self.T + 10,
+            message="A wax-sealed letter changes hands by the hearth.",
+            tag="exp:evie obj:sealed-letter",
+            pwd="/story/events/ravenwood-manor/foyer",
+        )
+        eng = self._engine()
+        self.assertEqual(self._residence(eng, "sealed-letter"), {"room": self.ROOM_A})
+
+    def test_legacy_note_is_genesis_sighting(self):
+        # I10 migration: an old-style write-only save_object note (description at a
+        # room pwd, no canonical node) is a valid genesis sighting.
+        self._seed(
+            now=self.T + 20,
+            message="A tall silver mirror in a tarnished frame.",
+            tag="obj:silver-mirror",
+            context="object: silver-mirror at ravenwood-manor/foyer",
+            pwd="/story/location/ravenwood-manor/foyer",
+        )
+        eng = self._engine()
+        data = self._get_object(eng, "silver-mirror")
+        self.assertEqual(data["residence"], {"room": self.ROOM_A})
+        self.assertIn("silver mirror", data["canonical_description"].lower())
+
+    def test_unknown_object_no_invented_residence(self):
+        # I5 stale-never-wrong-place: zero notes → roster miss, no residence.
+        eng = self._engine()
+        data = self._get_object(eng, "phantom dagger")
+        self.assertIn("known_objects", data)
+        self.assertNotIn("residence", data)
+
+    def test_residence_static_without_new_notes(self):
+        # I5: residence changes only when a sighting is written — two reads over an
+        # unchanged file agree.
+        self._seed_through(3)
+        eng = self._engine()
+        first = self._residence(eng)
+        # a fresh engine over the same unchanged file yields the same residence
+        eng2 = self._engine()
+        self.assertEqual(first, self._residence(eng2))
 
 
 if __name__ == "__main__":
