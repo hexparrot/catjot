@@ -1779,6 +1779,189 @@ class TestCompactSchemaKeepList(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12f. Sigil classification — play.classify_input (W8d / R4d)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyInput(unittest.TestCase):
+    """The prompt-facing input contract: sigils → explicit directives."""
+
+    def _c(self, raw):
+        import play
+
+        return play.classify_input(raw)
+
+    def test_speech_sigil(self):
+        out = self._c('"Hello there.')
+        self.assertTrue(out.startswith("[MC speaks aloud]"))
+        self.assertIn("Hello there.", out)
+
+    def test_action_sigil(self):
+        out = self._c("*opens the heavy door")
+        self.assertTrue(out.startswith("[MC action]"))
+        self.assertIn("opens the heavy door", out)
+
+    def test_attention_sigil_with_tail(self):
+        out = self._c("@evie you look nervous")
+        self.assertIn("[MC attention", out)
+        self.assertIn("evie", out)
+        self.assertIn("you look nervous", out)
+
+    def test_attention_sigil_without_tail(self):
+        out = self._c("@window")
+        self.assertIn("[MC attention", out)
+        self.assertIn("window", out)
+
+    def test_inner_monologue_sigil(self):
+        out = self._c("^I feel uneasy about this place")
+        self.assertIn("[MC inner monologue", out)
+        self.assertIn("I feel uneasy about this place", out)
+        # The monologue sigil nudges toward backstory-preserving tools.
+        self.assertIn("record_conscience", out)
+
+    def test_default_is_dialogue(self):
+        out = self._c("hello everyone")
+        self.assertIn("[MC — likely spoken aloud", out)
+        self.assertIn("hello everyone", out)
+
+
+# ---------------------------------------------------------------------------
+# 12g. Production-shape tool activation — LLM-gated (W9 / T6, D9)
+# ---------------------------------------------------------------------------
+
+
+class TestProductionActivation(unittest.TestCase):
+    """Phrase → tool selection in the real step-partitioned, compact-schema shape.
+
+    Unlike TestToolDispatch (all 42 flat schemas, generic GM prompt, one pass),
+    these assert selection under the exact production menus and system prompts.
+    LLM-gated (skipped without openai_api_url) and stochastic: each phrase runs
+    N=3 with a ≥2/3 pass threshold (D9).
+    """
+
+    def setUp(self):
+        self.engine = _make_engine(
+            location="ravenwood-manor", people={"player", "evie"}
+        )
+
+    def _passes(self, fn, n=3, need=2):
+        return sum(1 for _ in range(n) if fn()) >= need
+
+    def _step1_tools_for(self, phrase):
+        from rpjot import _STEP1_SYSTEM
+        from catjot import call_llm
+
+        messages = [
+            {"role": "system", "content": _STEP1_SYSTEM},
+            {"role": "user", "content": f"PLAYER INPUT:\n{phrase}"},
+        ]
+        resp = call_llm(
+            messages, tools=self.engine._step1_schemas, tool_choice="auto"
+        )
+        return [tc["function"]["name"] for tc in resp.get("tool_calls") or []]
+
+    def _step2_tools_for(self, phrase, world_doc=None):
+        from catjot import ContextBundle, call_llm
+
+        if world_doc is None:
+            world_doc = "WORLD STATE: you stand in the manor foyer with Evie."
+        rules = str(ContextBundle("system_role")).strip() or (
+            "You are the game master. Use tools to record canon."
+        )
+        parts = [
+            f"WORLD STATE BRIEFING:\n{world_doc}",
+            f"NARRATOR RULE: {self.engine._NARRATOR_RULE}",
+            phrase,
+        ]
+        messages = [
+            {"role": "system", "content": rules},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ]
+        resp = call_llm(
+            messages,
+            tools=self.engine._compact_step2_schemas,
+            tool_choice="auto",
+        )
+        return [tc["function"]["name"] for tc in resp.get("tool_calls") or []]
+
+    # --- Step 1 perception ---
+
+    def test_who_is_here_selects_get_people_present(self):
+        self.assertTrue(
+            self._passes(
+                lambda: "get_people_present"
+                in self._step1_tools_for("Who is here with me?")
+            )
+        )
+
+    # --- Step 2 consent: negative + positive pair ---
+
+    def test_npc_invitation_does_not_select_navigate_to(self):
+        phrase = (
+            '[MC speaks aloud]: "Lead on, then." '
+            "Evie beckons you to follow her down the corridor."
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "navigate_to" not in self._step2_tools_for(phrase)
+            )
+        )
+
+    def test_player_movement_selects_navigate_to(self):
+        phrase = "[MC action]: I follow her down the corridor to the drawing room."
+        self.assertTrue(
+            self._passes(
+                lambda: "navigate_to" in self._step2_tools_for(phrase)
+            )
+        )
+
+    # --- Step 2 cast membership ---
+
+    def test_arrival_selects_set_people_present(self):
+        phrase = (
+            "[MC action]: I open the front door; a butler steps inside and "
+            "introduces himself, joining me in the foyer."
+        )
+        world_doc = (
+            "WORLD STATE: you are alone in the foyer until the butler arrives."
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "set_people_present"
+                in self._step2_tools_for(phrase, world_doc)
+            )
+        )
+
+    # --- Step 2 new-NPC persistence ---
+
+    def test_new_npc_selects_save_character(self):
+        phrase = (
+            '[MC speaks aloud]: "And who might you be?" '
+            "The gardener introduces himself as Tomas."
+        )
+        world_doc = (
+            "WORLD STATE: a new character, a grizzled gardener named Tomas, "
+            "has just been introduced.\n[NO CHARACTER NOTES ON FILE FOR]: tomas"
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "save_character"
+                in self._step2_tools_for(phrase, world_doc)
+            )
+        )
+
+    # --- Step 2 event canon ---
+
+    def test_clear_action_selects_record_event(self):
+        phrase = "[MC action]: I pick up the iron key from the table and pocket it."
+        self.assertTrue(
+            self._passes(
+                lambda: "record_event" in self._step2_tools_for(phrase)
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
 # 13. _condense_context -- live LLM + fallback behavior
 # ---------------------------------------------------------------------------
 

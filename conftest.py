@@ -27,6 +27,7 @@ _LLM_CLASSES = {
     "TestRunToolLoop",
     "TestCondenseContext",
     "TestRecordKnowledgeLive",
+    "TestProductionActivation",
 }
 
 _LLM_PREFIXES = ("test_examine_location",)

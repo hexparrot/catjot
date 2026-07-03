@@ -1190,6 +1190,13 @@ class RPJotEngine:
             len(canonical_results),
             len(accumulated_think),
         )
+        # Per-turn tool census (T6/D7): makes under-used tools measurable before
+        # any decision to consolidate the rel/int taxonomy. Empty turns log too.
+        logger.info(
+            "[TOOLS] turn=%d step2=%s",
+            self._turn_count + 1,
+            [fn for fn, _ in canonical_results],
+        )
 
         # Step 3
         narrative = self._prose_step.run(
