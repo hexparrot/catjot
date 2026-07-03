@@ -1778,6 +1778,19 @@ class TestCompactSchemaKeepList(unittest.TestCase):
             self.engine._cached_schema_toks,
         )
 
+    def test_function_descriptions_match_keep_list(self):
+        # Compaction strips ALL function-level descriptions (§3.1) except tools
+        # on _COMPACT_KEEP_FUNCTION_DESCRIPTIONS. Assert exactly those carry a
+        # description and it matches the map — holds whether the keep-list is
+        # empty (default) or populated (the nudge_pos_desc upgrade).
+        keep = self.engine._COMPACT_KEEP_FUNCTION_DESCRIPTIONS
+        described = {
+            name: s["function"]["description"]
+            for name, s in self.compact.items()
+            if "description" in s["function"]
+        }
+        self.assertEqual(described, dict(keep))
+
 
 # ---------------------------------------------------------------------------
 # 12f. Sigil classification — play.classify_input (W8d / R4d)
@@ -1827,6 +1840,108 @@ class TestClassifyInput(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12f-bis. Stationary-turn classifier — ComplianceStep._is_stationary_turn (§3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestStationaryClassifier(unittest.TestCase):
+    """The sigil→mobility gate that decides whether the stationary nudge injects.
+
+    Pure unit (NO LLM): this gate must be correct without a server, since it
+    runs on every step-2 turn in production. True => MC did not move themselves
+    => nudge fires; False => baseline (no injection). Mirrors the swept
+    bakeoff_navnudge.classify_heuristic, including the "I follow her" collision
+    and the fail-open on unrecognized prefixes.
+    """
+
+    def _stat(self, classified_input):
+        from rpjot import ComplianceStep
+
+        return ComplianceStep._is_stationary_turn(classified_input)
+
+    # --- always-stationary prefixes (spoke / thought / attention) ---
+    def test_speech_is_stationary(self):
+        self.assertTrue(self._stat('[MC speaks aloud]: "Lead on, then."'))
+
+    def test_likely_spoken_is_stationary(self):
+        self.assertTrue(
+            self._stat(
+                "[MC — likely spoken aloud, interpret as dialogue unless "
+                "clearly an action]: lead on"
+            )
+        )
+
+    def test_inner_monologue_is_stationary(self):
+        self.assertTrue(
+            self._stat(
+                "[MC inner monologue — private, unspoken]: why would she?"
+            )
+        )
+
+    def test_attention_is_stationary(self):
+        self.assertTrue(self._stat('[MC attention → "window"]: look outside'))
+
+    # --- [MC action] resolved by first-person movement verb ---
+    def test_action_with_move_verb_is_mobile(self):
+        self.assertFalse(
+            self._stat(
+                "[MC action]: I follow her down the corridor to the drawing room."
+            )
+        )
+
+    def test_action_climb_is_mobile(self):
+        self.assertFalse(self._stat("[MC action]: I climb the stairs to the attic."))
+
+    def test_action_without_move_verb_is_stationary(self):
+        self.assertTrue(
+            self._stat(
+                "[MC action]: I pick up the iron key from the table and pocket it."
+            )
+        )
+
+    # --- the "I follow her" collision (naive 'starts with I' would misfire) ---
+    def test_i_follow_collision_is_mobile(self):
+        self.assertFalse(self._stat("[MC action]: I follow her."))
+
+    def test_i_without_move_verb_is_stationary(self):
+        self.assertTrue(self._stat("[MC action]: I wait by the door."))
+
+    # --- quoted-dialogue guard: a quote inside an action is not travel ---
+    def test_quoted_action_body_is_stationary(self):
+        self.assertTrue(self._stat('[MC action]: "I will follow you anywhere."'))
+
+    # --- forced movement: stationary label, must still be overridable ---
+    def test_forced_drag_is_stationary(self):
+        # No first-person move verb (the MC is dragged, not self-moving), so the
+        # nudge FIRES; its escape-hatch wording lets the model navigate anyway.
+        self.assertTrue(
+            self._stat(
+                "[MC action]: I dig in my heels but the guards seize my arms "
+                "and drag me down to the cells."
+            )
+        )
+
+    def test_forced_carriage_speech_is_stationary(self):
+        self.assertTrue(
+            self._stat(
+                '[MC speaks aloud]: "Where are you taking me?" The carriage '
+                "rolls on, carrying you through the city gates."
+            )
+        )
+
+    # --- fail-open: unrecognized / missing prefix → NOT stationary (baseline) ---
+    def test_unrecognized_prefix_fails_open(self):
+        self.assertFalse(self._stat("[MC teleports]: zap to the tower"))
+
+    def test_no_prefix_fails_open(self):
+        self.assertFalse(self._stat("just some raw text with go and walk in it"))
+
+    def test_empty_and_none_fail_open(self):
+        self.assertFalse(self._stat(""))
+        self.assertFalse(self._stat(None))
+
+
+# ---------------------------------------------------------------------------
 # 12g. Production-shape tool activation — LLM-gated (W9 / T6, D9)
 # ---------------------------------------------------------------------------
 
@@ -1863,20 +1978,22 @@ class TestProductionActivation(unittest.TestCase):
 
     def _step2_tools_for(self, phrase, world_doc=None):
         from catjot import ContextBundle, call_llm
+        from rpjot import ComplianceStep
 
         if world_doc is None:
             world_doc = "WORLD STATE: you stand in the manor foyer with Evie."
         rules = str(ContextBundle("system_role")).strip() or (
             "You are the game master. Use tools to record canon."
         )
-        parts = [
-            f"WORLD STATE BRIEFING:\n{world_doc}",
-            f"NARRATOR RULE: {self.engine._NARRATOR_RULE}",
-            phrase,
-        ]
+        # Route through the exact production composition — WORLD STATE → NARRATOR
+        # RULE → input → conditional stationary nudge — so the paired tests below
+        # exercise precisely what ComplianceStep.run sends the model.
+        content = ComplianceStep(self.engine)._compose_step2_user_content(
+            phrase, world_doc
+        )
         messages = [
             {"role": "system", "content": rules},
-            {"role": "user", "content": "\n\n".join(parts)},
+            {"role": "user", "content": content},
         ]
         resp = call_llm(
             messages,
@@ -1910,6 +2027,28 @@ class TestProductionActivation(unittest.TestCase):
 
     def test_player_movement_selects_navigate_to(self):
         phrase = "[MC action]: I follow her down the corridor to the drawing room."
+        self.assertTrue(
+            self._passes(
+                lambda: "navigate_to" in self._step2_tools_for(phrase)
+            )
+        )
+
+    def test_forced_movement_still_selects_navigate_to(self):
+        # Guards drag the MC: the turn classifies STATIONARY (the nudge fires,
+        # via _step2_tools_for's production composition), yet the scene must
+        # still move. This is the anti-hard-gate guarantee — a hard tool-gate
+        # would make navigate_to impossible here; the soft, overridable nudge
+        # lets the model navigate when events physically carry the MC.
+        phrase = (
+            "[MC action]: I dig in my heels but the guards seize my arms "
+            "and drag me down to the cells."
+        )
+        from rpjot import ComplianceStep
+
+        self.assertTrue(
+            ComplianceStep._is_stationary_turn(phrase),
+            "phrase must classify stationary for this to test the override",
+        )
         self.assertTrue(
             self._passes(
                 lambda: "navigate_to" in self._step2_tools_for(phrase)

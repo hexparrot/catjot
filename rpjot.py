@@ -696,6 +696,41 @@ class ComplianceStep:
         "[MC — likely spoken aloud",
     )
 
+    # Turn-scoped DIRECTOR NOTE injected on stationary turns to stop navigate_to
+    # over-firing on an NPC's invitation or a merely-mentioned place (the
+    # neg_navto 0/18 miss). Kept CONDITIONAL — appears only on stationary turns —
+    # so it stays salient instead of habituating like an always-on rule would.
+    # The escape hatch ("physically carry the MC") is load-bearing: forced
+    # movement (dragged/carried/moving vehicle) classifies stationary yet must
+    # still move, which a hard tool-gate cannot express. Wording = the winning
+    # `nudge_positive_v2` arm from bakeoff_navnudge.py.
+    _STATIONARY_NUDGE = (
+        "DIRECTOR NOTE (this turn): the MC has not moved themselves this turn. "
+        "An NPC's invitation, or a place merely spoken or thought about, is not "
+        "movement — the story continues at the current location. Only if events "
+        "physically carry the MC elsewhere (dragged, carried, a moving vehicle) "
+        "does the scene move."
+    )
+
+    # Classified-input prefixes that are ALWAYS stationary: the MC spoke,
+    # thought, or shifted attention but did not physically move (§3.5 table).
+    # [MC action] is the only ambiguous prefix; it is resolved by _MOVE_VERBS.
+    _STATIONARY_PREFIXES = (
+        "[MC speaks aloud]",
+        "[MC — likely spoken aloud",
+        "[MC inner monologue",
+        "[MC attention",
+    )
+
+    # First-person movement verbs that turn an [MC action] into real travel —
+    # the MC's own body moving. Ported verbatim from bakeoff_navnudge's
+    # classify_heuristic so production classification matches the swept harness.
+    _MOVE_VERBS = frozenset({
+        "follow", "go", "walk", "head", "step", "enter", "climb", "cross",
+        "descend", "ascend", "run", "stride", "move", "leave", "exit",
+        "return", "approach",
+    })
+
     def __init__(self, engine: "RPJotEngine") -> None:
         self.engine = engine
 
@@ -704,6 +739,52 @@ class ComplianceStep:
         """True when an empty-canonical turn should get one corrective round."""
         s = (classified_input or "").lstrip()
         return s.startswith(cls._NUDGE_PREFIXES)
+
+    @classmethod
+    def _is_stationary_turn(cls, classified_input: str) -> bool:
+        """True when the MC did not physically move this turn (→ inject the nudge).
+
+        Implements the sigil→mobility table (§3.5). Speech, likely-speech, inner
+        monologue and attention prefixes are stationary unconditionally. Only
+        [MC action] is ambiguous: it is *mobile* iff its content is a first-person
+        movement — an unquoted line beginning "I ..." carrying a _MOVE_VERBS verb
+        — mirroring classify_heuristic exactly, including the "I follow her down
+        the corridor" collision and the quoted-dialogue guard. Any UNRECOGNIZED
+        prefix fails OPEN to not-stationary (no injection = baseline behavior),
+        so a future sigil can never silently suppress navigate_to.
+        """
+        s = (classified_input or "").lstrip()
+        if s.startswith(cls._STATIONARY_PREFIXES):
+            return True
+        if not s.startswith("[MC action]"):
+            return False  # unrecognized prefix → fail open (treat as mobile)
+        body = s.split("]", 1)[-1].lstrip(": ").strip()
+        low = body.lower()
+        quoted = body[:1] in {'"', "'"}
+        first_person_move = low.startswith("i ") and any(
+            w.strip('.,;:"') in cls._MOVE_VERBS for w in low.split()
+        )
+        return not (first_person_move and not quoted)
+
+    def _compose_step2_user_content(
+        self, classified_input: str, world_doc: str
+    ) -> str:
+        """Build the step-2 user message exactly as production sends it.
+
+        Order (recency-favored): WORLD STATE BRIEFING → NARRATOR RULE →
+        classified_input → [conditional] DIRECTOR NOTE. The stationary nudge is
+        the LAST block so it sits in the strongest attention position, after the
+        player input it qualifies. Shared by ComplianceStep.run and the
+        production-shape selection tests so both exercise the same composition.
+        """
+        parts = []
+        if world_doc.strip():
+            parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
+        parts.append(f"NARRATOR RULE: {self.engine._NARRATOR_RULE}")
+        parts.append(classified_input)
+        if self._is_stationary_turn(classified_input):
+            parts.append(self._STATIONARY_NUDGE)
+        return "\n\n".join(parts)
 
     def run(
         self,
@@ -717,15 +798,12 @@ class ComplianceStep:
         canonical_results: list[tuple[str, str]] = []
         accumulated_think: list[str] = []
 
-        narrator_rule = engine._NARRATOR_RULE
-        user_content_parts = []
-        if world_doc.strip():
-            user_content_parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
-        user_content_parts.append(f"NARRATOR RULE: {narrator_rule}")
-        user_content_parts.append(classified_input)
+        if self._is_stationary_turn(classified_input):
+            logger.info("[STEP2] stationary nudge → injected")
+        user_content = self._compose_step2_user_content(classified_input, world_doc)
 
         messages = list(step2_messages) + [
-            {"role": "user", "content": "\n\n".join(user_content_parts)}
+            {"role": "user", "content": user_content}
         ]
 
         # `bound` is bumped by exactly one if the zero-canonical nudge fires, so
@@ -1013,6 +1091,21 @@ class RPJotEngine:
         ("save_location", "name"),
     ]
 
+    # Function-level (tool) descriptions that survive step-2 schema compaction.
+    # Compaction strips ALL function descriptions by default (§3.1), so the model
+    # selects among 31 step-2 tools essentially by name. This map is EMPTY unless
+    # a description is load-bearing for tool *selection* (not argument shape,
+    # which _COMPACT_KEEP_PARAM_DESCRIPTIONS covers). Populate the navigate_to
+    # one-liner here — the `nudge_pos_desc` upgrade — only if the bakeoff shows it
+    # beats the stationary nudge alone at closing the neg_invite residual. Each
+    # entry costs ~30 tok; test_compact_budget_under_3000 guards the ceiling.
+    #   "navigate_to": (
+    #       "Move the scene when the MC's own body travels (or is physically "
+    #       "carried) to a new place; never for places merely mentioned, "
+    #       "offered, or thought about."
+    #   ),
+    _COMPACT_KEEP_FUNCTION_DESCRIPTIONS: dict = {}
+
     @property
     def _compact_step2_schemas(self) -> list:
         """Step 2 schemas with most parameter descriptions stripped.
@@ -1026,6 +1119,7 @@ class RPJotEngine:
         cannot find.
         """
         keep = set(self._COMPACT_KEEP_PARAM_DESCRIPTIONS)
+        keep_fn = self._COMPACT_KEEP_FUNCTION_DESCRIPTIONS
         result = []
         for s in self._step2_schemas:
             fn = s["function"]
@@ -1039,19 +1133,19 @@ class RPJotEngine:
                     stripped_props[k] = {
                         pk: pv for pk, pv in pdef.items() if pk != "description"
                     }
-            result.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": fn["name"],
-                        "parameters": {
-                            "type": "object",
-                            "properties": stripped_props,
-                            "required": params.get("required", []),
-                        },
-                    },
-                }
-            )
+            compact_fn = {
+                "name": fn["name"],
+                "parameters": {
+                    "type": "object",
+                    "properties": stripped_props,
+                    "required": params.get("required", []),
+                },
+            }
+            # Function-level description survives only for keep-listed tools
+            # whose selection contract is load-bearing (default: none — §3.1).
+            if name in keep_fn:
+                compact_fn["description"] = keep_fn[name]
+            result.append({"type": "function", "function": compact_fn})
         return result
 
     @property
