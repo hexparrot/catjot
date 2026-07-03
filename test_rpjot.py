@@ -3828,5 +3828,147 @@ class TestObjectPermanence(unittest.TestCase):
         self.assertEqual(first, self._residence(eng2))
 
 
+# ---------------------------------------------------------------------------
+# Object write side — save_object / place_object (OBJECT_PERMANENCE Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class TestObjectWriteSide(unittest.TestCase):
+    """save_object dual-write, place_object residence changes, and I4 stamping."""
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+        for room in ("manor", "manor/foyer", "manor/garden"):
+            Note.append(
+                TMP_CATNOTE,
+                Note.jot(
+                    message=room.split("/")[-1],
+                    tag=f"loc:{room}",
+                    context="seed",
+                    pwd=f"/story/location/{room}",
+                ),
+            )
+        self.engine = _make_engine(location="manor/foyer", people={"player", "evie"})
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def _at(self, pwd):
+        from catjot import NoteContext, SearchType
+
+        with NoteContext(TMP_CATNOTE, (SearchType.DIRECTORY, pwd)) as nc:
+            return list(nc)
+
+    # --- save_object dual write + I4 default stamping ---
+
+    def test_save_object_dual_write(self):
+        self.engine._tool_save_object(name="iron-key", description="A heavy iron key.")
+        self.assertEqual(len(self._at("/story/object/iron-key")), 1)  # canonical
+        self.assertEqual(len(self._at("/story/location/manor/foyer")), 2)  # +sighting
+
+    def test_save_object_defaults_to_session_location(self):
+        # I4 true-room stamping: no explicit location → session.location.
+        self.engine.session.location = "manor/garden"
+        self.engine._tool_save_object(name="locket", description="A silver locket.")
+        sighting = [
+            n
+            for n in self._at("/story/location/manor/garden")
+            if "obj:locket" in n.tag.split()
+        ]
+        self.assertEqual(len(sighting), 1)
+
+    def test_save_object_return_string_unchanged_shape(self):
+        # Existing 649-666 tests rely on the slug appearing in the return string.
+        result = self.engine._tool_save_object(
+            name="iron-key", description="A key.", location="cellar"
+        )
+        self.assertIn("iron-key", result)
+        self.assertIn("cellar", result)
+
+    # --- place_object residence changes ---
+
+    def test_place_object_holder_files_under_inventory(self):
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        self.engine._tool_place_object(name="iron-key", holder="evie")
+        self.assertEqual(len(self._at("/story/character/evie/inventory")), 1)
+        self.assertEqual(
+            self.engine._object_registry()["iron-key"]["residence"],
+            {"held_by": "evie"},
+        )
+
+    def test_place_object_room_canonicalizes(self):
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        self.engine._tool_place_object(name="iron-key", room="garden")
+        self.assertEqual(
+            self.engine._object_registry()["iron-key"]["residence"],
+            {"room": "manor/garden"},
+        )
+
+    def test_place_object_neither_restates_current_residence(self):
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        self.engine._tool_place_object(name="iron-key", holder="evie")
+        # neither holder nor room → restate where it is (still Evie)
+        self.engine._tool_place_object(name="iron-key", state="glinting")
+        self.assertEqual(
+            self.engine._object_registry()["iron-key"]["residence"],
+            {"held_by": "evie"},
+        )
+
+    def test_place_object_both_given_errors_writes_no_note(self):
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        before = len(list(Note.iterate(TMP_CATNOTE)))
+        result = json.loads(
+            self.engine._tool_place_object(name="iron-key", holder="evie", room="manor")
+        )
+        after = len(list(Note.iterate(TMP_CATNOTE)))
+        self.assertIn("error", result)
+        self.assertEqual(before, after)
+
+    def test_place_object_auto_creates_canonical_node(self):
+        # A never-saved object gains its canonical node on first place.
+        self.engine._tool_place_object(name="brass-lantern", room="garden")
+        self.assertEqual(len(self._at("/story/object/brass-lantern")), 1)
+
+    def test_legacy_migration_creates_canonical_node(self):
+        # I10 migration: a legacy sighting-only object gains a canonical node on
+        # the first place_object touch.
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(
+                message="A tall silver mirror.",
+                tag="obj:silver-mirror",
+                pwd="/story/location/manor/foyer",
+            ),
+        )
+        self.assertEqual(len(self._at("/story/object/silver-mirror")), 0)
+        self.engine._tool_place_object(name="silver-mirror", holder="evie")
+        self.assertEqual(len(self._at("/story/object/silver-mirror")), 1)
+
+    def test_record_event_obj_tag_moves_residence(self):
+        # I8 fallback channel through the real record_event handler + cache-drop.
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        self.engine._tool_record_event(
+            "The key is pressed into Evie's palm.", "exp:evie obj:iron-key"
+        )
+        # the event is filed at /story/events/{session.location} → a room sighting
+        self.assertEqual(
+            self.engine._object_registry()["iron-key"]["residence"],
+            {"room": "manor/foyer"},
+        )
+
+    def test_inventory_note_does_not_mint_phantom_character(self):
+        # place under /story/character/evie/inventory must not register "inventory".
+        self.engine._tool_save_object(name="iron-key", description="A key.")
+        self.engine._tool_place_object(name="iron-key", holder="evie")
+        fresh = _make_engine(location="manor/foyer", people={"player"})
+        roster = json.loads(fresh._tool_find_character("nobody"))["roster"]
+        self.assertNotIn("inventory", roster)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

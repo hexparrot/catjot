@@ -229,6 +229,7 @@ _WRITE_TOOL_LABELS = {
     "save_character": "Character saved",
     "save_location": "Location saved",
     "save_object": "Object saved",
+    "place_object": "Object placed",
     "save_yomi": "Yomi",
     "set_people_present": "Cast updated",
     "begin_scene": "Scene",
@@ -1093,7 +1094,12 @@ class RPJotEngine:
                 if note.pwd in seen_pwds:
                     continue
                 seen_pwds.add(note.pwd)
-                char_name = note.pwd.rstrip("/").split("/")[-1]
+                # First component under PWD_CHARS — an object-possession subpath
+                # like /story/character/evie/inventory must resolve to "evie", not
+                # mint a phantom "inventory" character (OT §3.1).
+                if not note.pwd.startswith(PWD_CHARS + "/"):
+                    continue
+                char_name = note.pwd[len(PWD_CHARS) + 1:].split("/")[0]
                 if char_name and not self.npc_tracker.is_registered(char_name):
                     self.npc_tracker.register(
                         char_name,
@@ -1151,6 +1157,11 @@ class RPJotEngine:
         ("record_knowledge", "observable_act"),
         ("navigate_to", "location_name"),
         ("save_location", "name"),
+        # place_object: the holder-XOR-room and possession-is-residence contracts
+        # are load-bearing (OT §3.7). Appended at the bottom — trimmed first if the
+        # compact budget ever exceeds ~3,000 tok.
+        ("place_object", "holder"),
+        ("place_object", "room"),
     ]
 
     # Function-level (tool) descriptions that survive step-2 schema compaction.
@@ -1167,11 +1178,22 @@ class RPJotEngine:
     # per-model regression — the "or is physically carried" clause reinforces the
     # nudge's dragged/carried escape hatch. Text kept identical to
     # bakeoff_navnudge.NAV_FUNCTION_DESC so production == the swept harness.
+    #
+    # place_object — the nudge_pos_desc-style positive one-liner (OT §3.7). Text
+    # kept identical to _tool_place_object's full description so production ==
+    # the Tier-3 swept harness. Phase 4's bakeoff_objperm sweep validates the
+    # ship/hold decision (§4.3): ship iff it wins mention-negative without losing
+    # pickup/handover. Shipped by default per OT §3.7's budget projection.
     _COMPACT_KEEP_FUNCTION_DESCRIPTIONS: dict = {
         "navigate_to": (
             "Move the scene when the MC's own body travels (or is physically "
             "carried) to a new place; never for places merely mentioned, "
             "offered, or thought about."
+        ),
+        "place_object": (
+            "Log an object changing hands or rooms — picked up, handed over, "
+            "dropped, stowed, left behind; also to note a lasting change to its "
+            "condition."
         ),
     }
 
@@ -1953,6 +1975,32 @@ class RPJotEngine:
         )
         return True
 
+    def _ensure_object_node(self, slug: str) -> bool:
+        """Idempotently ensure a canonical /story/object/{slug} node exists (OT §3.4).
+
+        Auto-genesis stub ("awaiting description") mirroring _ensure_location_node;
+        superseded by a later real save_object (newest-first render). Doubles as
+        the lazy-migration hook: a legacy sighting-only object gains its canonical
+        node on the first place_object touch. Returns True if a node was created.
+        """
+        if not slug:
+            return False
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_OBJECTS}/{slug}")
+        ) as nc:
+            if len(nc):
+                return False
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=f"{slug} (awaiting description).",
+                tag=f"{TAG_OBJ}{slug}",
+                context=f"object node (auto): {slug}",
+                pwd=f"{PWD_OBJECTS}/{slug}",
+            ),
+        )
+        return True
+
     def _parse_residence(self, pwd: str):
         """Map a sighting note's pwd to a residence dict (OBJECT_TOOLING §3.5).
 
@@ -2576,7 +2624,8 @@ class RPJotEngine:
                         "Space-separated tags. Use exp:name for each person present "
                         "(e.g., exp:evie exp:bartholomew). Use know:name for private "
                         "knowledge. Avoid loc: and char: prefixes — location and character "
-                        "context is tracked by directory, not tags."
+                        "context is tracked by directory, not tags. "
+                        "Add obj:slug for any significant object handled."
                     ),
                 },
                 "location": {
@@ -2613,6 +2662,12 @@ class RPJotEngine:
             pwd=pwd,
         )
         Note.append(Note.NOTEFILE, note)
+
+        # Event tags can be object sightings (the weak-model fallback channel,
+        # OT §2/§3.5), so the object registry must drop or those sightings stay
+        # invisible until an unrelated invalidation (OP §5 cache-coherence note).
+        if any(t.startswith(TAG_OBJ) for t in tag_str.split()):
+            self._cache_drop("obj_registry")
 
         logger.info("event recorded: ts=%s tag=%s", note.now, note.tag)
         return f"Event recorded: {description[:80]}..."
@@ -2962,7 +3017,7 @@ class RPJotEngine:
             "Use this ONLY to define or introduce a new object into the world — "
             "its name, appearance, and fixed properties. "
             "Do NOT use this for player interactions with objects (picking up, "
-            "using, examining); those are story events — use record_event instead."
+            "using, examining); those are story events — use place_object instead."
         ),
         parameters={
             "type": "object",
@@ -2977,37 +3032,157 @@ class RPJotEngine:
                 },
                 "location": {
                     "type": "string",
-                    "description": "Which location this object is in (e.g. 'cellar')",
+                    "description": "Which location this object is in (e.g. 'cellar'). Omit to use current session location.",
                 },
                 "tags": {
                     "type": "string",
                     "description": "Additional space-separated tags (optional)",
                 },
             },
-            "required": ["name", "description", "location"],
+            "required": ["name", "description"],
         },
     )
     def _tool_save_object(
-        self, name: str, description: str, location: str, tags: str = ""
+        self, name: str, description: str, location: str = "", tags: str = ""
     ):
-        """Persist an object's details to notes within its location."""
+        """Persist an object's canonical identity + a genesis sighting (OT §3.3).
+
+        Dual write: the canonical description at PWD_OBJECTS/{slug} (identity,
+        never shadowed) AND a genesis sighting carrying the same text at the room
+        residence (byte-for-byte the old write, so room rendering is unchanged for
+        models that never call get_object). location defaults to session.location,
+        inheriting _remark_location's precision for free (LM). Return string keeps
+        the old shape so existing tests stay green.
+        """
         logger.info("ENTER _tool_save_object: name=%r location=%r", name, location)
 
-        loc_clean = location.removeprefix(TAG_LOC)
-        tag_str = f"obj:{name}"
-        if tags:
-            tag_str = f"{tag_str} {tags.strip()}"
+        slug = self._canonicalize_object(name)
+        room = location.removeprefix(TAG_LOC) if location else self.session.location
+        extra = f" {tags.strip()}" if tags else ""
+        tag_str = f"{TAG_OBJ}{slug}{extra}"
 
-        note = Note.jot(
-            message=description,
-            tag=tag_str,
-            context=f"object: {name} at {loc_clean}",
-            pwd=f"{PWD_WORLD}/{loc_clean}",
+        # Canonical node (identity) — its own pwd namespace, never shadowed.
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=description,
+                tag=tag_str,
+                context=f"object canon: {slug}",
+                pwd=f"{PWD_OBJECTS}/{slug}",
+            ),
         )
-        Note.append(Note.NOTEFILE, note)
+        # Genesis sighting (residence) — the room, byte-for-byte the old write.
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=description,
+                tag=tag_str,
+                context=f"object sighting: {slug} at {room}",
+                pwd=f"{PWD_WORLD}/{room}",
+            ),
+        )
+        self._cache_drop("obj_registry", f"{TAG_OBJ}{slug}")
+        logger.info("object saved: %s (canon + genesis sighting at %s)", slug, room)
+        return f"Object saved: {slug} (at {room})"
 
-        logger.info("object saved: %s at %s", name, loc_clean)
-        return f"Object saved: {name} (at {loc_clean})"
+    @rp_tool(
+        description=(
+            "Log an object changing hands or rooms — picked up, handed over, "
+            "dropped, stowed, left behind; also to note a lasting change to its "
+            "condition."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The object being placed or updated (e.g. 'iron-key').",
+                },
+                "holder": {
+                    "type": "string",
+                    "description": (
+                        "Character who now holds the object — possession is a "
+                        "residence. Provide holder OR room, never both."
+                    ),
+                },
+                "room": {
+                    "type": "string",
+                    "description": (
+                        "Room the object is now in. Provide holder OR room, never "
+                        "both; omit both to restate the object where it already is."
+                    ),
+                },
+                "state": {
+                    "type": "string",
+                    "description": "Optional lasting change to its condition (e.g. 'now cracked').",
+                },
+            },
+            "required": ["name"],
+        },
+    )
+    def _tool_place_object(
+        self, name: str, holder: str = "", room: str = "", state: str = ""
+    ):
+        """Record an object's residence change or state change (OT §3.4).
+
+        One tool for pick-up / hand-over / drop / stow / move / state-change.
+        holder XOR room; neither restates at the current residence. Never raises —
+        both-given returns an error string. Auto-creates the canonical node
+        (lazy-migration hook). Newest sighting wins on read.
+        """
+        logger.info(
+            "ENTER _tool_place_object: name=%r holder=%r room=%r", name, holder, room
+        )
+        slug = self._canonicalize_object(name)
+        if not slug:
+            return json.dumps({"error": "place_object: empty object name"})
+        if holder and room:
+            return json.dumps(
+                {"error": "place_object: provide holder OR room, not both"}
+            )
+
+        self._ensure_object_node(slug)  # auto-genesis; lazy migration hook
+
+        if holder:
+            h = re.sub(
+                r"[^a-z0-9-]+", "-", holder.strip().lower().removeprefix(TAG_CHAR)
+            ).strip("-")
+            if h and not self.npc_tracker.is_registered(h):
+                logger.warning("[PLACE] holder %r not tracked — recording anyway", h)
+            residence = f"held by {h}"
+            pwd = f"{PWD_CHARS}/{h}/inventory"
+        elif room:
+            r = (
+                self._canonicalize_room(room, self.session.location)
+                or self.session.location
+            )
+            residence, pwd = r, f"{PWD_WORLD}/{r}"
+        else:
+            # Neither → restate at the current residence; no prior sighting → the
+            # session location (a room, never a guessed holder).
+            entry = self._object_registry().get(slug)
+            res = entry["residence"] if entry else None
+            if res and res.get("held_by"):
+                residence = f"held by {res['held_by']}"
+                pwd = f"{PWD_CHARS}/{res['held_by']}/inventory"
+            elif res and res.get("room"):
+                residence, pwd = res["room"], f"{PWD_WORLD}/{res['room']}"
+            else:
+                residence = self.session.location
+                pwd = f"{PWD_WORLD}/{self.session.location}"
+
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=state or f"{slug} is here.",
+                tag=f"{TAG_OBJ}{slug}",
+                context=f"object sighting: {slug} at {residence}",
+                pwd=pwd,
+            ),
+        )
+        self._cache_drop("obj_registry", f"{TAG_OBJ}{slug}")
+        logger.info("object placed: %s → %s", slug, residence)
+        return f"Object placed: {slug} (at {residence})"
 
     @rp_tool(
         description=(
@@ -3154,13 +3329,22 @@ class RPJotEngine:
         matches = []  # full profiles for role-matching characters
 
         seen_pwds = set()
+        seen_names = set()
         with NoteContext(Note.NOTEFILE, (SearchType.TREE, PWD_CHARS)) as nc:
             for note in nc:
                 if note.pwd in seen_pwds:
                     continue
                 seen_pwds.add(note.pwd)
 
-                char_name = note.pwd.rstrip("/").split("/")[-1]
+                # First component under PWD_CHARS — an object-possession subpath
+                # (/story/character/evie/inventory) resolves to "evie", never a
+                # phantom "inventory" roster entry (OT §3.1).
+                if not note.pwd.startswith(PWD_CHARS + "/"):
+                    continue
+                char_name = note.pwd[len(PWD_CHARS) + 1:].split("/")[0]
+                if not char_name or char_name in seen_names:
+                    continue
+                seen_names.add(char_name)
                 roster.append(char_name)
 
                 combined = (note.tag + " " + note.message).lower()
