@@ -1414,6 +1414,145 @@ class TestSafeDispatch(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12b. History compaction — play.compact_history (W4 / R1, R4b)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryCompaction(unittest.TestCase):
+    """compact_history folds old turns into a bounded STORY SO FAR digest."""
+
+    def _fixed_digest(self, toks=1000):
+        reps = max(1, toks // _tok(_CHUNK))
+        return _CHUNK * reps
+
+    def _engine_with_stub(self):
+        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.condense_inputs = []
+
+        def stub_condense(raw_text, focus_hint=""):
+            self.condense_inputs.append(raw_text)
+            return self._fixed_digest()
+
+        engine._condense_context = stub_condense
+        return engine
+
+    def _append_turn(self, step2, step3, n):
+        # Realistic sizes: classified ~ small, narrative ~ 500 tok.
+        classified = f"[MC action]: turn {n} " + ("do a thing. " * 6)
+        narrative = f"Narrative for turn {n}. " + (_CHUNK * 38)  # ~500 tok
+        for lst in (step2, step3):
+            lst.append({"role": "user", "content": classified})
+            lst.append({"role": "assistant", "content": narrative})
+        return classified, narrative
+
+    def test_50_turn_soak_stays_bounded(self):
+        import play
+
+        engine = self._engine_with_stub()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        step2 = [{"role": "system", "content": "gameplay rules " * 40}]
+        step3 = [{"role": "system", "content": "prose craft " * 40}]
+
+        one_turn = 0
+        for n in range(50):
+            _c, narrative = self._append_turn(step2, step3, n)
+            one_turn = max(one_turn, _tok(narrative) + 200)
+            play.compact_history(engine, step2, step3)
+
+            # History stays sawtooth-bounded on both lists.
+            for lst in (step2, step3):
+                self.assertLessEqual(
+                    play._history_toks(lst),
+                    play.HISTORY_SOFT_TOKS + one_turn,
+                    f"history exceeded soft limit + one turn at turn {n}",
+                )
+            # At most one digest, and if present it sits at index 1.
+            for lst in (step2, step3):
+                digests = [
+                    i
+                    for i, m in enumerate(lst)
+                    if str(m.get("content", "")).startswith("STORY SO FAR:")
+                ]
+                self.assertLessEqual(len(digests), 1)
+                if digests:
+                    self.assertEqual(digests[0], 1)
+
+        # Compaction actually triggered during the run.
+        self.assertGreaterEqual(len(self.condense_inputs), 1)
+
+        # Exactly one digest at index 1 by the end.
+        for lst in (step2, step3):
+            digests = [
+                i
+                for i, m in enumerate(lst)
+                if str(m.get("content", "")).startswith("STORY SO FAR:")
+            ]
+            self.assertEqual(len(digests), 1)
+            self.assertEqual(digests[0], 1)
+
+        # Last KEEP_RECENT_PAIRS pairs survive verbatim.
+        keep_msgs = 2 * play.KEEP_RECENT_PAIRS
+        tail2 = step2[-keep_msgs:]
+        for m in tail2:
+            self.assertFalse(str(m.get("content", "")).startswith("STORY SO FAR:"))
+        self.assertEqual(tail2[-1]["content"], step3[-1]["content"])
+
+        # The final guard measurement stays comfortably in the <85% tier: the
+        # guard returns the same list object unchanged (no trim/drop) and the
+        # measured payload is below the warning threshold.
+        passed = list(step2)
+        eng_check = engine._guard_payload(
+            passed, schema_overhead=engine._cached_compact_step2_schema_toks
+        )
+        self.assertIs(eng_check, passed)
+        self.assertLess(engine._last_payload_toks, 0.85 * capacity)
+
+    def test_second_trigger_folds_old_digest_no_stacking(self):
+        import play
+
+        engine = self._engine_with_stub()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+
+        triggers = 0
+        prev_inputs = 0
+        for n in range(60):
+            self._append_turn(step2, step3, n)
+            play.compact_history(engine, step2, step3)
+            if len(self.condense_inputs) > prev_inputs:
+                triggers += 1
+                prev_inputs = len(self.condense_inputs)
+                # After the first trigger, later triggers must fold the prior
+                # digest into their raw input — proving no separate digest stacks.
+                if triggers >= 2:
+                    self.assertTrue(
+                        self.condense_inputs[-1].startswith("STORY SO FAR:"),
+                        "second compaction did not fold the previous digest",
+                    )
+
+        self.assertGreaterEqual(triggers, 2, "expected ≥2 compactions over 60 turns")
+        # Still exactly one digest — never stacked.
+        digests = [
+            m
+            for m in step2
+            if str(m.get("content", "")).startswith("STORY SO FAR:")
+        ]
+        self.assertEqual(len(digests), 1)
+
+    def test_no_op_below_soft_limit(self):
+        import play
+
+        engine = self._engine_with_stub()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        self._append_turn(step2, step3, 0)
+        before2 = list(step2)
+        play.compact_history(engine, step2, step3)
+        self.assertEqual(step2, before2)  # untouched
+        self.assertEqual(len(self.condense_inputs), 0)  # no LLM call
+
+
+# ---------------------------------------------------------------------------
 # 13. _condense_context -- live LLM + fallback behavior
 # ---------------------------------------------------------------------------
 
