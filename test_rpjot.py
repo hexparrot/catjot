@@ -14,6 +14,7 @@ Stop on first failure:
 """
 
 import json
+import os
 import unittest
 
 from catjot import Note, ContextBundle
@@ -25,6 +26,7 @@ from rpjot import (
     MODEL_CONTEXT_LIMIT_TOKS,
     _RESPONSE_RESERVE_TOKS,
     _tok,
+    _msg_toks,
 )
 
 TMP_CATNOTE = "tests/.catjot"
@@ -1138,6 +1140,1119 @@ class TestGuardPayload(unittest.TestCase):
         roles = [m.get("role") for m in result]
         # user messages should still be present (tool result absorbed the cut)
         self.assertEqual(roles.count("user"), 2)
+
+    # --- W2: tool_calls arguments must be counted (R2) ---
+
+    def _assistant_tool_call_msg(self, arg_toks):
+        """Assistant message whose weight lives entirely in tool_calls arguments."""
+        reps = max(1, (arg_toks + 11) // 12)
+        big_args = json.dumps({"description": _CHUNK * reps, "tags": "exp:player"})
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "record_event", "arguments": big_args},
+                }
+            ],
+        }
+
+    def test_msg_toks_counts_tool_call_arguments(self):
+        """_msg_toks includes tool_calls argument JSON, not just content."""
+        msg = self._assistant_tool_call_msg(500)
+        content_only = _tok(str(msg.get("content") or ""))
+        self.assertLess(content_only, 20)  # content is empty
+        self.assertGreater(_msg_toks(msg), 400)  # arguments dominate
+
+    def test_guard_counts_tokens_hidden_in_tool_calls(self):
+        """A list whose tokens live only in tool_calls crosses 85% and is measured."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        # Arguments sized to ~90% of capacity; content is empty throughout.
+        big = self._assistant_tool_call_msg(int(capacity * 0.9))
+        msgs = [self._msg("user", "go"), big, self._msg("user", "next")]
+        eng._guard_payload(msgs, schema_overhead=0)
+        # Old content-only accounting would have measured ~0; the guard must now
+        # see the tool_calls payload and record it above the warning threshold.
+        self.assertGreater(eng._last_payload_toks, capacity * 0.85)
+
+    # --- W3: pass 2 drops tool-call units atomically (R3) ---
+
+    def test_tool_unit_indices_from_assistant(self):
+        """From an assistant with tool_calls, the unit includes all its tool replies."""
+        msgs = [
+            self._msg("system", "sys"),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "f", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "g", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ra"},
+            {"role": "tool", "tool_call_id": "b", "content": "rb"},
+            self._msg("user", "u"),
+        ]
+        self.assertEqual(RPJotEngine._tool_unit_indices(msgs, 1), {1, 2, 3})
+
+    def test_tool_unit_indices_from_tool_finds_parent(self):
+        """From a tool reply, the unit walks back to its parent assistant + siblings."""
+        msgs = [
+            self._msg("system", "sys"),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "f", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "g", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ra"},
+            {"role": "tool", "tool_call_id": "b", "content": "rb"},
+            self._msg("user", "u"),
+        ]
+        self.assertEqual(RPJotEngine._tool_unit_indices(msgs, 3), {1, 2, 3})
+
+    def test_pass2_drops_tool_unit_without_orphans(self):
+        """Forced over 100% with a tool unit → no orphaned tool/assistant survives."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        digest = {"role": "user", "content": "STORY SO FAR:\nonce upon a time"}
+        # Assistant weight lives in tool_calls arguments — pass 1 cannot shed it,
+        # forcing pass 2 to drop the whole unit atomically.
+        big_asst = self._assistant_tool_call_msg(capacity + 2000)
+        big_asst["tool_calls"].append(
+            {"id": "call_2", "function": {"name": "record_event", "arguments": "{}"}}
+        )
+        big_asst["tool_calls"][0]["id"] = "call_1"
+        msgs = [
+            self._msg("system", "sys"),
+            digest,
+            big_asst,
+            {"role": "tool", "tool_call_id": "call_1", "content": "result one"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "result two"},
+            self._msg("user", "final prompt"),
+        ]
+        result = eng._guard_payload(msgs, schema_overhead=0)
+
+        # No orphaned tool messages: each surviving tool has a surviving parent.
+        surviving_ids = set()
+        for m in result:
+            for tc in m.get("tool_calls") or []:
+                surviving_ids.add(tc.get("id"))
+        for m in result:
+            if m.get("role") == "tool":
+                self.assertIn(
+                    m.get("tool_call_id"),
+                    surviving_ids,
+                    "orphaned tool message survived without its parent assistant",
+                )
+        # No orphaned assistant: a surviving tool_calls assistant keeps all replies.
+        answered = {m.get("tool_call_id") for m in result if m.get("role") == "tool"}
+        for m in result:
+            for tc in m.get("tool_calls") or []:
+                self.assertIn(
+                    tc.get("id"),
+                    answered,
+                    "assistant tool_calls survived without its tool replies",
+                )
+
+    def test_pass2_preserves_final_message_and_digest(self):
+        """The final message and the STORY SO FAR digest are never dropped."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        digest = {"role": "user", "content": "STORY SO FAR:\nkey memory preserved"}
+        big = self._make_big_tool_msg(capacity + 3000)
+        msgs = [
+            self._msg("system", "sys"),
+            digest,
+            big,
+            self._msg("assistant", "old reply"),
+            self._msg("user", "the active prompt"),
+        ]
+        result = eng._guard_payload(msgs, schema_overhead=0)
+        self.assertEqual(result[-1]["content"], "the active prompt")
+        contents = [str(m.get("content") or "") for m in result]
+        self.assertTrue(
+            any(c.startswith("STORY SO FAR:") for c in contents),
+            "compaction digest was dropped by the guard",
+        )
+
+
+class TestSafeDispatch(unittest.TestCase):
+    """_safe_dispatch: one bad tool call must never crash the session."""
+
+    def setUp(self):
+        self.engine = _make_engine(
+            location="ravenwood-manor", people={"player", "alice"}
+        )
+
+    def _assert_error_json(self, result):
+        self.assertIsInstance(result, str)
+        parsed = json.loads(result)
+        self.assertIn("error", parsed)
+        return parsed
+
+    def test_unknown_tool_returns_error_json(self):
+        result = self.engine._dispatch_step2("no_such_tool", "{}")
+        self._assert_error_json(result)
+
+    def test_missing_required_arg_returns_error_json(self):
+        # record_event requires description + tags; only tags supplied.
+        result = self.engine._dispatch_step2("record_event", '{"tags": "exp:player"}')
+        parsed = self._assert_error_json(result)
+        self.assertIn("description", parsed["error"])
+
+    def test_typoed_kwarg_returns_error_json(self):
+        # 'descripton' is a typo → description missing → error, no exception.
+        result = self.engine._dispatch_step2(
+            "record_event", '{"descripton": "x", "tags": "y"}'
+        )
+        self._assert_error_json(result)
+
+    def test_unexpected_kwarg_returns_error_json(self):
+        # Required present but an extra unknown kwarg → handler TypeError, caught.
+        result = self.engine._dispatch_step2(
+            "record_event",
+            '{"description": "x", "tags": "exp:player", "bogus_extra": 1}',
+        )
+        self._assert_error_json(result)
+
+    def test_non_json_arguments_returns_error_json(self):
+        result = self.engine._dispatch_step2("record_event", "this is not json")
+        self._assert_error_json(result)
+
+    def test_handler_internal_exception_returns_error_json(self):
+        # description as int → description[:80] raises TypeError inside the handler.
+        result = self.engine._dispatch_step2(
+            "record_event", '{"description": 123, "tags": "exp:player"}'
+        )
+        self._assert_error_json(result)
+
+    def test_wrong_type_arg_does_not_raise(self):
+        # witnesses as a bare string is a wrong type; dispatch must not raise
+        # and must return a JSON string the model can consume.
+        result = self.engine._dispatch_step2(
+            "record_knowledge",
+            '{"content": "a secret", "witnesses": "alice"}',
+        )
+        self.assertIsInstance(result, str)
+        json.loads(result)  # valid JSON, no exception
+
+    def test_step1_dispatch_survives_bad_args(self):
+        result = self.engine._safe_dispatch(
+            self.engine._step1_handlers, "get_character", "not json"
+        )
+        self._assert_error_json(result)
+
+    def test_loop_continues_after_a_bad_tool_call(self):
+        """A step-2 round that errors must not abort the turn (T4 acceptance)."""
+        import rpjot as rpjot_module
+
+        rounds = [
+            # Round 1: malformed args → dispatch returns error JSON, loop continues.
+            {
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "record_event",
+                            "arguments": '{"oops": true}',
+                        },
+                    }
+                ]
+            },
+            # Round 2: valid record_event.
+            {
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {
+                            "name": "record_event",
+                            "arguments": json.dumps(
+                                {
+                                    "description": "the heavy door creaks open",
+                                    "tags": "exp:player",
+                                }
+                            ),
+                        },
+                    }
+                ]
+            },
+            # Round 3: plain text → exits the loop.
+            {"content": "All recorded."},
+        ]
+        calls = {"i": 0}
+
+        def fake_call_llm(messages, **kwargs):
+            r = rounds[calls["i"]]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            engine = _make_engine(location="ravenwood-manor", people={"player"})
+            engine.init_pipeline()
+            step2 = [{"role": "system", "content": "rules"}]
+            canonical, think = engine._compliance_step.run(
+                "[MC action]: I open the door", "WORLD STATE: a door", step2
+            )
+        finally:
+            rpjot_module.call_llm = original
+
+        # Turn completed across all three rounds without raising.
+        self.assertEqual(calls["i"], 3)
+        # The successful record_event result is present; the errored round is too,
+        # but at least one canonical result is a non-error success string.
+        joined = " ".join(res for _fn, res in canonical)
+        self.assertIn("Event recorded", joined)
+
+
+# ---------------------------------------------------------------------------
+# 12b. History compaction — play.compact_history (W4 / R1, R4b)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryCompaction(unittest.TestCase):
+    """compact_history folds old turns into a bounded STORY SO FAR digest."""
+
+    def _fixed_digest(self, toks=1000):
+        reps = max(1, toks // _tok(_CHUNK))
+        return _CHUNK * reps
+
+    def _engine_with_stub(self):
+        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.condense_inputs = []
+
+        def stub_condense(raw_text, focus_hint=""):
+            self.condense_inputs.append(raw_text)
+            return self._fixed_digest()
+
+        engine._condense_context = stub_condense
+        return engine
+
+    def _append_turn(self, step2, step3, n):
+        # Realistic sizes: classified ~ small, narrative ~ 500 tok.
+        classified = f"[MC action]: turn {n} " + ("do a thing. " * 6)
+        narrative = f"Narrative for turn {n}. " + (_CHUNK * 38)  # ~500 tok
+        for lst in (step2, step3):
+            lst.append({"role": "user", "content": classified})
+            lst.append({"role": "assistant", "content": narrative})
+        return classified, narrative
+
+    def test_50_turn_soak_stays_bounded(self):
+        import play
+
+        engine = self._engine_with_stub()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        step2 = [{"role": "system", "content": "gameplay rules " * 40}]
+        step3 = [{"role": "system", "content": "prose craft " * 40}]
+
+        one_turn = 0
+        for n in range(50):
+            _c, narrative = self._append_turn(step2, step3, n)
+            one_turn = max(one_turn, _tok(narrative) + 200)
+            play.compact_history(engine, step2, step3)
+
+            # History stays sawtooth-bounded on both lists.
+            for lst in (step2, step3):
+                self.assertLessEqual(
+                    play._history_toks(lst),
+                    play.HISTORY_SOFT_TOKS + one_turn,
+                    f"history exceeded soft limit + one turn at turn {n}",
+                )
+            # At most one digest, and if present it sits at index 1.
+            for lst in (step2, step3):
+                digests = [
+                    i
+                    for i, m in enumerate(lst)
+                    if str(m.get("content", "")).startswith("STORY SO FAR:")
+                ]
+                self.assertLessEqual(len(digests), 1)
+                if digests:
+                    self.assertEqual(digests[0], 1)
+
+        # Compaction actually triggered during the run.
+        self.assertGreaterEqual(len(self.condense_inputs), 1)
+
+        # Exactly one digest at index 1 by the end.
+        for lst in (step2, step3):
+            digests = [
+                i
+                for i, m in enumerate(lst)
+                if str(m.get("content", "")).startswith("STORY SO FAR:")
+            ]
+            self.assertEqual(len(digests), 1)
+            self.assertEqual(digests[0], 1)
+
+        # Last KEEP_RECENT_PAIRS pairs survive verbatim.
+        keep_msgs = 2 * play.KEEP_RECENT_PAIRS
+        tail2 = step2[-keep_msgs:]
+        for m in tail2:
+            self.assertFalse(str(m.get("content", "")).startswith("STORY SO FAR:"))
+        self.assertEqual(tail2[-1]["content"], step3[-1]["content"])
+
+        # The final guard measurement stays comfortably in the <85% tier: the
+        # guard returns the same list object unchanged (no trim/drop) and the
+        # measured payload is below the warning threshold.
+        passed = list(step2)
+        eng_check = engine._guard_payload(
+            passed, schema_overhead=engine._cached_compact_step2_schema_toks
+        )
+        self.assertIs(eng_check, passed)
+        self.assertLess(engine._last_payload_toks, 0.85 * capacity)
+
+    def test_second_trigger_folds_old_digest_no_stacking(self):
+        import play
+
+        engine = self._engine_with_stub()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+
+        triggers = 0
+        prev_inputs = 0
+        for n in range(60):
+            self._append_turn(step2, step3, n)
+            play.compact_history(engine, step2, step3)
+            if len(self.condense_inputs) > prev_inputs:
+                triggers += 1
+                prev_inputs = len(self.condense_inputs)
+                # After the first trigger, later triggers must fold the prior
+                # digest into their raw input — proving no separate digest stacks.
+                if triggers >= 2:
+                    self.assertTrue(
+                        self.condense_inputs[-1].startswith("STORY SO FAR:"),
+                        "second compaction did not fold the previous digest",
+                    )
+
+        self.assertGreaterEqual(triggers, 2, "expected ≥2 compactions over 60 turns")
+        # Still exactly one digest — never stacked.
+        digests = [
+            m
+            for m in step2
+            if str(m.get("content", "")).startswith("STORY SO FAR:")
+        ]
+        self.assertEqual(len(digests), 1)
+
+    def test_no_op_below_soft_limit(self):
+        import play
+
+        engine = self._engine_with_stub()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        self._append_turn(step2, step3, 0)
+        before2 = list(step2)
+        play.compact_history(engine, step2, step3)
+        self.assertEqual(step2, before2)  # untouched
+        self.assertEqual(len(self.condense_inputs), 0)  # no LLM call
+
+
+# ---------------------------------------------------------------------------
+# 12c. Cast-drift detection — RPJotEngine._scan_cast_drift (W5 / T1)
+# ---------------------------------------------------------------------------
+
+
+class TestCastDrift(unittest.TestCase):
+    """Named-but-absent NPCs must be detected (never auto-added to the cast)."""
+
+    def _engine(self, people):
+        return _make_engine(location="ravenwood-manor", people=people)
+
+    def test_mentioned_but_absent_npc_warns(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I look around", "Evie beckons you closer from the doorway."
+        )
+        self.assertIn("evie", warnings)
+        self.assertIn("evie", eng._cast_warning_line())
+
+    def test_present_npc_no_warning(self):
+        eng = self._engine({"player", "evie"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC speaks aloud]: hello", "Evie smiles warmly at you."
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(eng._cast_warning_line(), "")
+
+    def test_known_absent_but_unmentioned_no_warning(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I sit down", "The room is empty and still."
+        )
+        self.assertEqual(warnings, [])
+
+    def test_main_character_never_warns(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register(eng.main_character, eng.main_character)
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I move", f"{eng.main_character} steps into the light."
+        )
+        self.assertNotIn(eng.main_character, warnings)
+
+    def test_word_boundary_avoids_substring_false_positive(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("eve", "Eve", location="ravenwood-manor")
+        # 'eventually' contains 'eve' but must not match on a word boundary.
+        warnings = eng._scan_cast_drift(
+            "[MC action]: I wait", "Eventually the clock chimes; nobody appears."
+        )
+        self.assertEqual(warnings, [])
+
+    def test_warning_clears_when_cast_resolves(self):
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng._scan_cast_drift("x", "Evie appears in the hall.")
+        self.assertTrue(eng._cast_warnings)
+        eng.session.people_present.add("evie")
+        eng._scan_cast_drift("x", "Evie is still here.")
+        self.assertEqual(eng._cast_warnings, [])
+
+
+# ---------------------------------------------------------------------------
+# 12d. Zero-canonical nudge — ComplianceStep (W6 / T2)
+# ---------------------------------------------------------------------------
+
+
+class TestZeroCanonicalNudge(unittest.TestCase):
+    """An empty-canonical action/dialogue turn gets exactly one corrective round."""
+
+    def _run(self, rounds, classified):
+        import rpjot as rpjot_module
+
+        calls = {"i": 0, "msgs": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["msgs"].append(
+                [str(m.get("content") or "") for m in messages]
+            )
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng.init_pipeline()
+            step2 = [{"role": "system", "content": "rules"}]
+            canonical, think = eng._compliance_step.run(
+                classified, "WORLD STATE: a room", step2
+            )
+        finally:
+            rpjot_module.call_llm = original
+        return canonical, calls
+
+    def _record_event_round(self):
+        return {
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "record_event",
+                        "arguments": json.dumps(
+                            {"description": "opened the door", "tags": "exp:player"}
+                        ),
+                    },
+                }
+            ]
+        }
+
+    def _injected_nudge(self, calls):
+        joined = " ".join(c for msgs in calls["msgs"] for c in msgs if c)
+        return "No canonical record was written" in joined
+
+    def test_prose_only_then_record_event_after_nudge(self):
+        rounds = [
+            {"content": "The door is only a door."},  # prose, no canon
+            self._record_event_round(),  # responds to the nudge
+            {"content": "All set."},  # exits
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertIn("record_event", [fn for fn, _ in canonical])
+        self.assertEqual(calls["i"], 3)
+        self.assertTrue(self._injected_nudge(calls))
+
+    def test_done_reply_completes_with_zero_canonical(self):
+        rounds = [
+            {"content": "nothing of note happens"},
+            {"content": "DONE"},
+        ]
+        canonical, calls = self._run(rounds, "[MC speaks aloud]: anyone there?")
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 2)  # initial + single nudge round
+        self.assertTrue(self._injected_nudge(calls))
+
+    def test_no_nudge_for_inner_monologue(self):
+        rounds = [{"content": "a quiet private thought"}]
+        canonical, calls = self._run(
+            rounds, "[MC inner monologue — private, unspoken]: I wonder if…"
+        )
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 1)  # no nudge
+        self.assertFalse(self._injected_nudge(calls))
+
+    def test_no_nudge_for_attention_shift(self):
+        rounds = [{"content": "the gaze settles"}]
+        canonical, calls = self._run(
+            rounds, '[MC attention → "window"]: Shift focus to the window.'
+        )
+        self.assertEqual(calls["i"], 1)
+        self.assertFalse(self._injected_nudge(calls))
+
+    def test_never_nudges_twice(self):
+        rounds = [
+            {"content": "nope"},
+            {"content": "still nothing"},
+            {"content": "and nothing again"},
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I keep waiting")
+        self.assertEqual(canonical, [])
+        self.assertEqual(calls["i"], 2)  # nudged once, then returned
+
+    def test_no_nudge_when_canon_already_written(self):
+        rounds = [
+            self._record_event_round(),  # writes canon on round 1
+            {"content": "narrated"},  # exits, canon present → no nudge
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertEqual(calls["i"], 2)
+        self.assertFalse(self._injected_nudge(calls))
+
+
+# ---------------------------------------------------------------------------
+# 12e. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# ---------------------------------------------------------------------------
+
+
+class TestCompactSchemaKeepList(unittest.TestCase):
+    """Critical argument contracts survive step-2 schema compaction."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.compact = {
+            s["function"]["name"]: s for s in self.engine._compact_step2_schemas
+        }
+
+    def _props(self, tool):
+        return self.compact[tool]["function"]["parameters"]["properties"]
+
+    def test_record_event_tags_keeps_grammar(self):
+        desc = self._props("record_event")["tags"].get("description", "")
+        self.assertIn("exp:", desc)
+        self.assertIn("know:", desc)
+
+    def test_record_knowledge_keeps_witness_and_observable_contracts(self):
+        props = self._props("record_knowledge")
+        self.assertIn("description", props["witnesses"])
+        self.assertIn("description", props["observable_act"])
+
+    def test_navigate_and_save_location_keeps_path_grammar(self):
+        self.assertIn("description", self._props("navigate_to")["location_name"])
+        self.assertIn("description", self._props("save_location")["name"])
+
+    def test_non_keeplist_tool_has_no_param_descriptions(self):
+        for tool in ("record_bond", "record_mood", "save_object"):
+            for k, pdef in self._props(tool).items():
+                self.assertNotIn(
+                    "description", pdef, f"{tool}.{k} kept a description"
+                )
+
+    def test_compact_budget_under_3000(self):
+        self.assertLessEqual(self.engine._cached_compact_step2_schema_toks, 3000)
+
+    def test_compact_smaller_than_full_schema(self):
+        self.assertLess(
+            self.engine._cached_compact_step2_schema_toks,
+            self.engine._cached_schema_toks,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12f. Sigil classification — play.classify_input (W8d / R4d)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyInput(unittest.TestCase):
+    """The prompt-facing input contract: sigils → explicit directives."""
+
+    def _c(self, raw):
+        import play
+
+        return play.classify_input(raw)
+
+    def test_speech_sigil(self):
+        out = self._c('"Hello there.')
+        self.assertTrue(out.startswith("[MC speaks aloud]"))
+        self.assertIn("Hello there.", out)
+
+    def test_action_sigil(self):
+        out = self._c("*opens the heavy door")
+        self.assertTrue(out.startswith("[MC action]"))
+        self.assertIn("opens the heavy door", out)
+
+    def test_attention_sigil_with_tail(self):
+        out = self._c("@evie you look nervous")
+        self.assertIn("[MC attention", out)
+        self.assertIn("evie", out)
+        self.assertIn("you look nervous", out)
+
+    def test_attention_sigil_without_tail(self):
+        out = self._c("@window")
+        self.assertIn("[MC attention", out)
+        self.assertIn("window", out)
+
+    def test_inner_monologue_sigil(self):
+        out = self._c("^I feel uneasy about this place")
+        self.assertIn("[MC inner monologue", out)
+        self.assertIn("I feel uneasy about this place", out)
+        # The monologue sigil nudges toward backstory-preserving tools.
+        self.assertIn("record_conscience", out)
+
+    def test_default_is_dialogue(self):
+        out = self._c("hello everyone")
+        self.assertIn("[MC — likely spoken aloud", out)
+        self.assertIn("hello everyone", out)
+
+
+# ---------------------------------------------------------------------------
+# 12g. Production-shape tool activation — LLM-gated (W9 / T6, D9)
+# ---------------------------------------------------------------------------
+
+
+class TestProductionActivation(unittest.TestCase):
+    """Phrase → tool selection in the real step-partitioned, compact-schema shape.
+
+    Unlike TestToolDispatch (all 42 flat schemas, generic GM prompt, one pass),
+    these assert selection under the exact production menus and system prompts.
+    LLM-gated (skipped without openai_api_url) and stochastic: each phrase runs
+    N=3 with a ≥2/3 pass threshold (D9).
+    """
+
+    def setUp(self):
+        self.engine = _make_engine(
+            location="ravenwood-manor", people={"player", "evie"}
+        )
+
+    def _passes(self, fn, n=3, need=2):
+        return sum(1 for _ in range(n) if fn()) >= need
+
+    def _step1_tools_for(self, phrase):
+        from rpjot import _STEP1_SYSTEM
+        from catjot import call_llm
+
+        messages = [
+            {"role": "system", "content": _STEP1_SYSTEM},
+            {"role": "user", "content": f"PLAYER INPUT:\n{phrase}"},
+        ]
+        resp = call_llm(
+            messages, tools=self.engine._step1_schemas, tool_choice="auto"
+        )
+        return [tc["function"]["name"] for tc in resp.get("tool_calls") or []]
+
+    def _step2_tools_for(self, phrase, world_doc=None):
+        from catjot import ContextBundle, call_llm
+
+        if world_doc is None:
+            world_doc = "WORLD STATE: you stand in the manor foyer with Evie."
+        rules = str(ContextBundle("system_role")).strip() or (
+            "You are the game master. Use tools to record canon."
+        )
+        parts = [
+            f"WORLD STATE BRIEFING:\n{world_doc}",
+            f"NARRATOR RULE: {self.engine._NARRATOR_RULE}",
+            phrase,
+        ]
+        messages = [
+            {"role": "system", "content": rules},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ]
+        resp = call_llm(
+            messages,
+            tools=self.engine._compact_step2_schemas,
+            tool_choice="auto",
+        )
+        return [tc["function"]["name"] for tc in resp.get("tool_calls") or []]
+
+    # --- Step 1 perception ---
+
+    def test_who_is_here_selects_get_people_present(self):
+        self.assertTrue(
+            self._passes(
+                lambda: "get_people_present"
+                in self._step1_tools_for("Who is here with me?")
+            )
+        )
+
+    # --- Step 2 consent: negative + positive pair ---
+
+    def test_npc_invitation_does_not_select_navigate_to(self):
+        phrase = (
+            '[MC speaks aloud]: "Lead on, then." '
+            "Evie beckons you to follow her down the corridor."
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "navigate_to" not in self._step2_tools_for(phrase)
+            )
+        )
+
+    def test_player_movement_selects_navigate_to(self):
+        phrase = "[MC action]: I follow her down the corridor to the drawing room."
+        self.assertTrue(
+            self._passes(
+                lambda: "navigate_to" in self._step2_tools_for(phrase)
+            )
+        )
+
+    # --- Step 2 cast membership ---
+
+    def test_arrival_selects_set_people_present(self):
+        phrase = (
+            "[MC action]: I open the front door; a butler steps inside and "
+            "introduces himself, joining me in the foyer."
+        )
+        world_doc = (
+            "WORLD STATE: you are alone in the foyer until the butler arrives."
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "set_people_present"
+                in self._step2_tools_for(phrase, world_doc)
+            )
+        )
+
+    # --- Step 2 new-NPC persistence ---
+
+    def test_new_npc_selects_save_character(self):
+        phrase = (
+            '[MC speaks aloud]: "And who might you be?" '
+            "The gardener introduces himself as Tomas."
+        )
+        world_doc = (
+            "WORLD STATE: a new character, a grizzled gardener named Tomas, "
+            "has just been introduced.\n[NO CHARACTER NOTES ON FILE FOR]: tomas"
+        )
+        self.assertTrue(
+            self._passes(
+                lambda: "save_character"
+                in self._step2_tools_for(phrase, world_doc)
+            )
+        )
+
+    # --- Step 2 event canon ---
+
+    def test_clear_action_selects_record_event(self):
+        phrase = "[MC action]: I pick up the iron key from the table and pocket it."
+        self.assertTrue(
+            self._passes(
+                lambda: "record_event" in self._step2_tools_for(phrase)
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12h. Prose/tool seams — synthesis + directive prefixes (W11 / T5)
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesisSeams(unittest.TestCase):
+    """Tool results must never leak raw dicts (braces) into the prose synthesis."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def test_record_bond_summary_has_no_braces(self):
+        result = json.dumps(
+            {"char_a": "evie", "char_b": "player", "bond_type": "trust"}
+        )
+        summary = RPJotEngine._summarize_write_result("record_bond", result)
+        self.assertNotIn("{", summary)
+        self.assertNotIn("}", summary)
+
+    def test_generic_rel_int_tool_summaries_have_no_braces(self):
+        # Tools without a bespoke branch used to render str(dict) with braces.
+        cases = {
+            "record_secret": {"character": "evie", "status": "recorded"},
+            "record_lie": {"liar": "evie", "target": "player", "status": "recorded"},
+            "record_leverage": {
+                "holder": "evie",
+                "subject": "player",
+                "status": "recorded",
+            },
+            "record_unspoken": {"character": "evie", "status": "recorded"},
+        }
+        for fn, payload in cases.items():
+            with self.subTest(tool=fn):
+                summary = RPJotEngine._summarize_write_result(
+                    fn, json.dumps(payload)
+                )
+                self.assertNotIn("{", summary)
+                self.assertNotIn("}", summary)
+                self.assertTrue(summary.strip())
+
+    def test_full_synthesis_contains_no_braces(self):
+        canonical = [
+            ("record_secret", json.dumps({"character": "evie", "status": "recorded"})),
+            (
+                "record_bond",
+                json.dumps(
+                    {"char_a": "evie", "char_b": "player", "bond_type": "wary"}
+                ),
+            ),
+            (
+                "record_jealousy",
+                json.dumps({"character": "player", "status": "recorded"}),
+            ),
+        ]
+        synthesis = self.engine._build_narrative_synthesis([], canonical)
+        self.assertNotIn("{", synthesis)
+        self.assertNotIn("}", synthesis)
+
+    def test_followup_injection_is_directive_prefixed(self):
+        import rpjot as rpjot_module
+
+        rounds = [
+            {
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "record_event", "arguments": "{}"},
+                    }
+                ]
+            },
+            {"content": "done"},
+        ]
+        calls = {"i": 0, "seen": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["seen"].extend(str(m.get("content") or "") for m in messages)
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        # Force the dispatched result to carry a followup instruction.
+        eng._dispatch_step2 = lambda name, args: json.dumps(
+            {"ok": True, "followup_instruction": "gather more before narrating"}
+        )
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            step2 = [{"role": "system", "content": "rules"}]
+            eng._compliance_step.run("[MC action]: I act", "WORLD", step2)
+        finally:
+            rpjot_module.call_llm = original
+
+        self.assertTrue(
+            any(
+                c.startswith("[DIRECTIVE] gather more before narrating")
+                for c in calls["seen"]
+            ),
+            "followup instruction was not [DIRECTIVE]-prefixed",
+        )
+
+    def test_zero_canonical_nudge_is_directive_prefixed(self):
+        from rpjot import ComplianceStep
+
+        self.assertTrue(
+            ComplianceStep._ZERO_CANONICAL_NUDGE.startswith("[DIRECTIVE] ")
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12i. Hygiene — cache cap, honest guard message (W12 / R6)
+# ---------------------------------------------------------------------------
+
+
+class TestHygiene(unittest.TestCase):
+    """R6: bounded query cache and an honest 90-99% guard message."""
+
+    def test_query_cache_fifo_eviction(self):
+        from rpjot import _QUERY_CACHE_MAX
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        for i in range(_QUERY_CACHE_MAX + 25):
+            eng._cache_put(f"k{i}", "value")
+        cache = eng.session._query_cache
+        self.assertLessEqual(len(cache), _QUERY_CACHE_MAX)
+        self.assertNotIn("k0", cache)  # oldest evicted
+        self.assertIn(f"k{_QUERY_CACHE_MAX + 24}", cache)  # newest kept
+
+    def test_query_cache_update_existing_does_not_grow(self):
+        from rpjot import _QUERY_CACHE_MAX
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        for i in range(_QUERY_CACHE_MAX):
+            eng._cache_put(f"k{i}", "v")
+        self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
+        eng._cache_put("k0", "updated")  # existing key
+        self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
+        self.assertEqual(eng.session._query_cache["k0"], "updated")
+
+    def _user_msg_at_pct(self, low_pct):
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        low = low_pct * cap
+        reps = int(low / 12)
+        while _msg_toks({"role": "user", "content": _CHUNK * reps}) < low:
+            reps += 5
+        return {"role": "user", "content": _CHUNK * reps}
+
+    def test_guard_90pct_history_only_logs_no_trimmable(self):
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        big = self._user_msg_at_pct(0.92)
+        msgs = [big, {"role": "user", "content": "the active prompt"}]
+        with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+            eng._guard_payload(msgs, schema_overhead=0)
+        joined = " ".join(cm.output)
+        # Precondition: the payload landed in the 90-99% band.
+        self.assertLess(eng._last_payload_toks, cap)
+        self.assertGreaterEqual(eng._last_payload_toks, 0.90 * cap)
+        # No tool messages exist to trim → honest message, not a false "trimming".
+        self.assertIn("no trimmable tool results", joined)
+
+
+# ---------------------------------------------------------------------------
+# 12j. Token panel — engine.history_report (W10 / R5)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryReport(unittest.TestCase):
+    """The REPL token panel exposes the number that actually grows: history."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def test_report_contains_expected_fields(self):
+        step2 = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "STORY SO FAR:\nearlier events"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "there"},
+        ]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3, avg_pair_toks=640)
+        self.assertIn("TOKEN BUDGET", report)
+        self.assertIn("step2 history", report)
+        self.assertIn("step3 history", report)
+        self.assertIn("schema ovh", report)
+        self.assertIn("last payload", report)
+        self.assertIn("turns until 85%", report)
+
+    def test_digest_presence_reported_per_history(self):
+        step2 = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "STORY SO FAR:\nx"},
+        ]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3)
+        # step2 has a digest, step3 does not.
+        self.assertIn("digest present: yes", report)
+        self.assertIn("digest present: no", report)
+
+    def test_no_avg_gives_placeholder_estimate(self):
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3, avg_pair_toks=None)
+        self.assertIn("need ≥1 completed turn", report)
+
+
+# ---------------------------------------------------------------------------
+# 12k. Resume-time digest seeding — play.seed_digest_from_summaries (S1 / D10)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeDigestSeeding(unittest.TestCase):
+    """On resume, a STORY SO FAR digest is seeded from /summaries notes."""
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_SUMMARIES
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+        for i in range(20):
+            note = Note.jot(
+                message=f"Turn {i}: something happens in the manor.",
+                tag="summary",
+                context=f"turn {i}",
+                pwd=PWD_SUMMARIES,
+            )
+            Note.append(Note.NOTEFILE, note)
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _engine(self):
+        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine._condense_context = lambda raw, focus_hint="": "distilled recap here"
+        return engine
+
+    def test_seed_installs_digest_at_index_1(self):
+        import play
+
+        engine = self._engine()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        play.seed_digest_from_summaries(engine, step2, step3)
+        self.assertTrue(step2[1]["content"].startswith("STORY SO FAR:"))
+        self.assertIn("distilled recap here", step2[1]["content"])
+        self.assertTrue(step3[1]["content"].startswith("STORY SO FAR:"))
+        # System message stays at index 0.
+        self.assertEqual(step2[0]["role"], "system")
+
+    def test_seeded_digest_is_recognized_by_compaction(self):
+        import play
+
+        engine = self._engine()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        play.seed_digest_from_summaries(engine, step2, step3)
+        # _split_history must fold, not stack, the seeded digest.
+        _head, prefix, _body = play._split_history(step2)
+        self.assertTrue(prefix.startswith("STORY SO FAR:"))
+
+    def test_no_summaries_is_noop(self):
+        import play
+        from rpjot import PWD_SUMMARIES
+
+        # Point at an empty notefile with no summaries.
+        import tempfile
+
+        saved = Note.NOTEFILE
+        fd, empty = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = empty
+        try:
+            engine = self._engine()
+            step2 = [{"role": "system", "content": "rules"}]
+            step3 = [{"role": "system", "content": "prose"}]
+            play.seed_digest_from_summaries(engine, step2, step3)
+            self.assertEqual(len(step2), 1)  # untouched
+            self.assertEqual(len(step3), 1)
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(empty)
 
 
 # ---------------------------------------------------------------------------

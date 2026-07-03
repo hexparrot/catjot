@@ -67,6 +67,24 @@ except ImportError:
 
     _TOK_SOURCE = "chars//4 fallback (regex not installed)"
 
+
+def _msg_toks(m: dict) -> int:
+    """Token cost of one chat message: content plus any tool_calls payload.
+
+    The step-2 loop appends assistant messages whose function-call arguments
+    live in ``m["tool_calls"]`` with ``content`` often empty or None. Those
+    argument JSONs are real payload the guard must account for; a content-only
+    sum undercounts exactly the messages most likely to push a call over the
+    window. Shared by the payload guard, history compaction, and the REPL
+    token panel so every subsystem measures the same way.
+    """
+    t = _tok(str(m.get("content") or ""))
+    for tc in m.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        t += _tok(str(fn.get("name", ""))) + _tok(str(fn.get("arguments", "")))
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -75,6 +93,7 @@ LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)s.%(funcName)s: %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 logger = logging.getLogger("rpjot_engine")
+_h_file = None  # module-level ref to the current file handler (swappable per session)
 if not logger.handlers:
     _h_stderr = logging.StreamHandler(sys.stderr)
     _h_file = logging.FileHandler("debug.log", mode="a")
@@ -86,6 +105,27 @@ if not logger.handlers:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 logger.debug("tokenizer: %s", _TOK_SOURCE)
+
+
+def configure_logging(stamp: str) -> None:
+    """Re-point the debug file handler to debug_{stamp}.log for this session.
+
+    Segments the log per session so a runaway investigation doesn't grep one
+    ever-growing shared file (R6). Falls back to the module-load default
+    (debug.log) when never called, so imports and the test suite keep working.
+    """
+    global _h_file
+    if not stamp:
+        return
+    new_path = f"debug_{stamp}.log"
+    new_handler = logging.FileHandler(new_path, mode="a")
+    new_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+    if _h_file is not None and _h_file in logger.handlers:
+        logger.removeHandler(_h_file)
+        _h_file.close()
+    logger.addHandler(new_handler)
+    _h_file = new_handler
+    logger.info("[LOG] per-session debug log: %s", new_path)
 
 # ---------------------------------------------------------------------------
 # Tag and Directory Constants
@@ -160,9 +200,49 @@ FOLLOWUP_CONTEXT_SNAPSHOT = (
     "what is in other characters' private context."
 )
 
+# Human-readable labels for write-tool results in the narrative synthesis (T5).
+# Every step-2 tool has an entry so the fallback never renders a raw dict (with
+# braces) into the prose-facing synthesis.
+_WRITE_TOOL_LABELS = {
+    "record_event": "Event",
+    "record_knowledge": "Private knowledge",
+    "record_conscience": "Conscience",
+    "record_mood": "Mood",
+    "update_attn": "Attention",
+    "save_character": "Character saved",
+    "save_location": "Location saved",
+    "save_object": "Object saved",
+    "save_yomi": "Yomi",
+    "set_people_present": "Cast updated",
+    "begin_scene": "Scene",
+    "navigate_to": "Travel",
+    "record_bond": "Bond",
+    "record_history": "Shared history",
+    "record_dynamic": "Dynamic",
+    "record_power_dynamic": "Power dynamic",
+    "record_wound": "Wound",
+    "record_promise": "Promise",
+    "record_debt": "Debt",
+    "record_lie": "Lie",
+    "record_leverage": "Leverage",
+    "record_impression": "Impression",
+    "record_secret": "Secret",
+    "record_desire": "Desire",
+    "record_longing": "Longing",
+    "record_jealousy": "Jealousy",
+    "record_mask": "Mask",
+    "record_subtext": "Subtext",
+    "record_reputation": "Reputation",
+    "record_trigger": "Trigger",
+    "record_unspoken": "Unspoken",
+}
+
 # ---------------------------------------------------------------------------
 # Context size limits
 # ---------------------------------------------------------------------------
+
+# Max distinct entries retained in SessionState._query_cache before FIFO eviction.
+_QUERY_CACHE_MAX = 256
 
 CONTEXT_MAX_TOKS = (
     2_000  # soft limit in tokens; above this, LLM condensation is triggered
@@ -451,11 +531,15 @@ class WorldStateStep:
 
         baseline = self._build_baseline_context(classified_input)
 
+        cast_warning = self.engine._cast_warning_line()
+        cast_block = f"\n{cast_warning}\n" if cast_warning else ""
+
         return (
             f"SCENE STATE:\n"
             f"  location: {sess.location}\n"
             f"  scene: {sess.current_scene or '(none)'}\n"
-            f"  people_present: {present}\n\n"
+            f"  people_present: {present}\n"
+            f"{cast_block}\n"
             f"NPC TRACKER (session memory — every named character on file):\n{roster}\n\n"
             f"{baseline}\n"
             f"PLAYER INPUT:\n{classified_input}\n\n"
@@ -555,12 +639,9 @@ class WorldStateStep:
                 fn_args = tc["function"]["arguments"]
                 tool_id = tc.get("id", fn_name)
 
-                if fn_name in engine._step1_handlers:
-                    result = engine._step1_handlers[fn_name](
-                        **json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                    )
-                else:
-                    result = json.dumps({"error": f"step1 unknown tool: {fn_name}"})
+                result = engine._safe_dispatch(
+                    engine._step1_handlers, fn_name, fn_args
+                )
 
                 logger.debug("[STEP1] tool %s → %s", fn_name, result[:120])
                 tool_results_collected.append(f"[{fn_name}]: {result}")
@@ -597,8 +678,32 @@ class ComplianceStep:
     Returns (canonical_results, accumulated_think) for ProseStep.
     """
 
+    # Corrective directive for the zero-canonical nudge (T2/D4). Prefixed
+    # [DIRECTIVE] so the model does not confuse it with player input (T5).
+    _ZERO_CANONICAL_NUDGE = (
+        "[DIRECTIVE] No canonical record was written this turn. If anything "
+        "happened — an action, dialogue, or discovery — call record_event or "
+        "record_knowledge now. If truly nothing canonical occurred, reply "
+        "exactly: DONE."
+    )
+
+    # Classified-input prefixes that warrant a nudge when the turn wrote no
+    # canon. Actions and spoken/likely-spoken lines usually establish canon;
+    # inner monologue and pure attention shifts often do not (D4).
+    _NUDGE_PREFIXES = (
+        "[MC action]",
+        "[MC speaks aloud]",
+        "[MC — likely spoken aloud",
+    )
+
     def __init__(self, engine: "RPJotEngine") -> None:
         self.engine = engine
+
+    @classmethod
+    def _should_nudge_zero_canonical(cls, classified_input: str) -> bool:
+        """True when an empty-canonical turn should get one corrective round."""
+        s = (classified_input or "").lstrip()
+        return s.startswith(cls._NUDGE_PREFIXES)
 
     def run(
         self,
@@ -623,7 +728,12 @@ class ComplianceStep:
             {"role": "user", "content": "\n\n".join(user_content_parts)}
         ]
 
-        for i in range(max_iterations):
+        # `bound` is bumped by exactly one if the zero-canonical nudge fires, so
+        # the corrective round always has room even on the last iteration (D4).
+        i = 0
+        bound = max_iterations
+        nudged = False
+        while i < bound:
             messages = engine._guard_payload(
                 messages, schema_overhead=engine._cached_compact_step2_schema_toks
             )
@@ -645,6 +755,29 @@ class ComplianceStep:
                 )
                 if think.strip():
                     accumulated_think.append(think.strip())
+
+                if (
+                    not canonical_results
+                    and not nudged
+                    and self._should_nudge_zero_canonical(classified_input)
+                ):
+                    nudged = True
+                    bound += 1
+                    messages.append(response_msg)
+                    messages.append(
+                        {"role": "user", "content": self._ZERO_CANONICAL_NUDGE}
+                    )
+                    logger.info("[STEP2] zero-canonical nudge → injected")
+                    i += 1
+                    continue
+
+                if nudged:
+                    outcome = (
+                        f"recorded {len(canonical_results)}"
+                        if canonical_results
+                        else "acknowledged (no canon)"
+                    )
+                    logger.info("[STEP2] zero-canonical nudge → %s", outcome)
                 logger.info(
                     "[STEP2] complete: %d tool rounds, canonical=%d think=%d",
                     i,
@@ -674,7 +807,13 @@ class ComplianceStep:
                 )
                 messages.append(tool_msg)
                 if instruction:
-                    messages.append({"role": "user", "content": instruction})
+                    # Prefixed so the model does not mistake a system-issued
+                    # followup for player input (T5).
+                    messages.append(
+                        {"role": "user", "content": f"[DIRECTIVE] {instruction}"}
+                    )
+
+            i += 1
 
         logger.warning("[STEP2] max iterations reached")
         return canonical_results, accumulated_think
@@ -777,6 +916,10 @@ class RPJotEngine:
         self._cached_compact_step2_schema_toks: int = 0
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
+        # Cast-drift warnings (T1): NPC slugs named in the turn's text but absent
+        # from people_present. Detection only; surfaced in /stats and the next
+        # step-1 SCENE STATE header, cleared when the discrepancy resolves.
+        self._cast_warnings: list = []
         self.main_character = main_character
         self.session = SessionState(
             location=location,
@@ -856,22 +999,46 @@ class RPJotEngine:
             for s in self._step1_schemas
         ]
 
+    # Parameter descriptions that survive step-2 schema compaction (T3/D3).
+    # These carry load-bearing argument contracts — the exp:/know: tag grammar,
+    # witness/observable-act semantics, hierarchical path rules — whose loss
+    # silently corrupts the knowledge-asymmetry engine. Ordered so the keep-list
+    # can be trimmed from the bottom if the compact budget ever exceeds ~3,000
+    # tok (never drop the first three entries).
+    _COMPACT_KEEP_PARAM_DESCRIPTIONS = [
+        ("record_event", "tags"),
+        ("record_knowledge", "witnesses"),
+        ("record_knowledge", "observable_act"),
+        ("navigate_to", "location_name"),
+        ("save_location", "name"),
+    ]
+
     @property
     def _compact_step2_schemas(self) -> list:
-        """Step 2 schemas with string descriptions stripped from parameters.
+        """Step 2 schemas with most parameter descriptions stripped.
 
         Preserves tool name, parameter names, types, and required fields so the
         model can still call tools correctly — just without the verbose English
         descriptions that inflate schema overhead from ~7,700 tok to ~2,000 tok.
+        The critical argument contracts in _COMPACT_KEEP_PARAM_DESCRIPTIONS are
+        retained (T3): without them the model has to guess the exp:/know: tag
+        grammar and witness semantics, silently producing notes POV queries
+        cannot find.
         """
+        keep = set(self._COMPACT_KEEP_PARAM_DESCRIPTIONS)
         result = []
         for s in self._step2_schemas:
             fn = s["function"]
+            name = fn["name"]
             params = fn.get("parameters", {})
-            stripped_props = {
-                k: {pk: pv for pk, pv in pdef.items() if pk != "description"}
-                for k, pdef in params.get("properties", {}).items()
-            }
+            stripped_props = {}
+            for k, pdef in params.get("properties", {}).items():
+                if (name, k) in keep:
+                    stripped_props[k] = dict(pdef)
+                else:
+                    stripped_props[k] = {
+                        pk: pv for pk, pv in pdef.items() if pk != "description"
+                    }
             result.append(
                 {
                     "type": "function",
@@ -929,20 +1096,85 @@ class RPJotEngine:
             self._step2_schemas.append(schema)
             self._step2_handlers[name] = handler
 
-    def _dispatch(self, name: str, args_json) -> str:
-        """Dispatch a tool call by name across step1 + step2 handlers."""
-        handlers = self._tool_handlers
+    def _required_params(self, name: str) -> list:
+        """Return the ``required`` param list for a tool schema, or []."""
+        for s in self._tool_schemas:
+            if s["function"]["name"] == name:
+                return s["function"].get("parameters", {}).get("required", []) or []
+        return []
+
+    def _safe_dispatch(self, handlers: dict, name: str, args_json) -> str:
+        """Dispatch a tool call defensively — a bad call must never crash the turn.
+
+        Unknown tool names, non-JSON arguments, missing required keys, and any
+        exception raised by the handler are all converted to an error-JSON
+        string (logged at WARNING) instead of propagating. The model receives
+        the error inside its tool loop and can self-correct on the next round.
+        """
         if name not in handlers:
             return json.dumps({"error": f"unknown tool: {name}"})
-        args = json.loads(args_json) if isinstance(args_json, str) else args_json
-        return handlers[name](**args)
+
+        try:
+            args = (
+                json.loads(args_json) if isinstance(args_json, str) else args_json
+            )
+        except json.JSONDecodeError as exc:
+            logger.warning("[DISPATCH] %s: malformed JSON arguments: %s", name, exc)
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        if not isinstance(args, dict):
+            logger.warning("[DISPATCH] %s: arguments are not an object: %r", name, args)
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: arguments must be a JSON object",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        missing = [k for k in self._required_params(name) if k not in args]
+        if missing:
+            logger.warning(
+                "[DISPATCH] %s: missing required argument(s) %s", name, missing
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"tool {name} failed: missing required argument(s): "
+                        f"{', '.join(missing)}"
+                    ),
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        try:
+            return handlers[name](**args)
+        except Exception as exc:
+            logger.warning(
+                "[DISPATCH] %s raised %s: %s",
+                name,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+    def _dispatch(self, name: str, args_json) -> str:
+        """Dispatch a tool call by name across step1 + step2 handlers."""
+        return self._safe_dispatch(self._tool_handlers, name, args_json)
 
     def _dispatch_step2(self, name: str, args_json) -> str:
         """Dispatch a Step 2 (write) tool call."""
-        if name not in self._step2_handlers:
-            return json.dumps({"error": f"step2 unknown tool: {name}"})
-        args = json.loads(args_json) if isinstance(args_json, str) else args_json
-        return self._step2_handlers[name](**args)
+        return self._safe_dispatch(self._step2_handlers, name, args_json)
 
     # ===================================================================
     # === 3. Run Orchestration ===
@@ -1024,6 +1256,13 @@ class RPJotEngine:
             len(canonical_results),
             len(accumulated_think),
         )
+        # Per-turn tool census (T6/D7): makes under-used tools measurable before
+        # any decision to consolidate the rel/int taxonomy. Empty turns log too.
+        logger.info(
+            "[TOOLS] turn=%d step2=%s",
+            self._turn_count + 1,
+            [fn for fn, _ in canonical_results],
+        )
 
         # Step 3
         narrative = self._prose_step.run(
@@ -1034,6 +1273,10 @@ class RPJotEngine:
             step3_messages,
         )
         logger.info("[TURN] step3 done: narrative=%d tok", _tok(narrative))
+
+        # Cast-drift detection (T1): compare who the turn's text names against
+        # who the session thinks is present. Detection only — never mutates cast.
+        self._scan_cast_drift(classified_input, narrative)
 
         # Advance turn counter; schedule entropy refresh
         self._turn_count += 1
@@ -1047,6 +1290,53 @@ class RPJotEngine:
             )
 
         return narrative
+
+    def _scan_cast_drift(self, classified_input: str, narrative: str) -> list:
+        """Detect NPCs named in the turn's text but absent from people_present.
+
+        The highest-stakes silent failure in the system: if the narrative
+        introduces or dismisses a character without set_people_present firing,
+        every downstream deterministic guarantee (baseline profiles, POV
+        contexts, exp: witness tagging) keys off the wrong cast. This only
+        *detects* the drift — it never mutates the cast, because a wrong guess
+        would corrupt canon exactly the way a miss does (T1 rationale).
+
+        Matching is case-insensitive and word-boundary anchored on each known
+        NPC's display_name and slug; the main character is skipped. Results
+        replace self._cast_warnings, so the warning clears automatically once
+        the named character is added to the cast or stops being mentioned.
+        """
+        text = f"{classified_input}\n{narrative}".lower()
+        present = {p.lower() for p in self.session.people_present}
+        mentioned_absent: list = []
+        for rec in self.npc_tracker.all():
+            if rec.slug == self.main_character:
+                continue
+            if rec.slug.lower() in present:
+                continue
+            for name in {rec.display_name, rec.slug}:
+                if not name:
+                    continue
+                if re.search(r"\b" + re.escape(name.lower()) + r"\b", text):
+                    mentioned_absent.append(rec.slug)
+                    break
+        self._cast_warnings = sorted(set(mentioned_absent))
+        if self._cast_warnings:
+            logger.warning(
+                "[CAST] mentioned-but-absent: %s", ", ".join(self._cast_warnings)
+            )
+        return self._cast_warnings
+
+    def _cast_warning_line(self) -> str:
+        """One-line cast-drift warning for headers/reports, or '' if none."""
+        if not self._cast_warnings:
+            return ""
+        return (
+            "CAST WARNING: narrative mentions "
+            f"{', '.join(self._cast_warnings)} who "
+            f"{'is' if len(self._cast_warnings) == 1 else 'are'} "
+            "not in people_present — call set_people_present if the cast changed."
+        )
 
     def init_pipeline(self) -> None:
         """Instantiate the 3-step pipeline objects. Call after register_all_tools()."""
@@ -1139,7 +1429,14 @@ class RPJotEngine:
         return hit
 
     def _cache_put(self, key: str, value: str) -> None:
-        self.session._query_cache[key] = value
+        cache = self.session._query_cache
+        # FIFO eviction cap (R6): the cache is invalidated on writes but never
+        # globally evicted, so bound it to keep long sessions from leaking RAM.
+        if key not in cache and len(cache) >= _QUERY_CACHE_MAX:
+            oldest = next(iter(cache))
+            del cache[oldest]
+            logger.debug("[CACHE] EVICT(FIFO) %s (cap %d)", oldest, _QUERY_CACHE_MAX)
+        cache[key] = value
         logger.debug("[CACHE] SET  %s (%d tok)", key, _tok(value))
 
     def _cache_drop(self, *keys: str) -> None:
@@ -4107,8 +4404,22 @@ class RPJotEngine:
         if fn_name == "record_impression":
             obs, sub = parsed.get("observer", "?"), parsed.get("subject", "?")
             return f"Impression: {obs} of {sub}"
-        # All other cases: fall back to the raw result string
-        return f"{fn_name}: {str(parsed)[:150]}"
+        # Generic brace-free summary for every remaining tool (the whole rel/int
+        # taxonomy and any future tool): a human label plus its meaningful scalar
+        # values — never str(dict), which would leak braces into the prose synthesis.
+        label = _WRITE_TOOL_LABELS.get(fn_name, fn_name.replace("_", " "))
+        skip_keys = {"status", "recorded", "followup_instruction"}
+        vals = []
+        for k, v in parsed.items():
+            if k in skip_keys or isinstance(v, bool):
+                continue
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                vals.append(str(v))
+            elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+                if v:
+                    vals.append(", ".join(v))
+        preview = " — ".join(vals)[:150]
+        return f"{label}: {preview}" if preview else label
 
     def _build_narrative_synthesis(
         self,
@@ -4207,6 +4518,11 @@ class RPJotEngine:
             f"  |  cap: {cap:,} tok"
         )
         lines.append(HDR)
+
+        # ── CAST DRIFT WARNING ───────────────────────────────────────────
+        cast_warning = self._cast_warning_line()
+        if cast_warning:
+            lines.append(f"\n⚠  {cast_warning}")
 
         # ── LOCATION HIERARCHY ───────────────────────────────────────────
         lines.append("\nLOCATION HIERARCHY")
@@ -4371,9 +4687,112 @@ class RPJotEngine:
 
         return "\n".join(lines)
 
+    def history_report(
+        self, step2_messages, step3_messages, avg_pair_toks=None
+    ) -> str:
+        """Live token panel for the persistent conversation histories (R5/W10).
+
+        The histories are the number that actually grows over a session, yet
+        neither /prompt nor /stats surfaced it. Shows per-history totals and %,
+        message counts, digest presence, the three cached schema overheads, the
+        last measured payload, and an estimate of turns until the guard's 85%
+        tier (from a trailing-average pair size supplied by the caller).
+        """
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+
+        def _has_digest(msgs):
+            return any(
+                str(m.get("content", "")).startswith("STORY SO FAR:") for m in msgs
+            )
+
+        s2 = sum(_msg_toks(m) for m in step2_messages)
+        s3 = sum(_msg_toks(m) for m in step3_messages)
+        lp = self._last_payload_toks
+
+        lines = [
+            f"{'[TOKEN BUDGET]':<30}"
+            f"cap = {cap:,} (MODEL {MODEL_CONTEXT_LIMIT_TOKS:,} − "
+            f"RESERVE {_RESPONSE_RESERVE_TOKS:,})",
+            f"step2 history : {s2:>6,} tok ({100.0 * s2 / cap:>4.0f}%)  "
+            f"[n={len(step2_messages)} msgs, digest present: "
+            f"{'yes' if _has_digest(step2_messages) else 'no'}]",
+            f"step3 history : {s3:>6,} tok ({100.0 * s3 / cap:>4.0f}%)  "
+            f"[n={len(step3_messages)} msgs, digest present: "
+            f"{'yes' if _has_digest(step3_messages) else 'no'}]",
+            f"schema ovh    : step1 {self._cached_step1_schema_toks:,} · "
+            f"step2(compact) {self._cached_compact_step2_schema_toks:,} · "
+            f"step3(bare) {self._cached_bare_schema_toks:,}",
+            f"last payload  : {lp:>6,} tok ({100.0 * lp / cap:>4.1f}%)"
+            f"          (engine._last_payload_toks)",
+        ]
+
+        if avg_pair_toks and avg_pair_toks > 0:
+            current = s2 + self._cached_compact_step2_schema_toks
+            remaining = 0.85 * cap - current
+            turns = int(remaining / avg_pair_toks) if remaining > 0 else 0
+            lines.append(
+                f"est. headroom : ~{turns} turns until 85% at "
+                f"~{int(avg_pair_toks)} tok/turn (trailing-5 avg)"
+            )
+        else:
+            lines.append(
+                "est. headroom : (need ≥1 completed turn to estimate)"
+            )
+
+        return "\n".join(lines)
+
     # ===================================================================
     # === 14. LLM Payload Management ===
     # ===================================================================
+
+    @staticmethod
+    def _is_digest_message(m: dict) -> bool:
+        """True for the compaction digest (a user message starting 'STORY SO FAR:').
+
+        The guard treats it like a system message so oldest-first dropping never
+        deletes the compacted story memory before ordinary history (D2).
+        """
+        c = m.get("content")
+        return (
+            m.get("role") == "user"
+            and isinstance(c, str)
+            and c.startswith("STORY SO FAR:")
+        )
+
+    @staticmethod
+    def _tool_unit_indices(messages: list, i: int) -> set:
+        """Indices of the atomic tool-call unit anchored at (or containing) index i.
+
+        An assistant message with tool_calls forms one unit with every later
+        role="tool" message answering one of its call ids. A role="tool" message
+        belongs to the unit anchored by its parent assistant. Returns just {i}
+        for a plain message or an orphan tool with no locatable parent.
+        """
+        m = messages[i]
+        if m is None:
+            return set()
+        if m.get("tool_calls"):
+            ids = {tc.get("id") for tc in m["tool_calls"] if tc.get("id")}
+            unit = {i}
+            for j in range(i + 1, len(messages)):
+                mj = messages[j]
+                if mj is None:
+                    continue
+                if mj.get("role") == "tool" and mj.get("tool_call_id") in ids:
+                    unit.add(j)
+            return unit
+        if m.get("role") == "tool":
+            tid = m.get("tool_call_id")
+            for p in range(i - 1, -1, -1):
+                mp = messages[p]
+                if mp is None:
+                    continue
+                if mp.get("tool_calls") and any(
+                    tc.get("id") == tid for tc in mp["tool_calls"]
+                ):
+                    return RPJotEngine._tool_unit_indices(messages, p)
+            return {i}
+        return {i}
 
     def _guard_payload(
         self, messages: list, schema_overhead: int | None = None
@@ -4394,7 +4813,7 @@ class RPJotEngine:
         capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         if schema_overhead is None:
             schema_overhead = self._cached_schema_toks
-        msg_toks = sum(_tok(str(m.get("content") or "")) for m in messages)
+        msg_toks = sum(_msg_toks(m) for m in messages)
         total = msg_toks + schema_overhead
         self._last_payload_toks = total
         pct = 100.0 * total / capacity
@@ -4424,7 +4843,7 @@ class RPJotEngine:
         # ≥ 100%: pass 1 + pass 2 (drop messages)
         if pct < 100.0:
             logger.warning(
-                "[CTX] guard: NEAR LIMIT — %d tok (%.1f%% of cap=%d) — trimming tool results",
+                "[CTX] guard: NEAR LIMIT — %d tok (%.1f%% of cap=%d) — reducing",
                 total,
                 pct,
                 capacity,
@@ -4440,6 +4859,7 @@ class RPJotEngine:
         excess = max(total - int(capacity * 0.88), 0)  # trim to ~88% to give headroom
 
         # Pass 1: trim tool-result messages oldest-first, never the last message
+        shed_pass1 = 0
         for i in range(len(messages) - 1):
             if excess <= 0:
                 break
@@ -4456,6 +4876,7 @@ class RPJotEngine:
             messages[i]["content"] = content[:cut] + "\n[payload guard: truncated]"
             shed = ctoks - _tok(messages[i]["content"])
             excess -= shed
+            shed_pass1 += shed
             logger.warning(
                 "[CTX] guard: trimmed tool result msg[%d] by ~%d tok (was %d tok)",
                 i,
@@ -4463,26 +4884,63 @@ class RPJotEngine:
                 ctoks,
             )
 
-        # Pass 2: drop oldest non-system messages only when actually over limit
-        if excess > 0 and pct >= 100.0:
-            for i in range(1, len(messages) - 1):
-                if excess <= 0:
-                    break
-                m = messages[i]
-                if m is None or m.get("role") == "system":
-                    continue
-                ctoks = _tok(str(m.get("content") or ""))
+        # Honest pass-1 report (D8): in the 90-99% band the payload is often all
+        # history and no tool results exist to trim — say so rather than implying
+        # a trim happened. (Above 100% pass 2 does the real work; reported later.)
+        if pct < 100.0:
+            if shed_pass1 <= 0:
                 logger.warning(
-                    "[CTX] guard: dropped msg[%d] role=%s ~%d tok",
-                    i,
-                    m.get("role"),
-                    ctoks,
+                    "[CTX] guard: no trimmable tool results — payload is "
+                    "conversation history, not tool output (%d tok, %.1f%%)",
+                    total,
+                    pct,
                 )
-                messages[i] = None
-                excess -= ctoks
+            else:
+                logger.warning(
+                    "[CTX] guard: pass 1 shed %d tok from tool results", shed_pass1
+                )
+
+        # Pass 2: drop oldest non-system messages only when actually over limit.
+        # Tool-call units are dropped atomically: an assistant carrying
+        # tool_calls leaves together with every role="tool" reply to its ids,
+        # and a role="tool" victim takes its parent assistant and siblings with
+        # it. Dropping a partial unit yields an API-invalid sequence that
+        # several OpenAI-compatible backends hard-reject. The STORY SO FAR
+        # digest (index 1) is protected like a system message (D2) so the
+        # oldest-first sweep never deletes compacted memory first.
+        if excess > 0 and pct >= 100.0:
+            n = len(messages)
+            i = 1
+            while i < n - 1 and excess > 0:
+                m = messages[i]
+                if (
+                    m is None
+                    or m.get("role") == "system"
+                    or self._is_digest_message(m)
+                ):
+                    i += 1
+                    continue
+                unit = self._tool_unit_indices(messages, i)
+                # Never drop the final (active-prompt) message, even as part of a unit.
+                if (n - 1) in unit:
+                    i += 1
+                    continue
+                unit_toks = sum(
+                    _msg_toks(messages[k]) for k in unit if messages[k] is not None
+                )
+                for k in unit:
+                    messages[k] = None
+                excess -= unit_toks
+                logger.warning(
+                    "[CTX] guard: dropped %d-msg tool unit anchored at [%d] ~%d tok",
+                    len(unit),
+                    i,
+                    unit_toks,
+                )
+                i += 1
             messages = [m for m in messages if m is not None]
 
-        new_total = sum(_tok(str(m.get("content") or "")) for m in messages)
+        new_total = sum(_msg_toks(m) for m in messages)
         logger.warning(
             "[CTX] guard: reduction complete — %d → %d tok (saved %d)",
             total,

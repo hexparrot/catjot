@@ -1145,5 +1145,78 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(n2.tag, "")
 
 
+class TestToolRegistration(unittest.TestCase):
+    """#16 regression (R4a): repeated register_tool must dedupe by name.
+
+    TOOL_SCHEMAS / TOOL_HANDLERS are process-level module globals, so each test
+    snapshots and restores them to stay independent.
+    """
+
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+        self._saved_schemas = list(catjot.TOOL_SCHEMAS)
+        self._saved_handlers = dict(catjot.TOOL_HANDLERS)
+
+    def tearDown(self):
+        self.catjot.TOOL_SCHEMAS[:] = self._saved_schemas
+        self.catjot.TOOL_HANDLERS.clear()
+        self.catjot.TOOL_HANDLERS.update(self._saved_handlers)
+
+    def _count(self, name):
+        return len(
+            [s for s in self.catjot.TOOL_SCHEMAS if s["function"]["name"] == name]
+        )
+
+    def _empty_params(self):
+        return {"type": "object", "properties": {}}
+
+    def test_five_registrations_yield_one_schema(self):
+        for _ in range(5):
+            self.catjot.register_tool(
+                "t_dup", "desc", self._empty_params(), lambda **k: "ok"
+            )
+        self.assertEqual(self._count("t_dup"), 1)
+
+    def test_changed_description_updates_in_place(self):
+        self.catjot.register_tool(
+            "t_desc", "first description", self._empty_params(), lambda **k: "a"
+        )
+        self.catjot.register_tool(
+            "t_desc", "second description", self._empty_params(), lambda **k: "b"
+        )
+        self.assertEqual(self._count("t_desc"), 1)
+        schema = next(
+            s
+            for s in self.catjot.TOOL_SCHEMAS
+            if s["function"]["name"] == "t_desc"
+        )
+        self.assertEqual(schema["function"]["description"], "second description")
+
+    def test_latest_handler_wins(self):
+        self.catjot.register_tool(
+            "t_handler", "d", self._empty_params(), lambda **k: "first"
+        )
+        self.catjot.register_tool(
+            "t_handler", "d", self._empty_params(), lambda **k: "second"
+        )
+        self.assertEqual(self.catjot.TOOL_HANDLERS["t_handler"](), "second")
+
+    def test_register_search_tools_is_idempotent(self):
+        search_names = [
+            "search_by_tag",
+            "search_by_context",
+            "search_by_message",
+            "search_by_directory",
+        ]
+        for _ in range(3):
+            self.catjot.register_search_tools()
+        for name in search_names:
+            self.assertEqual(self._count(name), 1, f"{name} was duplicated")
+        total_search = sum(self._count(n) for n in search_names)
+        self.assertEqual(total_search, 4)
+
+
 if __name__ == "__main__":
     unittest.main()

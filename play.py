@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import shutil
+from collections import deque
 from datetime import datetime
 
 import rpjot as _rpjot_module
@@ -18,6 +19,9 @@ from rpjot import (
     PWD_REL,
     PWD_INTERIOR,
     _STEP3_SYSTEM,
+    MODEL_CONTEXT_LIMIT_TOKS,
+    _RESPONSE_RESERVE_TOKS,
+    _msg_toks,
 )
 from catjot import Note, ContextBundle, call_llm
 
@@ -320,10 +324,132 @@ def refresh_system_message(engine, step2_messages):
     logger.info("[REFRESH] system message refreshed (%d tok)", len(refreshed.split()))
 
 
-def game_loop(engine):
+# ---------------------------------------------------------------------------
+# Persistent-history compaction (R1 / W4)
+# ---------------------------------------------------------------------------
+# The per-call guard trims a *copy* at send time; it never shrinks the
+# persistent step2/step3 histories, so a long session grows them without
+# bound until the guard silently starts dropping story turns every call.
+# compact_history folds the oldest exchanges into a single "STORY SO FAR"
+# digest well before the guard's 85% tier, keeping history sawtooth-bounded.
+
+HISTORY_SOFT_TOKS = int(0.5 * (MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS))
+KEEP_RECENT_PAIRS = 8  # last N user/assistant pairs stay verbatim
+
+
+def _history_toks(messages) -> int:
+    """Total token cost of a persistent history list (content + tool_calls)."""
+    return sum(_msg_toks(m) for m in messages)
+
+
+def _split_history(messages):
+    """Return (head, digest_prefix, body) for a history list.
+
+    head is [system]; digest_prefix is the content of an existing STORY SO FAR
+    digest at index 1 (removed from body) or "" if none; body is the remaining
+    user/assistant pairs.
+    """
+    head, body = messages[:1], messages[1:]
+    digest_prefix = ""
+    if (
+        body
+        and body[0].get("role") == "user"
+        and str(body[0].get("content", "")).startswith("STORY SO FAR:")
+    ):
+        digest_prefix = body.pop(0)["content"]
+    return head, digest_prefix, body
+
+
+def compact_history(
+    engine, step2_messages, step3_messages, keep_pairs=KEEP_RECENT_PAIRS
+):
+    """Fold the oldest turns of both histories into one shared STORY SO FAR digest.
+
+    Triggers when either list exceeds HISTORY_SOFT_TOKS. The two lists carry
+    identical user/assistant pairs (only their system message at index 0
+    differs), so the digest is computed once and installed into both (D1). An
+    existing digest is folded into the new one — the "STORY SO FAR" slot never
+    stacks. Mutates both lists in place; never touches the final message
+    (compaction runs after the post-turn appends, so the newest pair is kept
+    verbatim by keep_pairs anyway).
+    """
+    if (
+        _history_toks(step2_messages) <= HISTORY_SOFT_TOKS
+        and _history_toks(step3_messages) <= HISTORY_SOFT_TOKS
+    ):
+        return
+
+    head2, prefix2, body2 = _split_history(step2_messages)
+    head3, prefix3, body3 = _split_history(step3_messages)
+
+    cut = max(0, len(body2) - 2 * keep_pairs)
+    old, recent2 = body2[:cut], body2[cut:]
+    if not old:
+        return
+    cut3 = max(0, len(body3) - 2 * keep_pairs)
+    recent3 = body3[cut3:]
+
+    digest_prefix = prefix2 or prefix3
+    raw = (digest_prefix + "\n\n" if digest_prefix else "") + "\n\n".join(
+        f"[{m.get('role')}] {m.get('content', '')}" for m in old
+    )
+    digest = engine._condense_context(raw, focus_hint="")
+    digest_content = f"STORY SO FAR:\n{digest}"
+
+    step2_messages[:] = (
+        head2 + [{"role": "user", "content": digest_content}] + recent2
+    )
+    step3_messages[:] = (
+        head3 + [{"role": "user", "content": digest_content}] + recent3
+    )
+
+    logger.info(
+        "[HIST] compacted %d msgs → digest (step2=%d tok, step3=%d tok now)",
+        len(old),
+        _history_toks(step2_messages),
+        _history_toks(step3_messages),
+    )
+
+
+_SEED_SUMMARY_COUNT = 15  # newest /summaries notes folded into the resume digest
+
+
+def seed_digest_from_summaries(engine, step2_messages, step3_messages):
+    """On resume, seed a STORY SO FAR digest from the newest /summaries notes (S1).
+
+    Message lists always start fresh on resume, so cross-session continuity comes
+    only from notes. Distilling the most recent turn summaries into the same
+    digest slot that compaction uses gives the model immediate story recall from
+    turn one. No-op when there are no summaries. Installs one digest at index 1
+    of both histories; later compaction folds it into subsequent digests.
+    """
+    bundle = ContextBundle(PWD_SUMMARIES)
+    notes = sorted(bundle, key=lambda n: n.now, reverse=True)[:_SEED_SUMMARY_COUNT]
+    if not notes:
+        return
+    # Oldest-first so the recap reads in chronological order.
+    raw = "\n\n".join(
+        f"[{n.context.strip()}] {n.message.strip()}" for n in reversed(notes)
+    )
+    digest = engine._condense_context(raw, focus_hint="")
+    if not digest.strip():
+        return
+    for lst in (step2_messages, step3_messages):
+        lst.insert(1, {"role": "user", "content": f"STORY SO FAR:\n{digest}"})
+    logger.info("[HIST] seeded STORY SO FAR from %d summary notes", len(notes))
+
+
+def game_loop(engine, seed_summaries=False):
     """Main game loop using the 3-step pipeline."""
     step2_messages = build_step2_initial_messages()
     step3_messages = build_step3_initial_messages()
+    if seed_summaries:
+        seed_digest_from_summaries(engine, step2_messages, step3_messages)
+    # Trailing-5-turn appended-pair sizes → turns-until-85% estimate in /prompt.
+    pair_sizes: deque = deque(maxlen=5)
+
+    def _avg_pair_toks():
+        return (sum(pair_sizes) / len(pair_sizes)) if pair_sizes else None
 
     print("Welcome.\n")
     print(_HELP_TEXT)
@@ -360,6 +486,12 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            print()
+            print(
+                engine.history_report(
+                    step2_messages, step3_messages, avg_pair_toks=_avg_pair_toks()
+                )
+            )
             continue
 
         if user_input.lower().startswith("/prompt"):
@@ -381,6 +513,12 @@ def game_loop(engine):
             print(engine.npc_tracker.roster_summary())
             print(f"{divider}\n[CLASSIFIED INPUT]\n{divider}")
             print(classified_sim)
+            print(f"{divider}\n[TOKEN BUDGET]\n{divider}")
+            print(
+                engine.history_report(
+                    step2_messages, step3_messages, avg_pair_toks=_avg_pair_toks()
+                )
+            )
             print(f"{divider}\n")
             continue
 
@@ -439,6 +577,11 @@ def game_loop(engine):
             step2_messages.append({"role": "assistant", "content": "(no response)"})
             step3_messages.append({"role": "user", "content": classified})
             step3_messages.append({"role": "assistant", "content": "(no response)"})
+            pair_sizes.append(
+                _msg_toks({"content": classified})
+                + _msg_toks({"content": "(no response)"})
+            )
+            compact_history(engine, step2_messages, step3_messages)
             continue
 
         display_narrative(narrative)
@@ -456,6 +599,13 @@ def game_loop(engine):
         step2_messages.append({"role": "assistant", "content": narrative})
         step3_messages.append({"role": "user", "content": classified})
         step3_messages.append({"role": "assistant", "content": narrative})
+        pair_sizes.append(
+            _msg_toks({"content": classified}) + _msg_toks({"content": narrative})
+        )
+
+        # Compaction runs BEFORE the system refresh: refresh only replaces
+        # index 0 (system), so the digest installed at index 1 is preserved.
+        compact_history(engine, step2_messages, step3_messages)
 
         if engine._system_refresh_pending:
             refresh_system_message(engine, step2_messages)
@@ -479,6 +629,10 @@ def set_session_file(path: str):
     """Wire both catjot and rpjot to use *path* as the active note file."""
     Note.NOTEFILE = path
     _rpjot_module.NOTEFILE = path
+    # Segment the debug log per session (R6): session_20240101_120000.jot →
+    # debug_20240101_120000.log.
+    stamp = os.path.splitext(os.path.basename(path))[0].removeprefix("session_")
+    _rpjot_module.configure_logging(stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +651,7 @@ def main():
     )
     args = parser.parse_args()
 
+    resuming = bool(args.session)
     if args.session:
         session_file = os.path.abspath(args.session)
         if not os.path.isfile(session_file):
@@ -524,7 +679,9 @@ def main():
     )
     engine._system_refresh_pending = False
 
-    game_loop(engine)
+    # On resume, seed the STORY SO FAR digest from prior /summaries so the model
+    # has story recall from turn one (S1).
+    game_loop(engine, seed_summaries=resuming)
 
 
 if __name__ == "__main__":
