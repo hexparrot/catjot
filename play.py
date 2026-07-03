@@ -131,10 +131,19 @@ def query_people_context(engine):
 
 
 def query_location_context(engine):
-    """Return notes for the current location and all ancestor locations."""
+    """Return notes for the current location: ancestors (up) + sub-rooms (down)."""
     ancestor_tags = [f"{TAG_LOC}{a}" for a in engine.session.location_ancestors]
-    ctx = engine.gather_context(ancestor_tags + [PWD_WORLD])
-    return str(ctx) or f"[no location notes found for: {engine.session.location}]"
+    up = str(engine.gather_context(ancestor_tags + [PWD_WORLD]))
+    down = engine.gather_location_events(engine.session.location)
+    parts = []
+    if up:
+        parts.append(up)
+    if down:
+        parts.append("EVENTS IN THIS ROOM & SUB-ROOMS:\n" + down)
+    return (
+        "\n\n".join(parts)
+        or f"[no location notes found for: {engine.session.location}]"
+    )
 
 
 def query_object_context(engine, object_name=None):

@@ -155,6 +155,21 @@ TAG_YOMI = "yomi:"  # yomi:alice
 TAG_REL = "rel:"  # rel:bond, rel:history, rel:wound …
 TAG_INT = "int:"  # int:secret, int:desire, int:mask …
 
+# LOCATION_MARKING §3.1 — the gated lexical fallback for a led/passive move.
+# A passive-arrival cue = a _LED_VERBS word co-occurring with a directional
+# preposition. Mirrors the _MOVE_VERBS pattern for third-person/passive movement.
+# The gate is load-bearing: it keeps the neg_navto mention≠movement failure out
+# of the metadata side-door (a mere "meet me in the garage" must NOT re-mark).
+_LED_VERBS = frozenset({
+    "lead", "leads", "led", "bring", "brings", "brought", "pull", "pulls",
+    "pulled", "carry", "carries", "carried", "drag", "drags", "dragged",
+    "escort", "escorts", "escorted", "arrive", "arrives", "arrived",
+    "take", "takes", "took", "usher", "ushers", "ushered",
+})
+_LED_PREPS = frozenset({"into", "to", "inside", "in", "through", "toward", "towards"})
+# First line of the step-1 world doc: "CURRENT ROOM: <canonical path>" or UNCHANGED.
+_CURRENT_ROOM_RE = re.compile(r"(?im)^[ \t]*CURRENT ROOM:[ \t]*(.+?)[ \t]*$")
+
 # ---------------------------------------------------------------------------
 # Debug flags
 # ---------------------------------------------------------------------------
@@ -293,7 +308,13 @@ _STEP1_SYSTEM = (
     "profiles, relationships, location details, story context, yomi, and "
     "conscience constraints. Then output a structured WORLD STATE document "
     "summarizing what you found. Be comprehensive — it feeds both the "
-    "compliance and prose steps."
+    "compliance and prose steps.\n"
+    "The VERY FIRST line of your output must be `CURRENT ROOM: <path>` naming "
+    "the room the scene is in NOW as a canonical slug path — reuse an exact slug "
+    "from [ROOMS KNOWN HERE] when the scene is in or moving into one of them. If "
+    "the room has not changed since the current location, write "
+    "`CURRENT ROOM: UNCHANGED`. Base this on scene understanding (who moved whom, "
+    "where), not on places merely mentioned, offered, or thought about."
 )
 
 # System prompt for Step 3: Narrative Prose
@@ -577,6 +598,31 @@ class WorldStateStep:
             shared = ""
         if shared:
             parts.append(f"\n[LOCATION & SHARED LORE]\n{shared}")
+
+        # [ROOMS KNOWN HERE] — canonical child-room vocabulary (LM §3.4). Lets the
+        # step-1 CURRENT ROOM line emit canonical slugs instead of prose.
+        try:
+            child_slugs = engine._child_room_slugs(sess.location)
+        except Exception as exc:
+            logger.warning("[STEP1] baseline rooms-known build failed: %s", exc)
+            child_slugs = []
+        if child_slugs:
+            parts.append(
+                "\n[ROOMS KNOWN HERE] (canonical child slugs — reuse these exact "
+                "names):\n" + ", ".join(child_slugs)
+            )
+
+        # [EVENTS IN THIS ROOM & SUB-ROOMS] — down-walk recall (LM §3.6),
+        # complementing the ancestor up-walk in [LOCATION & SHARED LORE].
+        try:
+            loc_events = engine.gather_location_events(
+                sess.location, focus_hint=focus or ""
+            ).strip()
+        except Exception as exc:
+            logger.warning("[STEP1] baseline location-events build failed: %s", exc)
+            loc_events = ""
+        if loc_events:
+            parts.append(f"\n[EVENTS IN THIS ROOM & SUB-ROOMS]\n{loc_events}")
 
         empty = []
         for name in sorted(sess.people_present):
@@ -1334,6 +1380,82 @@ class RPJotEngine:
             self._cached_bare_schema_toks,
         )
 
+    def _has_led_cue(self, text: str) -> bool:
+        """True when `text` carries a passive-arrival cue (LM §3.1 fallback gate).
+
+        A _LED_VERBS word co-occurring with a directional preposition — the
+        third-person/passive analogue of _MOVE_VERBS. The gate is what keeps a
+        mere mention ("meet me in the garage") from re-marking the location.
+        """
+        words = {w.strip('.,;:!?"\'').lower() for w in (text or "").split()}
+        return bool(words & _LED_VERBS) and bool(words & _LED_PREPS)
+
+    def _extract_led_room(self, text: str) -> str | None:
+        """Match a KNOWN room named in a led-move input (LM §3.1 fallback).
+
+        Only returns a room that already exists (a known child of the current
+        location or a known root) — never create-new, so a mention of an unknown
+        word cannot mint a room. Returns None if nothing known is named.
+        """
+        current = self.session.location
+        children = {c: f"{current}/{c}" for c in self._child_room_slugs(current)}
+        roots = self._known_location_roots()
+        toks = [
+            re.sub(r"[^a-z0-9-]+", "-", w.strip('.,;:!?"\'').lower()).strip("-")
+            for w in (text or "").split()
+        ]
+        toks = [t for t in toks if t]
+        candidates = list(toks) + [f"{a}-{b}" for a, b in zip(toks, toks[1:])]
+        for cand in candidates:
+            if cand in children:
+                return children[cand]
+            if cand in roots:
+                return cand
+        return None
+
+    def _remark_location(self, classified_input: str, world_doc: str) -> str:
+        """Commit a precise session.location before step-2 recording (LM §3.1).
+
+        Returns world_doc with any `CURRENT ROOM:` line stripped, so it never
+        leaks into step-2/step-3 context. Runs only on stationary turns — mobile
+        self-moves defer to navigate_to, which moves session.location itself in
+        step 2 (pre-committing would collapse compute_traversal to from==to and
+        erase multi-room journey narration). Never guesses: an undeterminable room
+        leaves session.location untouched (the last precise room). Metadata only —
+        deliberately does NOT reset attention/mood (that is navigate_to's job).
+        """
+        # Parse + strip the step-1 CURRENT ROOM line regardless of gating.
+        proposed = None
+        m = _CURRENT_ROOM_RE.search(world_doc)
+        if m:
+            raw = m.group(1).strip()
+            world_doc = _CURRENT_ROOM_RE.sub("", world_doc, count=1).lstrip("\n")
+            if raw and raw.upper() != "UNCHANGED":
+                proposed = raw
+
+        # Decoupling gate: defer to navigate_to on mobile self-moves.
+        if not ComplianceStep._is_stationary_turn(classified_input):
+            return world_doc
+
+        path = None
+        # 1. Step-1 structured line (primary — scene understanding, not lexical).
+        if proposed is not None:
+            path = self._canonicalize_room(proposed, self.session.location)
+        # 2. Gated deterministic extraction (fallback) — only on a led cue.
+        if path is None and self._has_led_cue(classified_input):
+            path = self._extract_led_room(classified_input)
+
+        # 3. Fail-safe — nothing confident, or already there.
+        if not path or path == self.session.location:
+            return world_doc
+
+        self._ensure_location_node(path)
+        self.session.location = path
+        self.session.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
+        self._cache_drop("social_map")
+        logger.info("[REMARK] session.location → %s", path)
+        return world_doc
+
     def run_turn(
         self,
         classified_input: str,
@@ -1363,6 +1485,10 @@ class RPJotEngine:
         # Step 1
         world_doc = self._world_state_step.run(classified_input)
         logger.info("[TURN] step1 done: world_doc=%d tok", _tok(world_doc))
+
+        # Location re-mark (LM §3.1): commit a precise session.location before any
+        # step-2 record tool runs, and strip the CURRENT ROOM line from world_doc.
+        world_doc = self._remark_location(classified_input, world_doc)
 
         # Step 2
         canonical_results, accumulated_think = self._compliance_step.run(
@@ -2082,6 +2208,11 @@ class RPJotEngine:
         )
         shared_str = self.render_context(shared_bundle, focus_hint=focus_hint)
         result = {"shared": shared_str}
+        # Location-scoped event recall — this room AND its sub-rooms (LM §3.6);
+        # complements the ancestor (walk-up) recall in `shared`.
+        result["location_events"] = self.gather_location_events(
+            self.session.location, focus_hint=focus_hint
+        )
         for name in self.session.people_present:
             pov = self.gather_pov_context(name)
             pov_str = self.render_context(pov, focus_hint=focus_hint)
@@ -2096,6 +2227,27 @@ class RPJotEngine:
             len(self.session.people_present),
         )
         return result
+
+    def gather_location_events(self, room: str, focus_hint: str = "") -> str:
+        """Location-scoped event recall for `room` AND its sub-rooms (LM §3.6).
+
+        ContextBundle routes directory terms through DIRECTORY (exact), so TREE
+        (prefix) recall is only reachable via a direct NoteContext call. TREE is a
+        raw pwd.startswith with no path-boundary check, so post-filter with the
+        '/'-boundary rule (else /story/events/garden pulls garden-east). Contract:
+        DIRECTORY-exact = this room's own notes; TREE (boundary-filtered) = this
+        room + all sub-rooms; ancestor recall walks *up*, this walks *down*.
+        """
+        if not room:
+            return ""
+        prefix = f"{PWD_EVENTS}/{room}"
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, prefix)) as nc:
+            notes = [
+                n for n in nc if n.pwd == prefix or n.pwd.startswith(prefix + "/")
+            ]
+        return self.render_context(
+            self._bundle_from_notes(notes), focus_hint=focus_hint
+        )
 
     # ===================================================================
     # === 7. Scene State Queries ===
@@ -3686,6 +3838,15 @@ class RPJotEngine:
         context_map = self.build_scene_context_map(focus_hint=focus_hint)
 
         shared = context_map.pop("shared", "")
+        # location_events is a reserved (non-character) key — fold it into the
+        # shared environmental snapshot, never into character_contexts (LM §3.6).
+        location_events = context_map.pop("location_events", "")
+        if location_events:
+            shared = (
+                f"{shared}\n\nEVENTS IN THIS ROOM & SUB-ROOMS:\n{location_events}"
+                if shared
+                else f"EVENTS IN THIS ROOM & SUB-ROOMS:\n{location_events}"
+            )
         character_contexts = context_map
 
         total_ctx_toks = _tok(shared) + sum(

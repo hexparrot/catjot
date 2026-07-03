@@ -3355,6 +3355,178 @@ class TestPrivateConversationKnowledge(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Location precision — _remark_location + gather_location_events (LM §4), zero LLM
+# ---------------------------------------------------------------------------
+
+
+class TestLocationPrecision(unittest.TestCase):
+    """Notes file under the correct, precise room at write time (LOCATION_MARKING).
+
+    Seeds a ravenwood-manor hierarchy plus a couple of sub-room events, then
+    exercises the early location re-mark (both the step-1 CURRENT ROOM path and
+    the gated lexical led-move fallback) and the down-walk event recall. world_doc
+    is stubbed so no live LLM is needed.
+    """
+
+    ROOT = "ravenwood-manor"
+    FOYER = "ravenwood-manor/foyer"
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+        def seed(pwd, tag, message, now=None):
+            Note.append(
+                TMP_CATNOTE,
+                Note.jot(message=message, tag=tag, context="seed", pwd=pwd, now=now),
+            )
+
+        for room in (
+            "ravenwood-manor",
+            "ravenwood-manor/foyer",
+            "ravenwood-manor/cottage",
+            "ravenwood-manor/garage",
+            "ravenwood-manor/secret-garden",
+            "ravenwood-manor/garden",
+            "ravenwood-manor/garden-east",
+        ):
+            seed(f"/story/location/{room}", f"loc:{room}", room.split("/")[-1])
+
+        # Events for the down-walk / TREE-boundary tests.
+        seed(
+            "/story/events/ravenwood-manor/garden",
+            "exp:evie",
+            "Gardeners prune the roses.",
+        )
+        seed(
+            "/story/events/ravenwood-manor/garden/shed",
+            "exp:evie",
+            "A rake leans in the garden shed.",
+        )
+        seed(
+            "/story/events/ravenwood-manor/garden-east",
+            "exp:evie",
+            "The east beds are freshly turned.",
+        )
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def _engine(self, location):
+        return _make_engine(location=location, people={"player", "evie"})
+
+    def _events_at(self, room):
+        with __import__("catjot").NoteContext(
+            TMP_CATNOTE,
+            (__import__("catjot").SearchType.DIRECTORY, f"/story/events/{room}"),
+        ) as nc:
+            return list(nc)
+
+    # --- KEY acceptance: led move names the room in the step-1 line ---
+
+    def test_led_move_named_remarks_and_files_precisely(self):
+        eng = self._engine(self.FOYER)
+        wd = eng._remark_location(
+            "[MC action]: Evie leads me into the cottage",
+            "CURRENT ROOM: ravenwood-manor/cottage\nWORLD STATE: ...",
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertNotIn("CURRENT ROOM:", wd)  # stripped before step 2/3
+        # a subsequent record_event with no location stamps the precise room
+        eng._tool_record_event("They sit by the fire.", "exp:evie")
+        self.assertEqual(len(self._events_at("ravenwood-manor/cottage")), 1)
+
+    # --- KEY acceptance: self-move defers to navigate_to (no double move) ---
+
+    def test_self_move_defers_then_navigate_moves(self):
+        eng = self._engine(self.FOYER)
+        eng._remark_location(
+            "[MC action]: I walk into the cottage", "CURRENT ROOM: UNCHANGED"
+        )
+        self.assertEqual(eng.session.location, self.FOYER)  # deferred to navigate_to
+        eng._tool_navigate_to("cottage")
+        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+
+    # --- fail-safe: nothing confident → location untouched ---
+
+    def test_failsafe_unchanged_line_no_room(self):
+        eng = self._engine(self.ROOT)
+        eng._remark_location(
+            "[MC speaks aloud]: 'Lovely weather today.'", "CURRENT ROOM: UNCHANGED"
+        )
+        self.assertEqual(eng.session.location, self.ROOT)
+
+    # --- mention-without-movement (guards §3.1 gating) ---
+
+    def test_mention_without_movement_does_not_remark(self):
+        eng = self._engine(self.ROOT)
+        # names a known child room (garage) but with no _LED_VERBS cue and an
+        # UNCHANGED step-1 line — the lexical path must NOT fire on a mention.
+        eng._remark_location(
+            "[MC speaks aloud]: 'Meet me in the garage at dusk.'",
+            "CURRENT ROOM: UNCHANGED",
+        )
+        self.assertEqual(eng.session.location, self.ROOT)
+
+    # --- gated lexical fallback: led move names a known room, step-1 omits it ---
+
+    def test_lexical_led_fallback_remarks_known_room(self):
+        eng = self._engine(self.ROOT)
+        eng._remark_location(
+            "[MC action]: the car pulls into the garage", "CURRENT ROOM: UNCHANGED"
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+
+    def test_lexical_fallback_ignores_unknown_room(self):
+        eng = self._engine(self.ROOT)
+        # led cue present, but "helipad" is not a known room → never create-new
+        # from a lexical guess; fail-safe keeps the current location.
+        eng._remark_location(
+            "[MC action]: the pilot brings us down into the helipad",
+            "CURRENT ROOM: UNCHANGED",
+        )
+        self.assertEqual(eng.session.location, self.ROOT)
+
+    # --- deferred / self-heal: unnamed led move, then next-turn re-mark lands ---
+
+    def test_deferred_unnamed_led_move_self_heals_next_turn(self):
+        eng = self._engine(self.FOYER)
+        # turn 1: unnamed led move (no directional prep) → fail-safe, unchanged
+        eng._remark_location(
+            "[MC action]: she takes my hand and we go somewhere",
+            "CURRENT ROOM: UNCHANGED",
+        )
+        self.assertEqual(eng.session.location, self.FOYER)
+        # turn 2: step-1 now sees the move and names the room → re-mark lands
+        eng._remark_location(
+            "[MC action]: I look around the new place",
+            "CURRENT ROOM: ravenwood-manor/secret-garden",
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/secret-garden")
+
+    # --- gather_location_events: down-walk + TREE boundary (§3.6) ---
+
+    def test_location_events_includes_subrooms(self):
+        eng = self._engine(self.ROOT)
+        events = eng.gather_location_events("ravenwood-manor/garden")
+        self.assertIn("prune the roses", events)  # this room
+        self.assertIn("rake leans", events)  # sub-room garden/shed
+
+    def test_location_events_tree_boundary_excludes_prefix_sibling(self):
+        eng = self._engine(self.ROOT)
+        events = eng.gather_location_events("ravenwood-manor/garden")
+        self.assertNotIn("east beds", events)  # garden-east must not leak in
+
+    def test_location_events_empty_room_is_blank(self):
+        eng = self._engine(self.ROOT)
+        self.assertEqual(eng.gather_location_events("ravenwood-manor/cottage"), "")
+
+
+# ---------------------------------------------------------------------------
 # Tier 1 — the permanence contract (OBJECT_PERMANENCE §4.1), zero LLM
 # ---------------------------------------------------------------------------
 
