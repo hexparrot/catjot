@@ -411,10 +411,40 @@ def compact_history(
     )
 
 
-def game_loop(engine):
+_SEED_SUMMARY_COUNT = 15  # newest /summaries notes folded into the resume digest
+
+
+def seed_digest_from_summaries(engine, step2_messages, step3_messages):
+    """On resume, seed a STORY SO FAR digest from the newest /summaries notes (S1).
+
+    Message lists always start fresh on resume, so cross-session continuity comes
+    only from notes. Distilling the most recent turn summaries into the same
+    digest slot that compaction uses gives the model immediate story recall from
+    turn one. No-op when there are no summaries. Installs one digest at index 1
+    of both histories; later compaction folds it into subsequent digests.
+    """
+    bundle = ContextBundle(PWD_SUMMARIES)
+    notes = sorted(bundle, key=lambda n: n.now, reverse=True)[:_SEED_SUMMARY_COUNT]
+    if not notes:
+        return
+    # Oldest-first so the recap reads in chronological order.
+    raw = "\n\n".join(
+        f"[{n.context.strip()}] {n.message.strip()}" for n in reversed(notes)
+    )
+    digest = engine._condense_context(raw, focus_hint="")
+    if not digest.strip():
+        return
+    for lst in (step2_messages, step3_messages):
+        lst.insert(1, {"role": "user", "content": f"STORY SO FAR:\n{digest}"})
+    logger.info("[HIST] seeded STORY SO FAR from %d summary notes", len(notes))
+
+
+def game_loop(engine, seed_summaries=False):
     """Main game loop using the 3-step pipeline."""
     step2_messages = build_step2_initial_messages()
     step3_messages = build_step3_initial_messages()
+    if seed_summaries:
+        seed_digest_from_summaries(engine, step2_messages, step3_messages)
     # Trailing-5-turn appended-pair sizes → turns-until-85% estimate in /prompt.
     pair_sizes: deque = deque(maxlen=5)
 
@@ -621,6 +651,7 @@ def main():
     )
     args = parser.parse_args()
 
+    resuming = bool(args.session)
     if args.session:
         session_file = os.path.abspath(args.session)
         if not os.path.isfile(session_file):
@@ -648,7 +679,9 @@ def main():
     )
     engine._system_refresh_pending = False
 
-    game_loop(engine)
+    # On resume, seed the STORY SO FAR digest from prior /summaries so the model
+    # has story recall from turn one (S1).
+    game_loop(engine, seed_summaries=resuming)
 
 
 if __name__ == "__main__":

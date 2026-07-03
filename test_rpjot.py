@@ -14,6 +14,7 @@ Stop on first failure:
 """
 
 import json
+import os
 import unittest
 
 from catjot import Note, ContextBundle
@@ -2168,6 +2169,90 @@ class TestHistoryReport(unittest.TestCase):
         step3 = [{"role": "system", "content": "prose"}]
         report = self.engine.history_report(step2, step3, avg_pair_toks=None)
         self.assertIn("need ≥1 completed turn", report)
+
+
+# ---------------------------------------------------------------------------
+# 12k. Resume-time digest seeding — play.seed_digest_from_summaries (S1 / D10)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeDigestSeeding(unittest.TestCase):
+    """On resume, a STORY SO FAR digest is seeded from /summaries notes."""
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_SUMMARIES
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+        for i in range(20):
+            note = Note.jot(
+                message=f"Turn {i}: something happens in the manor.",
+                tag="summary",
+                context=f"turn {i}",
+                pwd=PWD_SUMMARIES,
+            )
+            Note.append(Note.NOTEFILE, note)
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _engine(self):
+        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine._condense_context = lambda raw, focus_hint="": "distilled recap here"
+        return engine
+
+    def test_seed_installs_digest_at_index_1(self):
+        import play
+
+        engine = self._engine()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        play.seed_digest_from_summaries(engine, step2, step3)
+        self.assertTrue(step2[1]["content"].startswith("STORY SO FAR:"))
+        self.assertIn("distilled recap here", step2[1]["content"])
+        self.assertTrue(step3[1]["content"].startswith("STORY SO FAR:"))
+        # System message stays at index 0.
+        self.assertEqual(step2[0]["role"], "system")
+
+    def test_seeded_digest_is_recognized_by_compaction(self):
+        import play
+
+        engine = self._engine()
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        play.seed_digest_from_summaries(engine, step2, step3)
+        # _split_history must fold, not stack, the seeded digest.
+        _head, prefix, _body = play._split_history(step2)
+        self.assertTrue(prefix.startswith("STORY SO FAR:"))
+
+    def test_no_summaries_is_noop(self):
+        import play
+        from rpjot import PWD_SUMMARIES
+
+        # Point at an empty notefile with no summaries.
+        import tempfile
+
+        saved = Note.NOTEFILE
+        fd, empty = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = empty
+        try:
+            engine = self._engine()
+            step2 = [{"role": "system", "content": "rules"}]
+            step3 = [{"role": "system", "content": "prose"}]
+            play.seed_digest_from_summaries(engine, step2, step3)
+            self.assertEqual(len(step2), 1)  # untouched
+            self.assertEqual(len(step3), 1)
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(empty)
 
 
 # ---------------------------------------------------------------------------
