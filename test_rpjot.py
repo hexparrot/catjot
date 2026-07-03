@@ -589,8 +589,12 @@ class TestWorldEntityTools(unittest.TestCase):
     # --- navigate_to ---
 
     def test_navigate_to_updates_session_location(self):
+        # G4 fix (LM §3.3): from the single-component root "test-chamber", a bare
+        # destination that is NOT a known saved root nests as a child rather than
+        # becoming a detached top-level location (which would break
+        # location_ancestors recall). "dungeon" has no saved node here.
         self.engine._tool_navigate_to("dungeon")
-        self.assertEqual(self.engine.session.location, "dungeon")
+        self.assertEqual(self.engine.session.location, "test-chamber/dungeon")
 
     def test_navigate_to_strips_loc_prefix(self):
         self.engine._tool_navigate_to("loc:great-hall")
@@ -832,8 +836,21 @@ class TestLocationHierarchy(unittest.TestCase):
         _, nav_type = RPJotEngine.resolve_destination("manor/foyer", "dungeon/keep")
         self.assertEqual(nav_type, "direct")
 
-    def test_resolve_direct_top_level_to_bare_name(self):
-        _, nav_type = RPJotEngine.resolve_destination("manor", "garden")
+    def test_resolve_bare_name_from_root_unknown_nests_as_child(self):
+        # G4 fix (LM §3.3): from a single-component root, an unknown bare
+        # destination nests as a child instead of becoming a detached top-level
+        # location that breaks location_ancestors recall.
+        dest, nav_type = RPJotEngine.resolve_destination("manor", "garden")
+        self.assertEqual(dest, "manor/garden")
+        self.assertEqual(nav_type, "inferred")
+
+    def test_resolve_bare_name_from_root_known_is_direct(self):
+        # A bare destination naming a KNOWN saved sibling root is a direct
+        # top-level move.
+        dest, nav_type = RPJotEngine.resolve_destination(
+            "manor", "garden", known_roots={"garden"}
+        )
+        self.assertEqual(dest, "garden")
         self.assertEqual(nav_type, "direct")
 
     def test_resolve_same_root_is_hierarchical(self):
@@ -904,6 +921,190 @@ class TestLocationHierarchy(unittest.TestCase):
     def test_location_ancestors_two_levels(self):
         s = SessionState(location="manor/foyer")
         self.assertEqual(s.location_ancestors, ["manor", "manor/foyer"])
+
+
+# ---------------------------------------------------------------------------
+# 10b. Canonicalization substrate (OBJECT_PERMANENCE Phase 0) -- zero LLM
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalizationSubstrate(unittest.TestCase):
+    """Phase-0 substrate: room/object canonicalization, child slugs, node genesis.
+
+    Deterministic, zero LLM. Seeds a small location hierarchy plus two objects
+    (a canonical-node object and a legacy sighting-only object) into a temp
+    notefile, then exercises the read-only canonicalization helpers
+    (LOCATION_MARKING §3.2-§3.5, OBJECT_TOOLING §3.2/§3.5).
+    """
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+        def seed(pwd, tag, message, now=None):
+            Note.append(
+                TMP_CATNOTE,
+                Note.jot(message=message, tag=tag, context="seed", pwd=pwd, now=now),
+            )
+
+        # Location hierarchy (garden / garden-east share a prefix on purpose).
+        seed("/story/location/manor", "loc:manor", "The manor.")
+        seed("/story/location/manor/foyer", "loc:manor/foyer", "The foyer.")
+        seed(
+            "/story/location/manor/foyer/library",
+            "loc:manor/foyer/library",
+            "The library.",
+        )
+        seed("/story/location/manor/garden", "loc:manor/garden", "The garden.")
+        seed(
+            "/story/location/manor/garden-east",
+            "loc:manor/garden-east",
+            "The east garden.",
+        )
+        seed("/story/location/dungeon", "loc:dungeon", "The dungeon.")
+
+        # Objects: a canonical-node object (iron-key) and a legacy sighting-only
+        # object (silver-mirror, no /story/object node).
+        seed("/story/object/iron-key", "obj:iron-key", "A heavy iron key.")
+        seed(
+            "/story/location/dungeon",
+            "obj:iron-key",
+            "The iron key rests on the altar.",
+        )
+        seed(
+            "/story/location/manor/foyer",
+            "obj:silver-mirror",
+            "A tall silver mirror.",
+        )
+
+        self.engine = _make_engine(location="manor/foyer")
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    # --- _known_location_roots ---
+
+    def test_known_roots_are_depth_one(self):
+        roots = self.engine._known_location_roots()
+        self.assertIn("manor", roots)
+        self.assertIn("dungeon", roots)
+        self.assertNotIn("foyer", roots)  # depth-2, never a root
+
+    # --- _child_room_slugs + TREE boundary (§3.6) ---
+
+    def test_child_room_slugs_lists_real_children(self):
+        children = self.engine._child_room_slugs("manor")
+        self.assertIn("foyer", children)
+        self.assertIn("garden", children)
+        self.assertIn("garden-east", children)  # a real depth-2 child of manor
+
+    def test_child_room_slugs_boundary_excludes_prefix_sibling(self):
+        # garden vs garden-east: TREE prefix-matches both. Querying garden's
+        # children must NOT emit a garbage "east" slug from garden-east.
+        self.assertEqual(self.engine._child_room_slugs("manor/garden"), [])
+
+    # --- _canonicalize_room precedence (§3.2) ---
+
+    def test_canon_room_exact_node(self):
+        self.assertEqual(
+            self.engine._canonicalize_room("manor/foyer/library", "manor"),
+            "manor/foyer/library",
+        )
+
+    def test_canon_room_child_of_current(self):
+        self.assertEqual(
+            self.engine._canonicalize_room("library", "manor/foyer"),
+            "manor/foyer/library",
+        )
+
+    def test_canon_room_known_root_multi_component(self):
+        # dungeon is a known root; dungeon/oubliette node does not exist → the
+        # root-anchored path is trusted (precedence #3).
+        self.assertEqual(
+            self.engine._canonicalize_room("dungeon/oubliette", "manor"),
+            "dungeon/oubliette",
+        )
+
+    def test_canon_room_create_new_nests_under_current(self):
+        self.assertEqual(
+            self.engine._canonicalize_room("wine-cellar", "manor/foyer"),
+            "manor/foyer/wine-cellar",
+        )
+
+    def test_canon_room_none_on_empty(self):
+        self.assertIsNone(self.engine._canonicalize_room("", "manor"))
+
+    def test_canon_room_slugifies_and_strips_prefix(self):
+        self.assertEqual(
+            self.engine._canonicalize_room("loc:Secret Garden", "manor"),
+            "manor/secret-garden",
+        )
+
+    # --- _ensure_location_node idempotency (§3.5) ---
+
+    def test_ensure_node_creates_then_idempotent(self):
+        self.assertTrue(self.engine._ensure_location_node("manor/attic"))
+        self.assertFalse(self.engine._ensure_location_node("manor/attic"))
+
+    def test_ensure_node_existing_returns_false(self):
+        self.assertFalse(self.engine._ensure_location_node("manor/foyer"))
+
+    # --- _canonicalize_object precedence (§3.2) ---
+
+    def test_canon_object_exact_node(self):
+        self.assertEqual(self.engine._canonicalize_object("iron-key"), "iron-key")
+
+    def test_canon_object_variants_one_slug(self):
+        # I9 identity stability: spelling variants collapse to one flat slug.
+        for variant in ("the iron key", "Iron Key", "iron-key", "IRON  KEY"):
+            self.assertEqual(
+                self.engine._canonicalize_object(variant), "iron-key", variant
+            )
+
+    def test_canon_object_registry_slug_legacy(self):
+        # silver-mirror has only a room sighting (no canonical node); the
+        # registry-slug precedence still resolves the variant.
+        self.assertEqual(
+            self.engine._canonicalize_object("silver mirror"), "silver-mirror"
+        )
+
+    def test_canon_object_create_new_succeeds(self):
+        # Create-new is the NORMAL path (asymmetry with room canon): assert it
+        # returns the fresh slug rather than refusing.
+        self.assertEqual(
+            self.engine._canonicalize_object("brass lantern"), "brass-lantern"
+        )
+
+    # --- _object_registry + _parse_residence ---
+
+    def test_registry_parses_room_residence(self):
+        reg = self.engine._object_registry()
+        self.assertEqual(reg["iron-key"]["residence"], {"room": "dungeon"})
+        self.assertTrue(reg["iron-key"]["canonical"])
+
+    def test_registry_legacy_object_has_no_canonical(self):
+        reg = self.engine._object_registry()
+        self.assertEqual(reg["silver-mirror"]["residence"], {"room": "manor/foyer"})
+        self.assertFalse(reg["silver-mirror"]["canonical"])
+
+    def test_parse_residence_holder(self):
+        self.assertEqual(
+            self.engine._parse_residence("/story/character/evie/inventory"),
+            {"held_by": "evie"},
+        )
+
+    def test_parse_residence_event_channel(self):
+        self.assertEqual(
+            self.engine._parse_residence("/story/events/manor/foyer"),
+            {"room": "manor/foyer"},
+        )
+
+    def test_parse_residence_canonical_is_none(self):
+        self.assertIsNone(self.engine._parse_residence("/story/object/iron-key"))
 
 
 # ---------------------------------------------------------------------------

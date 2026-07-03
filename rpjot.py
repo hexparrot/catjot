@@ -137,6 +137,7 @@ TAG_EXP = "exp:"  # exp:alice+bob  (shared experience)
 TAG_KNOW = "know:"  # know:alice     (private knowledge)
 TAG_SCENE = "scene:"  # scene:escort-to-bedroom
 TAG_CONS = "cons:"  # cons:aversion-to-water
+TAG_OBJ = "obj:"  # obj:iron-key    (object identity; OBJECT_TOOLING §2)
 
 PWD_RULES = "/system/rules"
 PWD_WORLD = "/story/location"
@@ -148,6 +149,7 @@ PWD_SUMMARIES = "/summaries"
 PWD_YOMI = "/yomi"
 PWD_REL = "/story/relationship"
 PWD_INTERIOR = "/story/interior"
+PWD_OBJECTS = "/story/object"  # canonical object descriptions (OBJECT_TOOLING §2)
 
 TAG_YOMI = "yomi:"  # yomi:alice
 TAG_REL = "rel:"  # rel:bond, rel:history, rel:wound …
@@ -1638,13 +1640,24 @@ class RPJotEngine:
         return [from_path] + ascending + descending
 
     @staticmethod
-    def resolve_destination(from_path: str, destination: str) -> tuple[str, str]:
+    def resolve_destination(
+        from_path: str, destination: str, known_roots=None
+    ) -> tuple[str, str]:
         """Resolve a raw destination string into a full hierarchical path.
+
+        Args:
+            known_roots: optional set/collection of depth-1 root slugs that have a
+                saved node (LOCATION_MARKING §3.3). Passed by _tool_navigate_to so a
+                bare destination naming a real sibling root resolves "direct" instead
+                of being nested. When None (pure unit-test callers) the safe default
+                nests a bare single-component destination as a child (the G4 fix) —
+                never a detached top-level location that breaks location_ancestors.
 
         Returns:
             (resolved_path, nav_type) where nav_type is one of:
             "hierarchical" — shared ancestor found, compute_traversal applies
-            "inferred"     — bare name resolved as sibling under current root
+            "inferred"     — bare name resolved as sibling under current root, or
+                             nested as a child of the current location (G4)
             "direct"       — no shared ancestry, different top-level locations
         """
         dest_parts = destination.split("/")
@@ -1660,14 +1673,252 @@ class RPJotEngine:
         if common_len > 0:
             return destination, "hierarchical"
 
-        # Bare single-word destination inside a multi-level current location:
-        # treat it as a sibling under the top-level root.
-        # e.g. current="manor/foyer/corridor", destination="cellar" → "manor/cellar"
-        if len(dest_parts) == 1 and len(from_parts) > 1:
-            return f"{from_parts[0]}/{destination}", "inferred"
+        # Bare single-component destination: resolve relative to the current
+        # location rather than as a detached top-level place (G4).
+        if len(dest_parts) == 1:
+            # Inside a multi-level location → sibling under the top-level root.
+            # e.g. current="manor/foyer/corridor", destination="cellar" → "manor/cellar"
+            if len(from_parts) > 1:
+                return f"{from_parts[0]}/{destination}", "inferred"
+            # From a single-component root: only a KNOWN saved sibling root is a
+            # direct top-level move; anything else nests as a child of the current
+            # location so its notes stay inside the current ancestry (G4 fix).
+            if known_roots is not None and destination in known_roots:
+                return destination, "direct"
+            return f"{from_path}/{destination}", "inferred"
 
-        # Genuinely separate locations — direct transport.
+        # Genuinely separate multi-segment locations — direct transport.
         return destination, "direct"
+
+    # ===================================================================
+    # === 5b. Location & object canonicalization substrate ===
+    #   (OBJECT_PERMANENCE Phase 0 — all read-only or strictly-safer writes)
+    # ===================================================================
+
+    def _known_location_roots(self) -> set:
+        """Depth-1 room slugs directly under PWD_WORLD that have a saved node.
+
+        Passed to resolve_destination (LM §3.3) so a bare destination naming a
+        real sibling root resolves "direct" instead of nesting as a child.
+        TREE prefix has no boundary check, so guard with the '/'-boundary rule.
+        """
+        prefix = PWD_WORLD + "/"
+        roots = set()
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, PWD_WORLD)) as nc:
+            for note in nc:
+                pwd = note.pwd
+                if not pwd.startswith(prefix):
+                    continue  # excludes PWD_WORLD itself and prefix-sharing siblings
+                roots.add(pwd[len(prefix):].split("/")[0])
+        roots.discard("")
+        return roots
+
+    def _child_room_slugs(self, parent: str) -> list:
+        """One-level child room slugs of `parent` (LM §3.4), boundary-filtered (§3.6).
+
+        SearchType.TREE is a raw pwd.startswith with no path-boundary check, so
+        `/story/location/garden` would match `/story/location/garden-east`. Post-
+        filter with `pwd.startswith(prefix + "/")` (strictly deeper) and take the
+        first component below the prefix. Deduped, order-preserving.
+        """
+        if not parent:
+            return []
+        prefix = f"{PWD_WORLD}/{parent}"
+        slugs = []
+        seen = set()
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, prefix)) as nc:
+            for note in nc:
+                pwd = note.pwd
+                if not pwd.startswith(prefix + "/"):
+                    continue  # excludes parent's own node AND prefix-sharing siblings
+                child = pwd[len(prefix) + 1:].split("/")[0]
+                if child and child not in seen:
+                    seen.add(child)
+                    slugs.append(child)
+        return slugs
+
+    def _canonicalize_room(self, proposed: str, current: str) -> str | None:
+        """Resolve a proposed room string to a canonical slug (LM §3.2).
+
+        Precedence: exact node → known child of current → known root →
+        resolve_destination (only if it lands on an existing node) → create-new
+        (nested under current, never a far-away guess). Returns None on empty or
+        undeterminable input, feeding _remark_location's fail-safe.
+        """
+        if not proposed:
+            return None
+        slug = proposed.strip().lower().removeprefix(TAG_LOC)
+        slug = re.sub(r"[^a-z0-9/-]+", "-", slug).strip("-/")
+        if not slug:
+            return None
+        leaf = slug.split("/")[-1]
+
+        # 1. Exact existing full-path node.
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{slug}")
+        ) as nc:
+            if len(nc):
+                return slug
+
+        # 2. Known child of the current location (match on last component).
+        if current:
+            for child in self._child_room_slugs(current):
+                if child == leaf:
+                    return f"{current}/{child}"
+
+        # 3. Known top-level root (match on first component).
+        roots = self._known_location_roots()
+        if slug.split("/")[0] in roots:
+            return slug
+
+        # 4. resolve_destination fallback — trust it only if the node exists.
+        if current:
+            resolved, _ = self.resolve_destination(current, slug, known_roots=roots)
+            with NoteContext(
+                Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{resolved}")
+            ) as nc:
+                if len(nc):
+                    return resolved
+
+        # 5. Create-new — nest under current (never a far-away guess).
+        return f"{current}/{leaf}" if current else leaf
+
+    def _ensure_location_node(self, path: str) -> bool:
+        """Idempotently ensure a canonical /story/location/{path} node exists (LM §3.5).
+
+        Returns True if a node was created, False if one already existed.
+        Existence check uses DIRECTORY (exact) — TREE would false-positive whenever
+        a child already has a node. A later real save_location supersedes the stub
+        via newest-first render.
+        """
+        if not path:
+            return False
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{path}")
+        ) as nc:
+            if len(nc):
+                return False
+        leaf = path.rstrip("/").split("/")[-1]
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=(
+                    f"{leaf.capitalize()}. "
+                    "(Auto-created location node; awaiting description.)"
+                ),
+                tag=f"{TAG_LOC}{path}",
+                context=f"location node (auto): {path}",
+                pwd=f"{PWD_WORLD}/{path}",
+            ),
+        )
+        return True
+
+    def _parse_residence(self, pwd: str):
+        """Map a sighting note's pwd to a residence dict (OBJECT_TOOLING §3.5).
+
+            /story/character/{h}/inventory → {"held_by": h}
+            /story/location/{room}         → {"room": room}
+            /story/events/{room}           → {"room": room}  (record_event fallback)
+
+        Returns None if pwd is not a recognizable residence (e.g. a canonical
+        /story/object note, already excluded by the registry pass).
+        """
+        if not pwd:
+            return None
+        char_prefix = PWD_CHARS + "/"
+        inv_suffix = "/inventory"
+        if pwd.startswith(char_prefix) and pwd.endswith(inv_suffix):
+            holder = pwd[len(char_prefix):-len(inv_suffix)]
+            if holder and "/" not in holder:
+                return {"held_by": holder}
+        if pwd.startswith(PWD_WORLD + "/"):
+            return {"room": pwd[len(PWD_WORLD) + 1:]}
+        if pwd.startswith(PWD_EVENTS + "/"):
+            return {"room": pwd[len(PWD_EVENTS) + 1:]}
+        return None
+
+    def _object_registry(self) -> dict:
+        """One pass over the notefile collecting per-object residence evidence.
+
+        Returns {slug: {"residence": <dict|None>, "canonical": <bool>}}.
+
+        Residence = the newest NON-canonical obj:-tagged note, with equal Note.now
+        resolved by later-in-file order (>= while scanning append order, OT §3.1) —
+        NOT a bare sorted(reverse=True). Notes under PWD_OBJECTS are excluded from
+        residence but flip the canonical flag. Cached under "obj_registry"; dropped
+        by the object writers and record_event (event tags are sightings). /story as
+        a TREE prefix is unambiguous here, so no boundary filter is needed.
+        """
+        cached = self._cache_get("obj_registry")
+        if cached is not None:
+            return json.loads(cached)
+
+        # slug -> running best (newest non-canonical) + canonical-exists flag
+        acc: dict = {}
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, "/story")) as nc:
+            for note in nc:
+                for word in note.tag.split():
+                    if not word.startswith(TAG_OBJ):
+                        continue
+                    slug = word[len(TAG_OBJ):]
+                    if not slug:
+                        continue
+                    entry = acc.setdefault(
+                        slug, {"best_now": None, "residence": None, "canonical": False}
+                    )
+                    if note.pwd == f"{PWD_OBJECTS}/{slug}":
+                        entry["canonical"] = True
+                    if note.pwd.startswith(PWD_OBJECTS + "/"):
+                        continue  # canonical namespace is never residence evidence
+                    # newest non-canonical wins; tie → later-in-file (>=)
+                    if entry["best_now"] is None or note.now >= entry["best_now"]:
+                        res = self._parse_residence(note.pwd)
+                        if res is not None:
+                            entry["best_now"] = note.now
+                            entry["residence"] = res
+        result = {
+            slug: {"residence": e["residence"], "canonical": e["canonical"]}
+            for slug, e in acc.items()
+        }
+        self._cache_put("obj_registry", json.dumps(result))
+        return result
+
+    def _canonicalize_object(self, name: str) -> str:
+        """Resolve an object name to a canonical FLAT slug (OBJECT_TOOLING §3.2).
+
+        Slugs are flat ([a-z0-9-]; '/' stripped — hierarchy belongs to residence,
+        not identity). Precedence: exact canonical node → exact registry slug →
+        word-overlap (token-set containment) against registry slugs → create-new.
+        Create-new is the NORMAL path, not a failure — a deliberate asymmetry with
+        _canonicalize_room's never-guess room resolution (do not "fix" it).
+        """
+        slug = (name or "").strip().lower().removeprefix(TAG_OBJ)
+        slug = re.sub(r"[^a-z0-9-]+", "-", slug).strip("-")
+        if not slug:
+            return slug  # empty in → empty out; never raises
+
+        # 1. Exact canonical node.
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_OBJECTS}/{slug}")
+        ) as nc:
+            if len(nc):
+                return slug
+
+        registry = self._object_registry()
+        # 2. Exact slug in registry (covers legacy objects with no canonical node).
+        if slug in registry:
+            return slug
+
+        # 3. Word-overlap: token-set containment either direction ("the iron key"
+        #    → iron-key). First stable (file-order) match wins.
+        tokens = set(slug.split("-"))
+        for known in registry:
+            known_tokens = set(known.split("-"))
+            if tokens <= known_tokens or known_tokens <= tokens:
+                return known
+
+        # 4. Create-new — the normal path.
+        return slug
 
     # ===================================================================
     # === 6. Context Building ===
@@ -2238,7 +2489,9 @@ class RPJotEngine:
         raw_dest = location_name.removeprefix(TAG_LOC)
         from_loc = self.session.location
 
-        resolved_dest, nav_type = self.resolve_destination(from_loc, raw_dest)
+        resolved_dest, nav_type = self.resolve_destination(
+            from_loc, raw_dest, known_roots=self._known_location_roots()
+        )
         to_loc = resolved_dest
 
         if nav_type == "direct":
@@ -2268,6 +2521,7 @@ class RPJotEngine:
         self.session.attention = {}
         self.session.mood = {}
         self._cache_drop("social_map")
+        self._ensure_location_node(to_loc)  # LM §3.5: guarantee a node for the arrival room
 
         # NPC tracker: update last-seen location for all present NPCs
         for slug in self.session.people_present:
