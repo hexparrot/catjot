@@ -285,13 +285,13 @@ SYSTEM_REFRESH_INTERVAL = 8
 # System prompt for Step 1: World State Resolution
 _STEP1_SYSTEM = (
     "You are a scene intelligence system for a text-based RPG. "
-    "Your only job is to retrieve facts — not to narrate, not to decide what happens. "
-    "Given the player's input and current scene state, call lookup tools to gather "
-    "everything relevant: character profiles, relationships, location details, "
-    "story context, yomi, and conscience constraints. "
-    "After gathering all relevant information, output a structured WORLD STATE document "
-    "summarizing what you found. Be comprehensive — this document feeds both the "
-    "compliance step and the prose step."
+    "Your only job is to retrieve facts — not to narrate or decide what happens. "
+    "Read the player's input (note the [MC ...] directive prefix and who is "
+    "acting) and call lookup tools to gather everything relevant: character "
+    "profiles, relationships, location details, story context, yomi, and "
+    "conscience constraints. Then output a structured WORLD STATE document "
+    "summarizing what you found. Be comprehensive — it feeds both the "
+    "compliance and prose steps."
 )
 
 # System prompt for Step 3: Narrative Prose
@@ -2101,16 +2101,15 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
-            "Move the scene to a new location. "
-            "ONLY call this when the player explicitly chooses to move — e.g., they say "
-            "'I go to', 'I follow her', 'I walk toward', 'I head to', 'I step inside', "
-            "or otherwise phrase an active movement decision in their own input. "
-            "NPC invitation, NPC escort arrival, or NPC suggestion to go somewhere is NOT "
-            "player movement. Do not call navigate_to in response to NPC behavior alone — "
-            "the player must consent to move before this tool fires. "
-            "Uses full hierarchical paths (e.g. 'manor/foyer/closet'). "
-            "Prefer full hierarchical paths; single bare names are treated as siblings "
-            "under the current root. Traversal follows the hierarchy."
+            "Move the scene to a new location. Call this when the player's own input "
+            "moves them there — an [MC action] whose subject is the player (I/MC) "
+            "with a move verb: go, walk, follow, head, step, enter, climb, cross. "
+            "The directive prefix decides: [MC action] where the player moves = "
+            "navigate; [MC speaks aloud] or [MC — likely spoken aloud] = dialogue, "
+            "never navigate. An NPC's invitation, beckoning, or escort becomes "
+            "navigation only once the player's next [MC action] takes it up. Paths "
+            "are hierarchical (e.g. 'manor/foyer/closet'); a bare name is a sibling "
+            "under the current root."
         ),
         parameters={
             "type": "object",
@@ -2118,9 +2117,13 @@ class RPJotEngine:
                 "location_name": {
                     "type": "string",
                     "description": (
-                        "Full hierarchical destination path (e.g. 'manor/foyer/closet'). "
-                        "Use '/' to indicate parent/child relationships. "
-                        "A bare name like 'cellar' is placed under the current root."
+                        "Hierarchical destination path (e.g. 'manor/foyer/closet'); '/' marks "
+                        "parent/child, a bare name sits under the current root. Call this ONLY "
+                        "when the player's own [MC action] moves them — subject is the player "
+                        "(I/MC) with a move verb (go/walk/follow/head/step/enter). [MC speaks "
+                        "aloud] is dialogue, never navigation, even if movement is mentioned; an "
+                        "NPC's invite, beckon, or escort becomes navigation only when the "
+                        "player's next [MC action] takes it up."
                     ),
                 },
             },
@@ -2688,20 +2691,17 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
-            "Start a new named narrative scene — a cohesive dramatic unit anchoring "
-            "subsequent tool calls for retrieval. "
-            "Call this: (1) when current_scene is empty — always call on the first "
-            "player turn to open the story, or after navigate_to reaches a destination "
-            "if no scene is active; (2) when the player explicitly enters a new dramatic "
-            "context (a meal, an investigation, a confrontation); (3) when a previous "
-            "scene has ended and a new dramatic beat clearly begins. "
-            "NPC arrivals, invitations, and escort behavior do NOT start a scene — "
-            "wait for the player to respond or consent before calling begin_scene. "
-            "Call at most ONCE per player turn. Do not call it a second time "
-            "within the same tool-call sequence. "
-            "Once set, the scene slug is attached to subsequent record_event and "
-            "record_knowledge calls automatically. "
-            "Old scene notes remain queryable via get_scene."
+            "Start a new named narrative scene — a cohesive dramatic unit that "
+            "anchors later retrieval. Call this: (1) on the first player turn to open "
+            "the story, or after navigate_to arrives somewhere with no active scene; "
+            "(2) when the player's input clearly enters a new dramatic context (a "
+            "meal, an investigation, a confrontation); (3) when one beat has ended "
+            "and the next clearly begins. Like navigate_to, a scene opens on the "
+            "player's own [MC action], not on an NPC's invitation or escort. Call at "
+            "most ONCE per player turn, and not again within the same tool-call "
+            "sequence. The scene slug then attaches to later record_event and "
+            "record_knowledge calls automatically; old scenes stay queryable via "
+            "get_scene."
         ),
         parameters={
             "type": "object",
@@ -4256,13 +4256,11 @@ class RPJotEngine:
     # ------------------------------------------------------------------
 
     _NARRATOR_RULE = (
-        "NARRATOR RULE: Respond to exactly what the player just did. "
-        "Do not advance time, change location, or progress the story beyond the "
-        "immediate consequence of this single player input. "
-        "NPC intentions, invitations, and escort behavior are narrative texture — "
-        "they do NOT constitute player consent to move, follow, or transition. "
-        "If an NPC invites or leads, narrate their intent and pause; "
-        "the player chooses whether to comply on their next turn."
+        "Respond to exactly what the player's input describes — the single beat "
+        "in front of you — and advance only as its direct consequence. Do not "
+        "skip ahead or resolve an NPC's offer for the player. When an NPC "
+        "invites, beckons, or leads, narrate the offer and let it hang; the "
+        "player answers on their own next turn."
     )
 
     def build_user_message(self, user_input, dynamic_context=""):
