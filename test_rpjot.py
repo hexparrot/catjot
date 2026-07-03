@@ -25,6 +25,7 @@ from rpjot import (
     MODEL_CONTEXT_LIMIT_TOKS,
     _RESPONSE_RESERVE_TOKS,
     _tok,
+    _msg_toks,
 )
 
 TMP_CATNOTE = "tests/.catjot"
@@ -1138,6 +1139,278 @@ class TestGuardPayload(unittest.TestCase):
         roles = [m.get("role") for m in result]
         # user messages should still be present (tool result absorbed the cut)
         self.assertEqual(roles.count("user"), 2)
+
+    # --- W2: tool_calls arguments must be counted (R2) ---
+
+    def _assistant_tool_call_msg(self, arg_toks):
+        """Assistant message whose weight lives entirely in tool_calls arguments."""
+        reps = max(1, (arg_toks + 11) // 12)
+        big_args = json.dumps({"description": _CHUNK * reps, "tags": "exp:player"})
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "record_event", "arguments": big_args},
+                }
+            ],
+        }
+
+    def test_msg_toks_counts_tool_call_arguments(self):
+        """_msg_toks includes tool_calls argument JSON, not just content."""
+        msg = self._assistant_tool_call_msg(500)
+        content_only = _tok(str(msg.get("content") or ""))
+        self.assertLess(content_only, 20)  # content is empty
+        self.assertGreater(_msg_toks(msg), 400)  # arguments dominate
+
+    def test_guard_counts_tokens_hidden_in_tool_calls(self):
+        """A list whose tokens live only in tool_calls crosses 85% and is measured."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        # Arguments sized to ~90% of capacity; content is empty throughout.
+        big = self._assistant_tool_call_msg(int(capacity * 0.9))
+        msgs = [self._msg("user", "go"), big, self._msg("user", "next")]
+        eng._guard_payload(msgs, schema_overhead=0)
+        # Old content-only accounting would have measured ~0; the guard must now
+        # see the tool_calls payload and record it above the warning threshold.
+        self.assertGreater(eng._last_payload_toks, capacity * 0.85)
+
+    # --- W3: pass 2 drops tool-call units atomically (R3) ---
+
+    def test_tool_unit_indices_from_assistant(self):
+        """From an assistant with tool_calls, the unit includes all its tool replies."""
+        msgs = [
+            self._msg("system", "sys"),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "f", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "g", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ra"},
+            {"role": "tool", "tool_call_id": "b", "content": "rb"},
+            self._msg("user", "u"),
+        ]
+        self.assertEqual(RPJotEngine._tool_unit_indices(msgs, 1), {1, 2, 3})
+
+    def test_tool_unit_indices_from_tool_finds_parent(self):
+        """From a tool reply, the unit walks back to its parent assistant + siblings."""
+        msgs = [
+            self._msg("system", "sys"),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "f", "arguments": "{}"}},
+                    {"id": "b", "function": {"name": "g", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ra"},
+            {"role": "tool", "tool_call_id": "b", "content": "rb"},
+            self._msg("user", "u"),
+        ]
+        self.assertEqual(RPJotEngine._tool_unit_indices(msgs, 3), {1, 2, 3})
+
+    def test_pass2_drops_tool_unit_without_orphans(self):
+        """Forced over 100% with a tool unit → no orphaned tool/assistant survives."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        digest = {"role": "user", "content": "STORY SO FAR:\nonce upon a time"}
+        # Assistant weight lives in tool_calls arguments — pass 1 cannot shed it,
+        # forcing pass 2 to drop the whole unit atomically.
+        big_asst = self._assistant_tool_call_msg(capacity + 2000)
+        big_asst["tool_calls"].append(
+            {"id": "call_2", "function": {"name": "record_event", "arguments": "{}"}}
+        )
+        big_asst["tool_calls"][0]["id"] = "call_1"
+        msgs = [
+            self._msg("system", "sys"),
+            digest,
+            big_asst,
+            {"role": "tool", "tool_call_id": "call_1", "content": "result one"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "result two"},
+            self._msg("user", "final prompt"),
+        ]
+        result = eng._guard_payload(msgs, schema_overhead=0)
+
+        # No orphaned tool messages: each surviving tool has a surviving parent.
+        surviving_ids = set()
+        for m in result:
+            for tc in m.get("tool_calls") or []:
+                surviving_ids.add(tc.get("id"))
+        for m in result:
+            if m.get("role") == "tool":
+                self.assertIn(
+                    m.get("tool_call_id"),
+                    surviving_ids,
+                    "orphaned tool message survived without its parent assistant",
+                )
+        # No orphaned assistant: a surviving tool_calls assistant keeps all replies.
+        answered = {m.get("tool_call_id") for m in result if m.get("role") == "tool"}
+        for m in result:
+            for tc in m.get("tool_calls") or []:
+                self.assertIn(
+                    tc.get("id"),
+                    answered,
+                    "assistant tool_calls survived without its tool replies",
+                )
+
+    def test_pass2_preserves_final_message_and_digest(self):
+        """The final message and the STORY SO FAR digest are never dropped."""
+        eng = self._engine()
+        capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        digest = {"role": "user", "content": "STORY SO FAR:\nkey memory preserved"}
+        big = self._make_big_tool_msg(capacity + 3000)
+        msgs = [
+            self._msg("system", "sys"),
+            digest,
+            big,
+            self._msg("assistant", "old reply"),
+            self._msg("user", "the active prompt"),
+        ]
+        result = eng._guard_payload(msgs, schema_overhead=0)
+        self.assertEqual(result[-1]["content"], "the active prompt")
+        contents = [str(m.get("content") or "") for m in result]
+        self.assertTrue(
+            any(c.startswith("STORY SO FAR:") for c in contents),
+            "compaction digest was dropped by the guard",
+        )
+
+
+class TestSafeDispatch(unittest.TestCase):
+    """_safe_dispatch: one bad tool call must never crash the session."""
+
+    def setUp(self):
+        self.engine = _make_engine(
+            location="ravenwood-manor", people={"player", "alice"}
+        )
+
+    def _assert_error_json(self, result):
+        self.assertIsInstance(result, str)
+        parsed = json.loads(result)
+        self.assertIn("error", parsed)
+        return parsed
+
+    def test_unknown_tool_returns_error_json(self):
+        result = self.engine._dispatch_step2("no_such_tool", "{}")
+        self._assert_error_json(result)
+
+    def test_missing_required_arg_returns_error_json(self):
+        # record_event requires description + tags; only tags supplied.
+        result = self.engine._dispatch_step2("record_event", '{"tags": "exp:player"}')
+        parsed = self._assert_error_json(result)
+        self.assertIn("description", parsed["error"])
+
+    def test_typoed_kwarg_returns_error_json(self):
+        # 'descripton' is a typo → description missing → error, no exception.
+        result = self.engine._dispatch_step2(
+            "record_event", '{"descripton": "x", "tags": "y"}'
+        )
+        self._assert_error_json(result)
+
+    def test_unexpected_kwarg_returns_error_json(self):
+        # Required present but an extra unknown kwarg → handler TypeError, caught.
+        result = self.engine._dispatch_step2(
+            "record_event",
+            '{"description": "x", "tags": "exp:player", "bogus_extra": 1}',
+        )
+        self._assert_error_json(result)
+
+    def test_non_json_arguments_returns_error_json(self):
+        result = self.engine._dispatch_step2("record_event", "this is not json")
+        self._assert_error_json(result)
+
+    def test_handler_internal_exception_returns_error_json(self):
+        # description as int → description[:80] raises TypeError inside the handler.
+        result = self.engine._dispatch_step2(
+            "record_event", '{"description": 123, "tags": "exp:player"}'
+        )
+        self._assert_error_json(result)
+
+    def test_wrong_type_arg_does_not_raise(self):
+        # witnesses as a bare string is a wrong type; dispatch must not raise
+        # and must return a JSON string the model can consume.
+        result = self.engine._dispatch_step2(
+            "record_knowledge",
+            '{"content": "a secret", "witnesses": "alice"}',
+        )
+        self.assertIsInstance(result, str)
+        json.loads(result)  # valid JSON, no exception
+
+    def test_step1_dispatch_survives_bad_args(self):
+        result = self.engine._safe_dispatch(
+            self.engine._step1_handlers, "get_character", "not json"
+        )
+        self._assert_error_json(result)
+
+    def test_loop_continues_after_a_bad_tool_call(self):
+        """A step-2 round that errors must not abort the turn (T4 acceptance)."""
+        import rpjot as rpjot_module
+
+        rounds = [
+            # Round 1: malformed args → dispatch returns error JSON, loop continues.
+            {
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "record_event",
+                            "arguments": '{"oops": true}',
+                        },
+                    }
+                ]
+            },
+            # Round 2: valid record_event.
+            {
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {
+                            "name": "record_event",
+                            "arguments": json.dumps(
+                                {
+                                    "description": "the heavy door creaks open",
+                                    "tags": "exp:player",
+                                }
+                            ),
+                        },
+                    }
+                ]
+            },
+            # Round 3: plain text → exits the loop.
+            {"content": "All recorded."},
+        ]
+        calls = {"i": 0}
+
+        def fake_call_llm(messages, **kwargs):
+            r = rounds[calls["i"]]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            engine = _make_engine(location="ravenwood-manor", people={"player"})
+            engine.init_pipeline()
+            step2 = [{"role": "system", "content": "rules"}]
+            canonical, think = engine._compliance_step.run(
+                "[MC action]: I open the door", "WORLD STATE: a door", step2
+            )
+        finally:
+            rpjot_module.call_llm = original
+
+        # Turn completed across all three rounds without raising.
+        self.assertEqual(calls["i"], 3)
+        # The successful record_event result is present; the errored round is too,
+        # but at least one canonical result is a non-error success string.
+        joined = " ".join(res for _fn, res in canonical)
+        self.assertIn("Event recorded", joined)
 
 
 # ---------------------------------------------------------------------------

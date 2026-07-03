@@ -67,6 +67,24 @@ except ImportError:
 
     _TOK_SOURCE = "chars//4 fallback (regex not installed)"
 
+
+def _msg_toks(m: dict) -> int:
+    """Token cost of one chat message: content plus any tool_calls payload.
+
+    The step-2 loop appends assistant messages whose function-call arguments
+    live in ``m["tool_calls"]`` with ``content`` often empty or None. Those
+    argument JSONs are real payload the guard must account for; a content-only
+    sum undercounts exactly the messages most likely to push a call over the
+    window. Shared by the payload guard, history compaction, and the REPL
+    token panel so every subsystem measures the same way.
+    """
+    t = _tok(str(m.get("content") or ""))
+    for tc in m.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        t += _tok(str(fn.get("name", ""))) + _tok(str(fn.get("arguments", "")))
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -555,12 +573,9 @@ class WorldStateStep:
                 fn_args = tc["function"]["arguments"]
                 tool_id = tc.get("id", fn_name)
 
-                if fn_name in engine._step1_handlers:
-                    result = engine._step1_handlers[fn_name](
-                        **json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                    )
-                else:
-                    result = json.dumps({"error": f"step1 unknown tool: {fn_name}"})
+                result = engine._safe_dispatch(
+                    engine._step1_handlers, fn_name, fn_args
+                )
 
                 logger.debug("[STEP1] tool %s → %s", fn_name, result[:120])
                 tool_results_collected.append(f"[{fn_name}]: {result}")
@@ -929,20 +944,85 @@ class RPJotEngine:
             self._step2_schemas.append(schema)
             self._step2_handlers[name] = handler
 
-    def _dispatch(self, name: str, args_json) -> str:
-        """Dispatch a tool call by name across step1 + step2 handlers."""
-        handlers = self._tool_handlers
+    def _required_params(self, name: str) -> list:
+        """Return the ``required`` param list for a tool schema, or []."""
+        for s in self._tool_schemas:
+            if s["function"]["name"] == name:
+                return s["function"].get("parameters", {}).get("required", []) or []
+        return []
+
+    def _safe_dispatch(self, handlers: dict, name: str, args_json) -> str:
+        """Dispatch a tool call defensively — a bad call must never crash the turn.
+
+        Unknown tool names, non-JSON arguments, missing required keys, and any
+        exception raised by the handler are all converted to an error-JSON
+        string (logged at WARNING) instead of propagating. The model receives
+        the error inside its tool loop and can self-correct on the next round.
+        """
         if name not in handlers:
             return json.dumps({"error": f"unknown tool: {name}"})
-        args = json.loads(args_json) if isinstance(args_json, str) else args_json
-        return handlers[name](**args)
+
+        try:
+            args = (
+                json.loads(args_json) if isinstance(args_json, str) else args_json
+            )
+        except json.JSONDecodeError as exc:
+            logger.warning("[DISPATCH] %s: malformed JSON arguments: %s", name, exc)
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        if not isinstance(args, dict):
+            logger.warning("[DISPATCH] %s: arguments are not an object: %r", name, args)
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: arguments must be a JSON object",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        missing = [k for k in self._required_params(name) if k not in args]
+        if missing:
+            logger.warning(
+                "[DISPATCH] %s: missing required argument(s) %s", name, missing
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"tool {name} failed: missing required argument(s): "
+                        f"{', '.join(missing)}"
+                    ),
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+        try:
+            return handlers[name](**args)
+        except Exception as exc:
+            logger.warning(
+                "[DISPATCH] %s raised %s: %s",
+                name,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+            return json.dumps(
+                {
+                    "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
+                    "hint": "check argument names and types against the tool schema",
+                }
+            )
+
+    def _dispatch(self, name: str, args_json) -> str:
+        """Dispatch a tool call by name across step1 + step2 handlers."""
+        return self._safe_dispatch(self._tool_handlers, name, args_json)
 
     def _dispatch_step2(self, name: str, args_json) -> str:
         """Dispatch a Step 2 (write) tool call."""
-        if name not in self._step2_handlers:
-            return json.dumps({"error": f"step2 unknown tool: {name}"})
-        args = json.loads(args_json) if isinstance(args_json, str) else args_json
-        return self._step2_handlers[name](**args)
+        return self._safe_dispatch(self._step2_handlers, name, args_json)
 
     # ===================================================================
     # === 3. Run Orchestration ===
@@ -4375,6 +4455,55 @@ class RPJotEngine:
     # === 14. LLM Payload Management ===
     # ===================================================================
 
+    @staticmethod
+    def _is_digest_message(m: dict) -> bool:
+        """True for the compaction digest (a user message starting 'STORY SO FAR:').
+
+        The guard treats it like a system message so oldest-first dropping never
+        deletes the compacted story memory before ordinary history (D2).
+        """
+        c = m.get("content")
+        return (
+            m.get("role") == "user"
+            and isinstance(c, str)
+            and c.startswith("STORY SO FAR:")
+        )
+
+    @staticmethod
+    def _tool_unit_indices(messages: list, i: int) -> set:
+        """Indices of the atomic tool-call unit anchored at (or containing) index i.
+
+        An assistant message with tool_calls forms one unit with every later
+        role="tool" message answering one of its call ids. A role="tool" message
+        belongs to the unit anchored by its parent assistant. Returns just {i}
+        for a plain message or an orphan tool with no locatable parent.
+        """
+        m = messages[i]
+        if m is None:
+            return set()
+        if m.get("tool_calls"):
+            ids = {tc.get("id") for tc in m["tool_calls"] if tc.get("id")}
+            unit = {i}
+            for j in range(i + 1, len(messages)):
+                mj = messages[j]
+                if mj is None:
+                    continue
+                if mj.get("role") == "tool" and mj.get("tool_call_id") in ids:
+                    unit.add(j)
+            return unit
+        if m.get("role") == "tool":
+            tid = m.get("tool_call_id")
+            for p in range(i - 1, -1, -1):
+                mp = messages[p]
+                if mp is None:
+                    continue
+                if mp.get("tool_calls") and any(
+                    tc.get("id") == tid for tc in mp["tool_calls"]
+                ):
+                    return RPJotEngine._tool_unit_indices(messages, p)
+            return {i}
+        return {i}
+
     def _guard_payload(
         self, messages: list, schema_overhead: int | None = None
     ) -> list:
@@ -4394,7 +4523,7 @@ class RPJotEngine:
         capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         if schema_overhead is None:
             schema_overhead = self._cached_schema_toks
-        msg_toks = sum(_tok(str(m.get("content") or "")) for m in messages)
+        msg_toks = sum(_msg_toks(m) for m in messages)
         total = msg_toks + schema_overhead
         self._last_payload_toks = total
         pct = 100.0 * total / capacity
@@ -4463,26 +4592,47 @@ class RPJotEngine:
                 ctoks,
             )
 
-        # Pass 2: drop oldest non-system messages only when actually over limit
+        # Pass 2: drop oldest non-system messages only when actually over limit.
+        # Tool-call units are dropped atomically: an assistant carrying
+        # tool_calls leaves together with every role="tool" reply to its ids,
+        # and a role="tool" victim takes its parent assistant and siblings with
+        # it. Dropping a partial unit yields an API-invalid sequence that
+        # several OpenAI-compatible backends hard-reject. The STORY SO FAR
+        # digest (index 1) is protected like a system message (D2) so the
+        # oldest-first sweep never deletes compacted memory first.
         if excess > 0 and pct >= 100.0:
-            for i in range(1, len(messages) - 1):
-                if excess <= 0:
-                    break
+            n = len(messages)
+            i = 1
+            while i < n - 1 and excess > 0:
                 m = messages[i]
-                if m is None or m.get("role") == "system":
+                if (
+                    m is None
+                    or m.get("role") == "system"
+                    or self._is_digest_message(m)
+                ):
+                    i += 1
                     continue
-                ctoks = _tok(str(m.get("content") or ""))
-                logger.warning(
-                    "[CTX] guard: dropped msg[%d] role=%s ~%d tok",
-                    i,
-                    m.get("role"),
-                    ctoks,
+                unit = self._tool_unit_indices(messages, i)
+                # Never drop the final (active-prompt) message, even as part of a unit.
+                if (n - 1) in unit:
+                    i += 1
+                    continue
+                unit_toks = sum(
+                    _msg_toks(messages[k]) for k in unit if messages[k] is not None
                 )
-                messages[i] = None
-                excess -= ctoks
+                for k in unit:
+                    messages[k] = None
+                excess -= unit_toks
+                logger.warning(
+                    "[CTX] guard: dropped %d-msg tool unit anchored at [%d] ~%d tok",
+                    len(unit),
+                    i,
+                    unit_toks,
+                )
+                i += 1
             messages = [m for m in messages if m is not None]
 
-        new_total = sum(_tok(str(m.get("content") or "")) for m in messages)
+        new_total = sum(_msg_toks(m) for m in messages)
         logger.warning(
             "[CTX] guard: reduction complete — %d → %d tok (saved %d)",
             total,
