@@ -1962,6 +1962,215 @@ class TestProductionActivation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12h. Prose/tool seams — synthesis + directive prefixes (W11 / T5)
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesisSeams(unittest.TestCase):
+    """Tool results must never leak raw dicts (braces) into the prose synthesis."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def test_record_bond_summary_has_no_braces(self):
+        result = json.dumps(
+            {"char_a": "evie", "char_b": "player", "bond_type": "trust"}
+        )
+        summary = RPJotEngine._summarize_write_result("record_bond", result)
+        self.assertNotIn("{", summary)
+        self.assertNotIn("}", summary)
+
+    def test_generic_rel_int_tool_summaries_have_no_braces(self):
+        # Tools without a bespoke branch used to render str(dict) with braces.
+        cases = {
+            "record_secret": {"character": "evie", "status": "recorded"},
+            "record_lie": {"liar": "evie", "target": "player", "status": "recorded"},
+            "record_leverage": {
+                "holder": "evie",
+                "subject": "player",
+                "status": "recorded",
+            },
+            "record_unspoken": {"character": "evie", "status": "recorded"},
+        }
+        for fn, payload in cases.items():
+            with self.subTest(tool=fn):
+                summary = RPJotEngine._summarize_write_result(
+                    fn, json.dumps(payload)
+                )
+                self.assertNotIn("{", summary)
+                self.assertNotIn("}", summary)
+                self.assertTrue(summary.strip())
+
+    def test_full_synthesis_contains_no_braces(self):
+        canonical = [
+            ("record_secret", json.dumps({"character": "evie", "status": "recorded"})),
+            (
+                "record_bond",
+                json.dumps(
+                    {"char_a": "evie", "char_b": "player", "bond_type": "wary"}
+                ),
+            ),
+            (
+                "record_jealousy",
+                json.dumps({"character": "player", "status": "recorded"}),
+            ),
+        ]
+        synthesis = self.engine._build_narrative_synthesis([], canonical)
+        self.assertNotIn("{", synthesis)
+        self.assertNotIn("}", synthesis)
+
+    def test_followup_injection_is_directive_prefixed(self):
+        import rpjot as rpjot_module
+
+        rounds = [
+            {
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "record_event", "arguments": "{}"},
+                    }
+                ]
+            },
+            {"content": "done"},
+        ]
+        calls = {"i": 0, "seen": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["seen"].extend(str(m.get("content") or "") for m in messages)
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        # Force the dispatched result to carry a followup instruction.
+        eng._dispatch_step2 = lambda name, args: json.dumps(
+            {"ok": True, "followup_instruction": "gather more before narrating"}
+        )
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            step2 = [{"role": "system", "content": "rules"}]
+            eng._compliance_step.run("[MC action]: I act", "WORLD", step2)
+        finally:
+            rpjot_module.call_llm = original
+
+        self.assertTrue(
+            any(
+                c.startswith("[DIRECTIVE] gather more before narrating")
+                for c in calls["seen"]
+            ),
+            "followup instruction was not [DIRECTIVE]-prefixed",
+        )
+
+    def test_zero_canonical_nudge_is_directive_prefixed(self):
+        from rpjot import ComplianceStep
+
+        self.assertTrue(
+            ComplianceStep._ZERO_CANONICAL_NUDGE.startswith("[DIRECTIVE] ")
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12i. Hygiene — cache cap, honest guard message (W12 / R6)
+# ---------------------------------------------------------------------------
+
+
+class TestHygiene(unittest.TestCase):
+    """R6: bounded query cache and an honest 90-99% guard message."""
+
+    def test_query_cache_fifo_eviction(self):
+        from rpjot import _QUERY_CACHE_MAX
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        for i in range(_QUERY_CACHE_MAX + 25):
+            eng._cache_put(f"k{i}", "value")
+        cache = eng.session._query_cache
+        self.assertLessEqual(len(cache), _QUERY_CACHE_MAX)
+        self.assertNotIn("k0", cache)  # oldest evicted
+        self.assertIn(f"k{_QUERY_CACHE_MAX + 24}", cache)  # newest kept
+
+    def test_query_cache_update_existing_does_not_grow(self):
+        from rpjot import _QUERY_CACHE_MAX
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        for i in range(_QUERY_CACHE_MAX):
+            eng._cache_put(f"k{i}", "v")
+        self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
+        eng._cache_put("k0", "updated")  # existing key
+        self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
+        self.assertEqual(eng.session._query_cache["k0"], "updated")
+
+    def _user_msg_at_pct(self, low_pct):
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        low = low_pct * cap
+        reps = int(low / 12)
+        while _msg_toks({"role": "user", "content": _CHUNK * reps}) < low:
+            reps += 5
+        return {"role": "user", "content": _CHUNK * reps}
+
+    def test_guard_90pct_history_only_logs_no_trimmable(self):
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        big = self._user_msg_at_pct(0.92)
+        msgs = [big, {"role": "user", "content": "the active prompt"}]
+        with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+            eng._guard_payload(msgs, schema_overhead=0)
+        joined = " ".join(cm.output)
+        # Precondition: the payload landed in the 90-99% band.
+        self.assertLess(eng._last_payload_toks, cap)
+        self.assertGreaterEqual(eng._last_payload_toks, 0.90 * cap)
+        # No tool messages exist to trim → honest message, not a false "trimming".
+        self.assertIn("no trimmable tool results", joined)
+
+
+# ---------------------------------------------------------------------------
+# 12j. Token panel — engine.history_report (W10 / R5)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryReport(unittest.TestCase):
+    """The REPL token panel exposes the number that actually grows: history."""
+
+    def setUp(self):
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def test_report_contains_expected_fields(self):
+        step2 = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "STORY SO FAR:\nearlier events"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "there"},
+        ]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3, avg_pair_toks=640)
+        self.assertIn("TOKEN BUDGET", report)
+        self.assertIn("step2 history", report)
+        self.assertIn("step3 history", report)
+        self.assertIn("schema ovh", report)
+        self.assertIn("last payload", report)
+        self.assertIn("turns until 85%", report)
+
+    def test_digest_presence_reported_per_history(self):
+        step2 = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "STORY SO FAR:\nx"},
+        ]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3)
+        # step2 has a digest, step3 does not.
+        self.assertIn("digest present: yes", report)
+        self.assertIn("digest present: no", report)
+
+    def test_no_avg_gives_placeholder_estimate(self):
+        step2 = [{"role": "system", "content": "rules"}]
+        step3 = [{"role": "system", "content": "prose"}]
+        report = self.engine.history_report(step2, step3, avg_pair_toks=None)
+        self.assertIn("need ≥1 completed turn", report)
+
+
+# ---------------------------------------------------------------------------
 # 13. _condense_context -- live LLM + fallback behavior
 # ---------------------------------------------------------------------------
 

@@ -93,6 +93,7 @@ LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)s.%(funcName)s: %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 logger = logging.getLogger("rpjot_engine")
+_h_file = None  # module-level ref to the current file handler (swappable per session)
 if not logger.handlers:
     _h_stderr = logging.StreamHandler(sys.stderr)
     _h_file = logging.FileHandler("debug.log", mode="a")
@@ -104,6 +105,27 @@ if not logger.handlers:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 logger.debug("tokenizer: %s", _TOK_SOURCE)
+
+
+def configure_logging(stamp: str) -> None:
+    """Re-point the debug file handler to debug_{stamp}.log for this session.
+
+    Segments the log per session so a runaway investigation doesn't grep one
+    ever-growing shared file (R6). Falls back to the module-load default
+    (debug.log) when never called, so imports and the test suite keep working.
+    """
+    global _h_file
+    if not stamp:
+        return
+    new_path = f"debug_{stamp}.log"
+    new_handler = logging.FileHandler(new_path, mode="a")
+    new_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+    if _h_file is not None and _h_file in logger.handlers:
+        logger.removeHandler(_h_file)
+        _h_file.close()
+    logger.addHandler(new_handler)
+    _h_file = new_handler
+    logger.info("[LOG] per-session debug log: %s", new_path)
 
 # ---------------------------------------------------------------------------
 # Tag and Directory Constants
@@ -178,9 +200,49 @@ FOLLOWUP_CONTEXT_SNAPSHOT = (
     "what is in other characters' private context."
 )
 
+# Human-readable labels for write-tool results in the narrative synthesis (T5).
+# Every step-2 tool has an entry so the fallback never renders a raw dict (with
+# braces) into the prose-facing synthesis.
+_WRITE_TOOL_LABELS = {
+    "record_event": "Event",
+    "record_knowledge": "Private knowledge",
+    "record_conscience": "Conscience",
+    "record_mood": "Mood",
+    "update_attn": "Attention",
+    "save_character": "Character saved",
+    "save_location": "Location saved",
+    "save_object": "Object saved",
+    "save_yomi": "Yomi",
+    "set_people_present": "Cast updated",
+    "begin_scene": "Scene",
+    "navigate_to": "Travel",
+    "record_bond": "Bond",
+    "record_history": "Shared history",
+    "record_dynamic": "Dynamic",
+    "record_power_dynamic": "Power dynamic",
+    "record_wound": "Wound",
+    "record_promise": "Promise",
+    "record_debt": "Debt",
+    "record_lie": "Lie",
+    "record_leverage": "Leverage",
+    "record_impression": "Impression",
+    "record_secret": "Secret",
+    "record_desire": "Desire",
+    "record_longing": "Longing",
+    "record_jealousy": "Jealousy",
+    "record_mask": "Mask",
+    "record_subtext": "Subtext",
+    "record_reputation": "Reputation",
+    "record_trigger": "Trigger",
+    "record_unspoken": "Unspoken",
+}
+
 # ---------------------------------------------------------------------------
 # Context size limits
 # ---------------------------------------------------------------------------
+
+# Max distinct entries retained in SessionState._query_cache before FIFO eviction.
+_QUERY_CACHE_MAX = 256
 
 CONTEXT_MAX_TOKS = (
     2_000  # soft limit in tokens; above this, LLM condensation is triggered
@@ -745,7 +807,11 @@ class ComplianceStep:
                 )
                 messages.append(tool_msg)
                 if instruction:
-                    messages.append({"role": "user", "content": instruction})
+                    # Prefixed so the model does not mistake a system-issued
+                    # followup for player input (T5).
+                    messages.append(
+                        {"role": "user", "content": f"[DIRECTIVE] {instruction}"}
+                    )
 
             i += 1
 
@@ -1363,7 +1429,14 @@ class RPJotEngine:
         return hit
 
     def _cache_put(self, key: str, value: str) -> None:
-        self.session._query_cache[key] = value
+        cache = self.session._query_cache
+        # FIFO eviction cap (R6): the cache is invalidated on writes but never
+        # globally evicted, so bound it to keep long sessions from leaking RAM.
+        if key not in cache and len(cache) >= _QUERY_CACHE_MAX:
+            oldest = next(iter(cache))
+            del cache[oldest]
+            logger.debug("[CACHE] EVICT(FIFO) %s (cap %d)", oldest, _QUERY_CACHE_MAX)
+        cache[key] = value
         logger.debug("[CACHE] SET  %s (%d tok)", key, _tok(value))
 
     def _cache_drop(self, *keys: str) -> None:
@@ -4331,8 +4404,22 @@ class RPJotEngine:
         if fn_name == "record_impression":
             obs, sub = parsed.get("observer", "?"), parsed.get("subject", "?")
             return f"Impression: {obs} of {sub}"
-        # All other cases: fall back to the raw result string
-        return f"{fn_name}: {str(parsed)[:150]}"
+        # Generic brace-free summary for every remaining tool (the whole rel/int
+        # taxonomy and any future tool): a human label plus its meaningful scalar
+        # values — never str(dict), which would leak braces into the prose synthesis.
+        label = _WRITE_TOOL_LABELS.get(fn_name, fn_name.replace("_", " "))
+        skip_keys = {"status", "recorded", "followup_instruction"}
+        vals = []
+        for k, v in parsed.items():
+            if k in skip_keys or isinstance(v, bool):
+                continue
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                vals.append(str(v))
+            elif isinstance(v, list) and all(isinstance(x, str) for x in v):
+                if v:
+                    vals.append(", ".join(v))
+        preview = " — ".join(vals)[:150]
+        return f"{label}: {preview}" if preview else label
 
     def _build_narrative_synthesis(
         self,
@@ -4600,6 +4687,60 @@ class RPJotEngine:
 
         return "\n".join(lines)
 
+    def history_report(
+        self, step2_messages, step3_messages, avg_pair_toks=None
+    ) -> str:
+        """Live token panel for the persistent conversation histories (R5/W10).
+
+        The histories are the number that actually grows over a session, yet
+        neither /prompt nor /stats surfaced it. Shows per-history totals and %,
+        message counts, digest presence, the three cached schema overheads, the
+        last measured payload, and an estimate of turns until the guard's 85%
+        tier (from a trailing-average pair size supplied by the caller).
+        """
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+
+        def _has_digest(msgs):
+            return any(
+                str(m.get("content", "")).startswith("STORY SO FAR:") for m in msgs
+            )
+
+        s2 = sum(_msg_toks(m) for m in step2_messages)
+        s3 = sum(_msg_toks(m) for m in step3_messages)
+        lp = self._last_payload_toks
+
+        lines = [
+            f"{'[TOKEN BUDGET]':<30}"
+            f"cap = {cap:,} (MODEL {MODEL_CONTEXT_LIMIT_TOKS:,} − "
+            f"RESERVE {_RESPONSE_RESERVE_TOKS:,})",
+            f"step2 history : {s2:>6,} tok ({100.0 * s2 / cap:>4.0f}%)  "
+            f"[n={len(step2_messages)} msgs, digest present: "
+            f"{'yes' if _has_digest(step2_messages) else 'no'}]",
+            f"step3 history : {s3:>6,} tok ({100.0 * s3 / cap:>4.0f}%)  "
+            f"[n={len(step3_messages)} msgs, digest present: "
+            f"{'yes' if _has_digest(step3_messages) else 'no'}]",
+            f"schema ovh    : step1 {self._cached_step1_schema_toks:,} · "
+            f"step2(compact) {self._cached_compact_step2_schema_toks:,} · "
+            f"step3(bare) {self._cached_bare_schema_toks:,}",
+            f"last payload  : {lp:>6,} tok ({100.0 * lp / cap:>4.1f}%)"
+            f"          (engine._last_payload_toks)",
+        ]
+
+        if avg_pair_toks and avg_pair_toks > 0:
+            current = s2 + self._cached_compact_step2_schema_toks
+            remaining = 0.85 * cap - current
+            turns = int(remaining / avg_pair_toks) if remaining > 0 else 0
+            lines.append(
+                f"est. headroom : ~{turns} turns until 85% at "
+                f"~{int(avg_pair_toks)} tok/turn (trailing-5 avg)"
+            )
+        else:
+            lines.append(
+                "est. headroom : (need ≥1 completed turn to estimate)"
+            )
+
+        return "\n".join(lines)
+
     # ===================================================================
     # === 14. LLM Payload Management ===
     # ===================================================================
@@ -4702,7 +4843,7 @@ class RPJotEngine:
         # ≥ 100%: pass 1 + pass 2 (drop messages)
         if pct < 100.0:
             logger.warning(
-                "[CTX] guard: NEAR LIMIT — %d tok (%.1f%% of cap=%d) — trimming tool results",
+                "[CTX] guard: NEAR LIMIT — %d tok (%.1f%% of cap=%d) — reducing",
                 total,
                 pct,
                 capacity,
@@ -4718,6 +4859,7 @@ class RPJotEngine:
         excess = max(total - int(capacity * 0.88), 0)  # trim to ~88% to give headroom
 
         # Pass 1: trim tool-result messages oldest-first, never the last message
+        shed_pass1 = 0
         for i in range(len(messages) - 1):
             if excess <= 0:
                 break
@@ -4734,12 +4876,29 @@ class RPJotEngine:
             messages[i]["content"] = content[:cut] + "\n[payload guard: truncated]"
             shed = ctoks - _tok(messages[i]["content"])
             excess -= shed
+            shed_pass1 += shed
             logger.warning(
                 "[CTX] guard: trimmed tool result msg[%d] by ~%d tok (was %d tok)",
                 i,
                 shed,
                 ctoks,
             )
+
+        # Honest pass-1 report (D8): in the 90-99% band the payload is often all
+        # history and no tool results exist to trim — say so rather than implying
+        # a trim happened. (Above 100% pass 2 does the real work; reported later.)
+        if pct < 100.0:
+            if shed_pass1 <= 0:
+                logger.warning(
+                    "[CTX] guard: no trimmable tool results — payload is "
+                    "conversation history, not tool output (%d tok, %.1f%%)",
+                    total,
+                    pct,
+                )
+            else:
+                logger.warning(
+                    "[CTX] guard: pass 1 shed %d tok from tool results", shed_pass1
+                )
 
         # Pass 2: drop oldest non-system messages only when actually over limit.
         # Tool-call units are dropped atomically: an assistant carrying

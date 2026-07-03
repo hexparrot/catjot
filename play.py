@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import shutil
+from collections import deque
 from datetime import datetime
 
 import rpjot as _rpjot_module
@@ -414,6 +415,11 @@ def game_loop(engine):
     """Main game loop using the 3-step pipeline."""
     step2_messages = build_step2_initial_messages()
     step3_messages = build_step3_initial_messages()
+    # Trailing-5-turn appended-pair sizes → turns-until-85% estimate in /prompt.
+    pair_sizes: deque = deque(maxlen=5)
+
+    def _avg_pair_toks():
+        return (sum(pair_sizes) / len(pair_sizes)) if pair_sizes else None
 
     print("Welcome.\n")
     print(_HELP_TEXT)
@@ -450,6 +456,12 @@ def game_loop(engine):
 
         if user_input.lower() == "/stats":
             print(engine.scene_debug_report())
+            print()
+            print(
+                engine.history_report(
+                    step2_messages, step3_messages, avg_pair_toks=_avg_pair_toks()
+                )
+            )
             continue
 
         if user_input.lower().startswith("/prompt"):
@@ -471,6 +483,12 @@ def game_loop(engine):
             print(engine.npc_tracker.roster_summary())
             print(f"{divider}\n[CLASSIFIED INPUT]\n{divider}")
             print(classified_sim)
+            print(f"{divider}\n[TOKEN BUDGET]\n{divider}")
+            print(
+                engine.history_report(
+                    step2_messages, step3_messages, avg_pair_toks=_avg_pair_toks()
+                )
+            )
             print(f"{divider}\n")
             continue
 
@@ -529,6 +547,10 @@ def game_loop(engine):
             step2_messages.append({"role": "assistant", "content": "(no response)"})
             step3_messages.append({"role": "user", "content": classified})
             step3_messages.append({"role": "assistant", "content": "(no response)"})
+            pair_sizes.append(
+                _msg_toks({"content": classified})
+                + _msg_toks({"content": "(no response)"})
+            )
             compact_history(engine, step2_messages, step3_messages)
             continue
 
@@ -547,6 +569,9 @@ def game_loop(engine):
         step2_messages.append({"role": "assistant", "content": narrative})
         step3_messages.append({"role": "user", "content": classified})
         step3_messages.append({"role": "assistant", "content": narrative})
+        pair_sizes.append(
+            _msg_toks({"content": classified}) + _msg_toks({"content": narrative})
+        )
 
         # Compaction runs BEFORE the system refresh: refresh only replaces
         # index 0 (system), so the digest installed at index 1 is preserved.
@@ -574,6 +599,10 @@ def set_session_file(path: str):
     """Wire both catjot and rpjot to use *path* as the active note file."""
     Note.NOTEFILE = path
     _rpjot_module.NOTEFILE = path
+    # Segment the debug log per session (R6): session_20240101_120000.jot →
+    # debug_20240101_120000.log.
+    stamp = os.path.splitext(os.path.basename(path))[0].removeprefix("session_")
+    _rpjot_module.configure_logging(stamp)
 
 
 # ---------------------------------------------------------------------------
