@@ -3970,5 +3970,117 @@ class TestObjectWriteSide(unittest.TestCase):
         self.assertNotIn("inventory", roster)
 
 
+# ---------------------------------------------------------------------------
+# Tier 2 — endpoint-gated acceptance sampling (OBJECT_PERMANENCE §4.2)
+# ---------------------------------------------------------------------------
+
+
+class TestObjectActivationLive(unittest.TestCase):
+    """place_object / save_object selection in the production compact-schema shape.
+
+    LLM-gated (registered in conftest._LLM_CLASSES so it fails hard when the
+    endpoint is absent instead of silently passing) and stochastic: each phrase
+    runs N=3 with a >=2/3 threshold. Reuses the TestProductionActivation shape;
+    the helper additionally returns tool-call ARGUMENTS so the fallback assertion
+    can inspect record_event.tags for an obj: word.
+
+    The object minimal pair (the neg_navto diagnostic applied to
+    mention!=presence): twin phrases share the object noun with opposite ground
+    truth.
+    """
+
+    def setUp(self):
+        self.engine = _make_engine(
+            location="ravenwood-manor", people={"player", "evie"}
+        )
+
+    def _step2_calls_for(self, phrase, world_doc=None):
+        from catjot import ContextBundle, call_llm
+        from rpjot import ComplianceStep
+
+        if world_doc is None:
+            world_doc = "WORLD STATE: you stand in the manor foyer with Evie."
+        rules = str(ContextBundle("system_role")).strip() or (
+            "You are the game master. Use tools to record canon."
+        )
+        content = ComplianceStep(self.engine)._compose_step2_user_content(
+            phrase, world_doc
+        )
+        messages = [
+            {"role": "system", "content": rules},
+            {"role": "user", "content": content},
+        ]
+        resp = call_llm(
+            messages,
+            tools=self.engine._compact_step2_schemas,
+            tool_choice="auto",
+        )
+        calls = []
+        for tc in resp.get("tool_calls") or []:
+            name = tc["function"]["name"]
+            try:
+                args = json.loads(tc["function"].get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            calls.append((name, args))
+        return calls
+
+    def _passes(self, predicate, n=3, need=2):
+        return sum(1 for _ in range(n) if predicate()) >= need
+
+    def _fires(self, phrase, tool):
+        return self._passes(
+            lambda: any(nm == tool for nm, _ in self._step2_calls_for(phrase))
+        )
+
+    def _does_not_fire(self, phrase, tool):
+        return self._passes(
+            lambda: not any(nm == tool for nm, _ in self._step2_calls_for(phrase))
+        )
+
+    def test_pickup_selects_place_object(self):
+        self.assertTrue(self._fires("Evie pockets the locket.", "place_object"))
+
+    def test_mention_negative_twin_does_not_select_place_object(self):
+        self.assertTrue(
+            self._does_not_fire(
+                "Evie talks about the locket she lost.", "place_object"
+            )
+        )
+
+    def test_handover_selects_place_object(self):
+        self.assertTrue(
+            self._fires(
+                "[MC action]: I press the iron key into Evie's palm.", "place_object"
+            )
+        )
+
+    def test_genesis_selects_save_object(self):
+        self.assertTrue(
+            self._fires(
+                "[MC action]: I examine the strange amulet and describe its "
+                "markings and material in detail.",
+                "save_object",
+            )
+        )
+
+    def test_fallback_place_or_event_with_obj_tag(self):
+        phrase = "The guards confiscate my satchel and toss it into the cell corner."
+
+        def captured():
+            calls = self._step2_calls_for(phrase)
+            place = any(nm == "place_object" for nm, _ in calls)
+            event_obj = any(
+                nm == "record_event"
+                and any(
+                    t.startswith("obj:") for t in str(a.get("tags", "")).split()
+                )
+                for nm, a in calls
+            )
+            return place or event_obj
+
+        self.assertTrue(self._passes(captured))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

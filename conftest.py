@@ -28,6 +28,7 @@ _LLM_CLASSES = {
     "TestCondenseContext",
     "TestRecordKnowledgeLive",
     "TestProductionActivation",
+    "TestObjectActivationLive",
 }
 
 _LLM_PREFIXES = ("test_examine_location",)
