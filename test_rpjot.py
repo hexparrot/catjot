@@ -2458,6 +2458,14 @@ class TestSpeculativeSeed(unittest.TestCase):
         self.assertIsNone(eng._consume_seed())
         self.assertEqual(eng._seed_status, "off")
 
+    def test_consume_miss_after_commit_location(self):
+        # the record_event auto-move path (LM §3.7) must invalidate a seed
+        # speculated in the pre-move room — same guarantee as a direct change.
+        eng = self._engine_with_seed()
+        eng._commit_location("somewhere-else", source="record_event")
+        self.assertIsNone(eng._consume_seed())
+        self.assertEqual(eng._seed_status, "miss")
+
 
 # ---------------------------------------------------------------------------
 # 12g. Seed wiring in run_turn — hit/miss status, ref adoption, [TIMING] tail
@@ -5633,6 +5641,102 @@ class TestLocationPrecision(unittest.TestCase):
             "[MC action]: she pulls me into the garage", "CURRENT ROOM: UNCHANGED"
         )
         self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+
+    # --- record_event explicit-location handling (LM §3.7 two-gate rule) ---
+
+    def _mc_engine(self, location):
+        eng = self._engine(location)
+        eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
+        return eng
+
+    def test_record_event_location_canonicalized(self):
+        # the live fragmentation class: an underscore variant of an existing
+        # room must file under the canonical hyphenated pwd.
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_record_event(
+            "Dust motes swirl.", "exp:evie",
+            location="ravenwood-manor/secret_garden",
+        )
+        self.assertEqual(len(self._events_at("ravenwood-manor/secret-garden")), 1)
+
+    def test_record_event_mc_stationary_auto_moves(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_record_event(
+            "Bartholomew saunters into the garage.",
+            "exp:bartholomew exp:evie",
+            location="garage",
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        # NPC last-seen follows the move (the gap plain remark used to have)
+        rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
+        self.assertEqual(rec.location_last_seen, "ravenwood-manor/garage")
+        # subsequent bare record_event files in the new room
+        eng._tool_record_event("He leans on the workbench.", "exp:bartholomew")
+        self.assertEqual(len(self._events_at("ravenwood-manor/garage")), 2)
+
+    def test_record_event_compound_exp_tag_detects_mc(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_record_event(
+            "They slip into the cottage together.",
+            "exp:bartholomew+evie",
+            location="cottage",
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+
+    def test_record_event_non_mc_divergent_warns_only(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_record_event(
+            "Evie inspects the roses alone.", "exp:evie", location="garden"
+        )
+        self.assertEqual(eng.session.location, self.FOYER)  # session unmoved
+        self.assertTrue(eng._loc_warnings)
+        # the note itself still files at the (canonicalized) explicit room
+        self.assertEqual(len(self._events_at("ravenwood-manor/garden")), 2)
+
+    def test_record_event_mobile_defers_then_reconciles(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._turn_stationary = False  # mobile turn: navigate_to owns the move
+        eng._tool_record_event(
+            "Bartholomew strides into the garage.",
+            "exp:bartholomew",
+            location="garage",
+        )
+        self.assertEqual(eng.session.location, self.FOYER)  # not during step 2
+        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        # step 2 ends without navigate_to → the hint commits
+        eng._reconcile_loc_hint([("record_event", "ok")])
+        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertIsNone(eng._pending_loc_hint)
+
+    def test_record_event_hint_dropped_when_navigate_fired(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._turn_stationary = False
+        eng._tool_record_event(
+            "Bartholomew heads for the cottage.",
+            "exp:bartholomew",
+            location="cottage",
+        )
+        eng._tool_navigate_to("garage")  # the real traversal wins
+        eng._reconcile_loc_hint([("record_event", "ok"), ("navigate_to", "ok")])
+        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+
+    def test_record_event_same_room_no_gate(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_record_event(
+            "He paces the foyer.", "exp:bartholomew", location=self.FOYER
+        )
+        self.assertEqual(eng.session.location, self.FOYER)
+        self.assertEqual(eng._loc_warnings, [])
+
+    def test_remark_commit_updates_npc_last_seen(self):
+        # the shared _commit_location closes the plain-remark tracker gap.
+        eng = self._engine(self.FOYER)
+        eng._remark_location(
+            "[MC action]: Evie leads me into the cottage",
+            "CURRENT ROOM: ravenwood-manor/cottage",
+        )
+        rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
+        self.assertEqual(rec.location_last_seen, "ravenwood-manor/cottage")
 
     # --- deferred / self-heal: unnamed led move, then next-turn re-mark lands ---
 

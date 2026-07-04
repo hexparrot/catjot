@@ -1365,10 +1365,17 @@ class RPJotEngine:
         # step-1 SCENE STATE header, cleared when the discrepancy resolves.
         self._cast_warnings: list = []
         # Location-drift warnings (LM follow-up, cast-drift pattern): filed-vs-
-        # session divergences that were NOT auto-committed. Reset at run_turn
-        # start; surfaced in /stats and both step-1 headers via
+        # session divergences that were NOT auto-committed. Reset at step-2
+        # entry; surfaced in /stats and both step-1 headers via
         # _loc_warning_line. [LOCDRIFT] log tag.
         self._loc_warnings: list = []
+        # Per-turn mobility verdict stashed by _remark_location; True default
+        # so a bare tool call outside run_turn gets the conservative
+        # (stationary → auto-move eligible) branch of the LM §3.7 gate.
+        self._turn_stationary: bool = True
+        # Mobile-turn MC location from record_event, reconciled after step 2
+        # iff navigate_to never fired (never races a real traversal).
+        self._pending_loc_hint: str | None = None
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -1863,8 +1870,13 @@ class RPJotEngine:
                 action,
             )
 
-        # Decoupling gate: defer to navigate_to on mobile self-moves.
-        if not ComplianceStep._is_stationary_turn(classified_input, self.mc_aliases):
+        # Decoupling gate: defer to navigate_to on mobile self-moves. The
+        # verdict is stashed for the turn — record_event's auto-move gate
+        # (LM §3.7) keys off it during step 2.
+        self._turn_stationary = ComplianceStep._is_stationary_turn(
+            classified_input, self.mc_aliases
+        )
+        if not self._turn_stationary:
             _log("mobile-defer")
             return world_doc
 
@@ -1890,12 +1902,47 @@ class RPJotEngine:
                 _log("no-line")
             return world_doc
 
-        self._ensure_location_node(path)
+        self._commit_location(path, source="remark")
+        _log(source, path)
+        return world_doc
+
+    def _commit_location(self, path: str, source: str) -> None:
+        """Move session.location with metadata-only bookkeeping (LM §3.1/§3.7).
+
+        Shared by the step-1 re-mark, the record_event auto-move, and the
+        post-step-2 reconciliation. Ensures the node, rebinds the context
+        bundle, drops the social map, and updates NPC last-seen (which the
+        plain re-mark used to strand) — but does NOT reset attention/mood:
+        scene-move semantics stay owned by navigate_to.
+        """
+        if self._ensure_location_node(path):
+            # Stub minting is worth surfacing (LM §5 audit advisory) — and the
+            # header line doubles as a save_location prompt for the model.
+            self._loc_warn(
+                f"location node auto-created for {path} (source={source}) — "
+                "call save_location to describe it"
+            )
         self.session.location = path
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
         self._cache_drop("social_map")
-        _log(source, path)
-        return world_doc
+        for slug in self.session.people_present:
+            if slug != self.main_character:
+                self.npc_tracker.mark_present(slug, path, self._turn_count)
+        logger.info("[COMMIT-LOC] session.location → %s (source=%s)", path, source)
+
+    def _reconcile_loc_hint(self, canonical_results: list) -> None:
+        """Post-step-2 join of the mobile-turn location hint (LM §3.7).
+
+        The hint only exists when a mobile turn's record_event named an MC
+        location; navigate_to owns mobile moves, so the hint commits only if
+        navigate_to never fired this turn — never racing a real traversal.
+        """
+        if not self._pending_loc_hint:
+            return
+        hint, self._pending_loc_hint = self._pending_loc_hint, None
+        navigated = any(fn == "navigate_to" for fn, _ in canonical_results)
+        if not navigated and hint != self.session.location:
+            self._commit_location(hint, source="reconcile")
 
     def run_turn(
         self,
@@ -1953,6 +2000,7 @@ class RPJotEngine:
         # producers live in step 2, so a warning must survive through the NEXT
         # turn's step-1 header (and the idle seed build) before going stale.
         self._loc_warnings = []
+        self._pending_loc_hint = None
         canonical_results, accumulated_think = self._compliance_step.run(
             classified_input, world_doc, step2_messages
         )
@@ -1969,6 +2017,11 @@ class RPJotEngine:
             self._turn_count + 1,
             [fn for fn, _ in canonical_results],
         )
+
+        # Reconciliation (LM §3.7): a mobile-turn record_event carried an MC
+        # location that step 2 never consummated with navigate_to — commit it
+        # now so step 3 and the idle seed stop keying off the stale room.
+        self._reconcile_loc_hint(canonical_results)
 
         # Step 3
         narrative = self._prose_step.run(
@@ -3381,7 +3434,41 @@ class RPJotEngine:
         )
 
         tag_str = tags.strip()
-        loc_clean = location or self.session.location
+        loc_clean = self.session.location
+        explicit = (location or "").strip()
+        if explicit:
+            loc_clean = (
+                self._canonicalize_room(explicit, self.session.location)
+                or self.session.location
+            )
+        if explicit and loc_clean != self.session.location:
+            # LM §3.7: an explicit location param is a structured source on par
+            # with step-1's CURRENT ROOM line — and on the live 60-turn session
+            # it was the ONLY movement signal the model ever emitted.
+            mc_present = any(
+                self.mc_aliases & set(t[len(TAG_EXP):].lower().split("+"))
+                for t in tag_str.split()
+                if t.startswith(TAG_EXP)
+            )
+            if mc_present and self._turn_stationary:
+                # Stationary turn: navigate_to is nudge-suppressed by design,
+                # so nothing else will move the session — commit immediately.
+                self._commit_location(loc_clean, source="record_event")
+            elif mc_present:
+                # Mobile turn: navigate_to owns the move; reconcile after
+                # step 2 iff it never fires (weak-model bucket).
+                self._pending_loc_hint = loc_clean
+                self._loc_warn(
+                    f"record_event filed at {loc_clean} but session is "
+                    f"{self.session.location} (mc-tagged, mobile turn — "
+                    "deferred to navigate_to)"
+                )
+            else:
+                # Off-screen event: filing elsewhere is correct, session stays.
+                self._loc_warn(
+                    f"record_event filed at {loc_clean} but session is "
+                    f"{self.session.location} (no MC tag — session unmoved)"
+                )
         pwd = f"{PWD_EVENTS}/{loc_clean}"
         context = f"canonical event at {loc_clean}"
 
