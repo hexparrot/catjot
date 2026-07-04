@@ -5,7 +5,7 @@ Reads the lore in tests/bellvue.jot and re-expresses it using the rpjot
 tool conventions so the game engine can find everything:
 
   char:name    — character profiles (save_character)
-  loc:path     — location notes    (save_location)
+  /story/location/path — location notes, keyed by pwd (save_location)
   exp:name     — per-witness private knowledge (record_knowledge)
   system_role  — narrator rules injected into every system prompt
   story_premise — Bartholomew's background (system-prompt seed)
@@ -370,7 +370,7 @@ other staff and of his own parents at the manor are warm but fragmentary.""",
 )
 
 # ════════════════════════════════════════════════════════════════
-# 7. LOCATIONS  (loc:path → tool-queryable by navigate_to and context)
+# 7. LOCATIONS  (pwd /story/location/path → tool-queryable by navigate_to and context)
 # ════════════════════════════════════════════════════════════════
 print("Writing location notes…")
 

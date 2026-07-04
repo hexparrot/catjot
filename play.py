@@ -18,7 +18,6 @@ from rpjot import (
     PWD_SUMMARIES,
     PWD_EVENTS,
     PWD_SCENES,
-    TAG_LOC,
     PWD_WORLD,
     PWD_YOMI,
     PWD_REL,
@@ -144,8 +143,8 @@ def query_people_context(engine):
 
 def query_location_context(engine):
     """Return notes for the current location: ancestors (up) + sub-rooms (down)."""
-    ancestor_tags = [f"{TAG_LOC}{a}" for a in engine.session.location_ancestors]
-    up = str(engine.gather_context(ancestor_tags + [PWD_WORLD]))
+    ancestor_dirs = [f"{PWD_WORLD}/{a}" for a in engine.session.location_ancestors]
+    up = str(engine.gather_context(ancestor_dirs + [PWD_WORLD]))
     down = engine.gather_location_events(engine.session.location)
     parts = []
     if up:
@@ -205,7 +204,6 @@ def build_dynamic_context(engine) -> str:
       5. The MC profile is always included (domain_tags seeded with 'mc').
     """
     _STRUCTURAL_PREFIXES = (
-        "loc:",
         "scene:",
         "char:",
         "exp:",

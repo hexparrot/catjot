@@ -132,7 +132,6 @@ def configure_logging(stamp: str) -> None:
 # Tag and Directory Constants
 # ---------------------------------------------------------------------------
 
-TAG_LOC = "loc:"  # loc:ravenwood-manor
 TAG_CHAR = "char:"  # char:alice
 TAG_EXP = "exp:"  # exp:alice+bob  (shared experience)
 TAG_KNOW = "know:"  # know:alice     (private knowledge)
@@ -550,7 +549,7 @@ class SessionState:
             else ""
         )
         h = (
-            f"[CURRENT STATE | location: {TAG_LOC}{self.location}"
+            f"[CURRENT STATE | location: {self.location}"
             f" | present: {present_str}{scene_str}{attn_seg}{mood_seg}]"
         )
         logger.debug("SessionState.header: %s", h)
@@ -2342,7 +2341,7 @@ class RPJotEngine:
         """
         if not proposed:
             return None
-        slug = proposed.strip().lower().removeprefix(TAG_LOC)
+        slug = proposed.strip().lower()
         slug = re.sub(r"[^a-z0-9/-]+", "-", slug).strip("-/")
         if not slug:
             return None
@@ -2401,7 +2400,7 @@ class RPJotEngine:
                     f"{leaf.capitalize()}. "
                     "(Auto-created location node; awaiting description.)"
                 ),
-                tag=f"{TAG_LOC}{path}",
+                tag="",
                 context=f"location node (auto): {path}",
                 pwd=f"{PWD_WORLD}/{path}",
             ),
@@ -3134,8 +3133,8 @@ class RPJotEngine:
                     "description": (
                         "Space-separated tags. Use exp:name for each person present "
                         "(e.g., exp:evie exp:bartholomew). Use know:name for private "
-                        "knowledge. Avoid loc: and char: prefixes — location and character "
-                        "context is tracked by directory, not tags. "
+                        "knowledge. Do not add location or character-name tags — that "
+                        "context is tracked automatically by directory. "
                         "Add obj:slug for any significant object handled."
                     ),
                 },
@@ -3157,9 +3156,7 @@ class RPJotEngine:
         )
 
         tag_str = tags.strip()
-        loc_clean = (
-            location.removeprefix(TAG_LOC) if location else self.session.location
-        )
+        loc_clean = location or self.session.location
         pwd = f"{PWD_EVENTS}/{loc_clean}"
         context = f"canonical event at {loc_clean}"
 
@@ -3235,7 +3232,7 @@ class RPJotEngine:
         """Return the objects and people in the current location."""
         logger.info("ENTER _tool_examine_location")
 
-        location = f"{TAG_LOC}{self.session.location}"
+        location = self.session.location
         environment = self.session.location_context
         logger.info(
             "ContextBundle size for %s: %i (%i chars)",
@@ -3297,7 +3294,7 @@ class RPJotEngine:
         """Compute traversal path and move to a new location."""
         logger.info("ENTER _tool_navigate_to: location_name=%r", location_name)
 
-        raw_dest = location_name.removeprefix(TAG_LOC)
+        raw_dest = location_name
         from_loc = self.session.location
 
         resolved_dest, nav_type = self.resolve_destination(
@@ -3508,9 +3505,7 @@ class RPJotEngine:
         """Persist a location's description to notes."""
         logger.info("ENTER _tool_save_location: name=%r", name)
 
-        tag_str = f"{TAG_LOC}{name}"
-        if tags:
-            tag_str = f"{tag_str} {tags.strip()}"
+        tag_str = tags.strip() if tags else ""
 
         note = Note.jot(
             message=description,
@@ -3569,7 +3564,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_save_object: name=%r location=%r", name, location)
 
         slug = self._canonicalize_object(name)
-        room = location.removeprefix(TAG_LOC) if location else self.session.location
+        room = location or self.session.location
         extra = f" {tags.strip()}" if tags else ""
         tag_str = f"{TAG_OBJ}{slug}{extra}"
 
@@ -3925,7 +3920,7 @@ class RPJotEngine:
     @rp_tool(
         description=(
             "Search world notes by tag or keyword to retrieve established lore. "
-            "Use a loc: tag, char: tag, or a plain keyword to find relevant notes. "
+            "Use an exp:/know: tag, an obj: slug, or a plain keyword to find relevant notes. "
             "Call this when you need to recall established world details before narrating."
         ),
         parameters={
@@ -5986,7 +5981,7 @@ class RPJotEngine:
             note = Note.jot(
                 message=note_body,
                 tag=tags,
-                context=f"tool call log at loc:{loc}",
+                context=f"tool call log at {loc}",
                 pwd=f"{PWD_NOTES}/{loc}",
             )
             Note.append(Note.NOTEFILE, note)

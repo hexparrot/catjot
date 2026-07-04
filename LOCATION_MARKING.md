@@ -116,7 +116,7 @@ history and emits the new `CURRENT ROOM:`. Same class as the lore lag — a one-
 *note-filing* lag on prose-materialized moves. Accepted, not silent (see §5).
 
 ### 3.2 Canonicalization — `_canonicalize_room(proposed, current) -> str | None`
-Normalize (`lower`, strip `loc:`, slugify to `[a-z0-9/-]`). Precedence:
+Normalize (`lower`, slugify to `[a-z0-9/-]`). Precedence:
 1. Exact existing full-path node — `NoteContext(NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{slug}"))` non-empty → `slug`.
 2. Known child of `current` — via shared helper `_child_room_slugs(current)` (§3.4); match on last component.
 3. Known top-level root — depth-1 roots under `PWD_WORLD`; match on first component.

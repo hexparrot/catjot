@@ -87,9 +87,11 @@ def _over_limit_text() -> str:
 class TestSessionState(unittest.TestCase):
     """SessionState.header() must produce a well-formed string."""
 
-    def test_header_contains_loc_tag(self):
+    def test_header_contains_plain_location(self):
         s = SessionState(location="ravenwood", people_present={"player"})
-        self.assertIn("loc:ravenwood", s.header())
+        h = s.header()
+        self.assertIn("location: ravenwood", h)
+        self.assertNotIn("loc:", h)
 
     def test_header_contains_present_names(self):
         s = SessionState(location="ravenwood", people_present={"alice", "bob"})
@@ -415,22 +417,22 @@ class TestToolHandlerOutput(unittest.TestCase):
     def test_record_event_returns_string(self):
         result = self.engine._tool_record_event(
             description="Alice opened the cellar door.",
-            tags="alice loc:cellar door",
+            tags="alice door",
         )
         self.assertIsInstance(result, str)
 
     def test_record_event_result_starts_with_prefix(self):
         result = self.engine._tool_record_event(
             description="Bob lit the torch.",
-            tags="bob loc:test-chamber torch",
+            tags="bob torch",
         )
         self.assertTrue(result.startswith("Event recorded:"))
 
     def test_record_event_with_location_kwarg(self):
         result = self.engine._tool_record_event(
             description="The door slammed shut.",
-            tags="door loc:cellar",
-            location="loc:cellar",
+            tags="door",
+            location="cellar",
         )
         self.assertIsInstance(result, str)
 
@@ -597,8 +599,8 @@ class TestWorldEntityTools(unittest.TestCase):
         self.engine._tool_navigate_to("test-chamber/dungeon")
         self.assertEqual(self.engine.session.location, "test-chamber/dungeon")
 
-    def test_navigate_to_strips_loc_prefix(self):
-        self.engine._tool_navigate_to("loc:great-hall")
+    def test_navigate_to_bare_destination(self):
+        self.engine._tool_navigate_to("great-hall")
         self.assertEqual(self.engine.session.location, "great-hall")
 
     def test_navigate_to_returns_confirmation_string(self):
@@ -662,11 +664,11 @@ class TestWorldEntityTools(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertIn("iron-key", result)
 
-    def test_save_object_strips_loc_prefix_from_location(self):
+    def test_save_object_with_explicit_location(self):
         result = self.engine._tool_save_object(
             name="torch",
             description="A burning wall torch.",
-            location="loc:great-hall",
+            location="great-hall",
         )
         self.assertIn("great-hall", result)
 
@@ -687,7 +689,7 @@ class TestWorldEntityTools(unittest.TestCase):
     # --- search_world ---
 
     def test_search_world_returns_valid_json(self):
-        parsed = json.loads(self.engine._tool_search_world("loc:dungeon"))
+        parsed = json.loads(self.engine._tool_search_world("dungeon"))
         self.assertIsInstance(parsed, dict)
 
     def test_search_world_has_world_context_key(self):
@@ -949,20 +951,20 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
             )
 
         # Location hierarchy (garden / garden-east share a prefix on purpose).
-        seed("/story/location/manor", "loc:manor", "The manor.")
-        seed("/story/location/manor/foyer", "loc:manor/foyer", "The foyer.")
+        seed("/story/location/manor", "", "The manor.")
+        seed("/story/location/manor/foyer", "", "The foyer.")
         seed(
             "/story/location/manor/foyer/library",
-            "loc:manor/foyer/library",
+            "",
             "The library.",
         )
-        seed("/story/location/manor/garden", "loc:manor/garden", "The garden.")
+        seed("/story/location/manor/garden", "", "The garden.")
         seed(
             "/story/location/manor/garden-east",
-            "loc:manor/garden-east",
+            "",
             "The east garden.",
         )
-        seed("/story/location/dungeon", "loc:dungeon", "The dungeon.")
+        seed("/story/location/dungeon", "", "The dungeon.")
 
         # Objects: a canonical-node object (iron-key) and a legacy sighting-only
         # object (silver-mirror, no /story/object node).
@@ -1039,9 +1041,9 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
     def test_canon_room_none_on_empty(self):
         self.assertIsNone(self.engine._canonicalize_room("", "manor"))
 
-    def test_canon_room_slugifies_and_strips_prefix(self):
+    def test_canon_room_slugifies(self):
         self.assertEqual(
-            self.engine._canonicalize_room("loc:Secret Garden", "manor"),
+            self.engine._canonicalize_room("Secret Garden", "manor"),
             "manor/secret-garden",
         )
 
@@ -1050,6 +1052,32 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
     def test_ensure_node_creates_then_idempotent(self):
         self.assertTrue(self.engine._ensure_location_node("manor/attic"))
         self.assertFalse(self.engine._ensure_location_node("manor/attic"))
+
+    def test_ensure_node_writes_no_location_tag(self):
+        from catjot import NoteContext, SearchType
+
+        self.engine._ensure_location_node("manor/attic")
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, "/story/location/manor/attic")
+        ) as nc:
+            notes = list(nc)
+        self.assertTrue(notes)
+        for note in notes:
+            self.assertNotIn("loc:", note.tag)
+
+    def test_save_location_writes_no_location_tag(self):
+        from catjot import NoteContext, SearchType
+
+        self.engine._tool_save_location(
+            name="manor/solarium", description="A glass-roofed solarium."
+        )
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, "/story/location/manor/solarium")
+        ) as nc:
+            notes = list(nc)
+        self.assertTrue(notes)
+        for note in notes:
+            self.assertNotIn("loc:", note.tag)
 
     def test_ensure_node_existing_returns_false(self):
         self.assertFalse(self.engine._ensure_location_node("manor/foyer"))
@@ -3976,7 +4004,7 @@ class TestTrueResume(unittest.TestCase):
 
         # Canonical location nodes (so canonicalization/existence checks work).
         for room in ("foyer", "garden", "manor/study"):
-            add(f"{PWD_WORLD}/{room}", f"loc:{room}", f"{room} node.", now=100)
+            add(f"{PWD_WORLD}/{room}", "", f"{room} node.", now=100)
         # Movement/event trail — newest event lands in manor/study.
         add(f"{PWD_EVENTS}/foyer", "nav", "Arrived in foyer.", now=200)
         add(f"{PWD_EVENTS}/garden", "nav", "Walked to garden.", now=300)
@@ -4954,7 +4982,7 @@ class TestLocationPrecision(unittest.TestCase):
             "ravenwood-manor/garden",
             "ravenwood-manor/garden-east",
         ):
-            seed(f"/story/location/{room}", f"loc:{room}", room.split("/")[-1])
+            seed(f"/story/location/{room}", "", room.split("/")[-1])
 
         # Events for the down-walk / TREE-boundary tests.
         seed(
@@ -5408,7 +5436,7 @@ class TestObjectWriteSide(unittest.TestCase):
                 TMP_CATNOTE,
                 Note.jot(
                     message=room.split("/")[-1],
-                    tag=f"loc:{room}",
+                    tag="",
                     context="seed",
                     pwd=f"/story/location/{room}",
                 ),
