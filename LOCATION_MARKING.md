@@ -119,11 +119,18 @@ history and emits the new `CURRENT ROOM:`. Same class as the lore lag — a one-
 Normalize (`lower`, slugify to `[a-z0-9/-]`). Precedence:
 1. Exact existing full-path node — `NoteContext(NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{slug}"))` non-empty → `slug`.
 2. Known child of `current` — via shared helper `_child_room_slugs(current)` (§3.4); match on last component.
+2.5. Known **sibling** of `current` — via `_sibling_room_slugs(current)` (children of
+   `current`'s parent, minus `current`); match on last component → `f"{parent}/{sib}"`.
+   Added 2026-07-04: the live quarters→gallery class (rooms sharing a parent) could
+   never resolve — the child walk misses it and `resolve_destination` anchors bare
+   names at the *root*, not the immediate parent.
 3. Known top-level root — depth-1 roots under `PWD_WORLD`; match on first component.
 4. `resolve_destination` fallback (§3.3) with `known_roots`.
 5. Create-new — no match ⇒ nest as `f"{current}/{slug-leaf}"` (never a far-away guess);
    triggers auto-node genesis (§3.5).
 Returns `None` on empty/undeterminable input (feeds the fail-safe).
+`_extract_led_room` (§3.1's lexical fallback) carries the same widening: candidates are
+children → siblings → known roots.
 
 ### 3.3 `resolve_destination` G4 fix (rpjot.py:1663-1670)
 Keep `@staticmethod`; add optional `known_roots=None`.
@@ -157,6 +164,16 @@ filter, the `[len(prefix)+1:]` arithmetic silently assumes the next char is `/` 
 garbage slugs for prefix-sharing siblings (`garden` vs `garden-east`). This makes the
 step-1 `CURRENT ROOM:` line emit canonical slugs instead of prose, closing the loop
 between §3.1/§3.2/§3.4.
+
+**2026-07-04 widening.** The block is now built by a shared
+`WorldStateStep._rooms_vocab_block()` and lists **children and siblings**
+(`children: cottage, garage | siblings: gallery, entrance`), and it appears in BOTH
+step-1 shapes — the unseeded baseline AND `_build_seeded_message`. The seeded-delta
+prompt previously had no vocabulary at all and no CURRENT ROOM exemplar (the seed's own
+line is stripped at speculation time), which produced [REMARK]-silent seeded turns in
+live play; the seeded prompt now also states the first-line requirement explicitly
+(`CURRENT ROOM: <slug>` or `CURRENT ROOM: UNCHANGED`) while preserving the whole-doc
+UNCHANGED short-circuit sentinel.
 
 ### 3.5 Auto-node genesis — `_ensure_location_node(path) -> bool`
 Idempotent. Existence check uses `SearchType.DIRECTORY` (exact) — TREE would false-positive
@@ -200,6 +217,51 @@ Plug-in points: `build_scene_context_map` (add `"location_events"`), `_build_bas
 which today only walks *up* via ancestors). Contract to document in the docstrings:
 DIRECTORY (exact) = this room's own notes; TREE (prefix, boundary-filtered) = this room
 + all sub-rooms; ancestor recall walks *up*, this walks *down*.
+
+### 3.7 record_event's location param — the third structured source (2026-07-04)
+
+**Evidence.** A 60-turn live session: 58 turns classified stationary (third-person
+player), `navigate_to` fired 0 times, `_remark_location` committed once — yet
+`record_event(location=…)` carried an explicit room on 12/56 calls. The model's only
+working movement signal was a parameter the engine filed under but never trusted for
+session state, so every context path stayed keyed to the stale room.
+
+**Doctrine.** "Never guesses" (§3.1) bans *lexical inference* from prose. An explicit
+tool **parameter** is not a guess — it is a structured emission on the same trust tier
+as the step-1 `CURRENT ROOM:` line, and it arrives *later* in the turn, so within a
+turn it supersedes an earlier `UNCHANGED`.
+
+**Two-gate rule** (all deterministic string/set tests, in `_tool_record_event`):
+the param is always canonicalized through §3.2 (killing `evie_quarters` vs
+`evie-quarters` fragmentation); when the canonical room ≠ `session.location`:
+- **MC-tagged** (`exp:` tag naming any `mc_aliases` member, `+`-compounds split)
+  **AND stationary turn** → commit immediately via `_commit_location` (navigate_to is
+  nudge-suppressed on stationary turns by design, so nothing else will move the session).
+- **MC-tagged, mobile turn** → stash `_pending_loc_hint`; `run_turn` reconciles after
+  step 2 iff `navigate_to` never fired (never races a real traversal — the §3.1
+  traversal-collapse hazard is avoided structurally).
+- **Not MC-tagged** → warn-only (`[LOCDRIFT]`); the note files at the explicit room
+  (off-screen events are legitimate), session unmoved.
+
+`_commit_location(path, source)` is the shared metadata-only commit (node genesis,
+`session.location` + context rebind, social-map drop, NPC `mark_present` — a gap the
+plain re-mark used to have) and deliberately does NOT reset attention/mood: scene-move
+semantics stay owned by `navigate_to`. Every commit while a scene is active arms a
+one-shot next-turn `begin_scene` DIRECTOR NOTE (minimal rotation pressure).
+
+**mc_aliases.** Production MC slug is literally `mc`, but models tag
+`exp:bartholomew` — every MC gate uses the engine's `mc_aliases` set (env
+`RPJOT_MC_ALIASES`, logged at game_loop start). Unset = legacy behavior (under-fires,
+never misfires). The same alias set drives the third-person branch of
+`_is_stationary_turn` (`Bartholomew enters the gallery` → mobile; explicit
+`_MOVE_VERBS_3P` conjugations, no gerunds) and `set_people_present` name
+normalization.
+
+**Observability.** `_remark_location` emits exactly one `[REMARK] line=… proposed=…
+canonical=… action={no-line, unchanged, mobile-defer, canon-none, same-room,
+committed, lexical-committed}` per turn; divergences and stub-minting land in
+`_loc_warnings` → `[LOCDRIFT]` log + step-1 headers + `/stats` (cast-drift pattern,
+cleared at the next turn's step-2 entry).
 
 ## 4. Tests (extend test_rpjot.py; reuse `TMP_CATNOTE` fixture + `_make_engine`)
 
@@ -248,7 +310,19 @@ DIRECTORY (exact) = this room's own notes; TREE (prefix, boundary-filtered) = th
   prose, that turn's notes file under the departure room and the re-mark self-heals next
   turn. One-turn note-filing lag on prose-materialized moves — accepted, not silent.
 - **Auto-node proliferation**: create-new could spawn stubs; mitigated by canonicalization
-  matching existing rooms first + DIRECTORY-exact idempotency. A periodic stub audit is advisable.
+  matching existing rooms first + DIRECTORY-exact idempotency. A periodic stub audit is
+  advisable; `_commit_location` now surfaces each minting as a `[LOCDRIFT]` warning that
+  doubles as a save_location prompt to the model.
+- **Classifier/harness parity debt (2026-07-04)**: `_is_stationary_turn` gained the
+  third-person `mc_aliases` branch; `bakeoff_navnudge.classify_heuristic` did NOT (the
+  swept harness is frozen). Port the branch there before any nudge re-sweep, or
+  third-person arms will be mislabeled stationary and results won't transfer. The
+  swept `_STATIONARY_NUDGE` wording itself is untouched and pinned by test.
+- **record_event auto-move misfire**: a genuinely cross-room MC-tagged event on a
+  stationary turn (recording something that happened elsewhere *to the MC*) would
+  wrongly move the session. Accepted: the MC-present gate makes this rare, the next
+  turn's re-mark self-heals, and the live evidence shows the opposite failure
+  (never moving) is the one that actually occurs.
 
 ## 6. Verification
 
