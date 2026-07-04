@@ -648,7 +648,9 @@ class WorldStateStep:
             "mentioned in the player input and not already covered above. If "
             "nothing new is needed, output the updated WORLD STATE document "
             "directly. Follow the same output conventions (including the "
-            "CURRENT ROOM line)."
+            "CURRENT ROOM line). Exception: if the player input requires NO "
+            "update at all — no new characters, objects, lore, or scene changes "
+            "to fold in — reply with exactly:\nUNCHANGED"
         )
 
     def _build_baseline_context(self, classified_input: str) -> str:
@@ -737,13 +739,26 @@ class WorldStateStep:
             )
         return "\n".join(parts) + "\n"
 
+    @staticmethod
+    def _is_unchanged_reply(doc: str) -> bool:
+        """True when the delta reply is the UNCHANGED sentinel.
+
+        Tolerates an optional leading CURRENT ROOM line (models trained on the
+        step-1 conventions sometimes emit it anyway) and trailing punctuation.
+        """
+        body = _CURRENT_ROOM_RE.sub("", doc, count=1).strip()
+        return body.upper().rstrip(". ") == "UNCHANGED"
+
     def run(self, classified_input: str, seed_doc: str | None = None) -> str:
         """Run Step 1 and return the WorldStateDoc string.
 
         With seed_doc (a precomputed WorldStateDoc for the current scene and
         cast), attempt a short delta run first — the seed replaces the baseline
         and the model only folds in the player input (MAX_ITER_STEP1_DELTA
-        rounds). On any delta failure, fall back to the normal full rebuild;
+        rounds). An UNCHANGED reply short-circuits to the seed doc verbatim —
+        but only on a deterministically-stationary turn: movement input
+        contradicts the claim, so it is distrusted and the full rebuild runs.
+        On any delta failure, fall back to the normal full rebuild;
         last_rounds accumulates across both so [TIMING] counts every real call.
         """
         self.last_seed_used = False
@@ -757,14 +772,32 @@ class WorldStateStep:
                 },
             ]
             doc = self._run_loop(messages, MAX_ITER_STEP1_DELTA, [])
-            if doc:
+            unchanged = bool(doc) and self._is_unchanged_reply(doc)
+            if unchanged and ComplianceStep._is_stationary_turn(
+                classified_input, self.engine.mc_aliases
+            ):
+                # The scene didn't change and neither did the doc — reuse it
+                # without paying to re-emit ~450 tok. The seed already has its
+                # CURRENT ROOM line stripped; _remark_location's no-line path
+                # leaves session.location untouched, which is exactly right.
+                logger.info(
+                    "[SEED] UNCHANGED short-circuit: precomputed doc reused verbatim"
+                )
+                self.last_seed_used = True
+                return seed_doc
+            if unchanged:
+                logger.warning(
+                    "[SEED] UNCHANGED claim on a mobile turn distrusted; full rebuild"
+                )
+            elif doc:
                 self.last_seed_used = True
                 return doc
             delta_rounds = self.last_rounds
-            logger.warning(
-                "[SEED] delta step-1 failed after %d rounds; full rebuild",
-                delta_rounds,
-            )
+            if not unchanged:
+                logger.warning(
+                    "[SEED] delta step-1 failed after %d rounds; full rebuild",
+                    delta_rounds,
+                )
             doc = self._run_full(classified_input)
             self.last_rounds += delta_rounds
             return doc

@@ -2324,6 +2324,75 @@ class TestStep1DeltaMode(unittest.TestCase):
         self.assertIn("BASELINE CONTEXT", user_msg)
         self.assertNotIn("PRECOMPUTED WORLD STATE", user_msg)
 
+    # -- UNCHANGED short-circuit ------------------------------------------
+
+    def test_unchanged_short_circuit_returns_seed_verbatim(self):
+        rounds = [{"content": "UNCHANGED"}]
+        mod, original, eng, calls = self._patched(rounds)
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                doc = eng._world_state_step.run(
+                    '[MC speaks aloud]: "hello there"',
+                    seed_doc="SEEDED DOC MARKER",
+                )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "SEEDED DOC MARKER")
+        self.assertTrue(eng._world_state_step.last_seed_used)
+        self.assertEqual(eng._world_state_step.last_rounds, 1)
+        self.assertTrue(
+            any("UNCHANGED short-circuit" in m for m in cm.output)
+        )
+        # The sentinel is offered in the delta instructions.
+        user_msg = calls["messages"][0][1]["content"]
+        self.assertIn("UNCHANGED", user_msg)
+
+    def test_unchanged_tolerates_current_room_line_and_punctuation(self):
+        rounds = [{"content": "CURRENT ROOM: UNCHANGED\nUnchanged."}]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run(
+                "[MC attention] I study her face", seed_doc="SEEDED DOC MARKER"
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "SEEDED DOC MARKER")
+        self.assertTrue(eng._world_state_step.last_seed_used)
+
+    def test_unchanged_distrusted_on_mobile_turn(self):
+        rounds = [
+            {"content": "UNCHANGED"},  # delta claims nothing changed...
+            {"content": "WORLD STATE — full rebuild"},  # ...but MC moved
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+                doc = eng._world_state_step.run(
+                    "[MC action]: I walk into the gallery",
+                    seed_doc="SEEDED DOC MARKER",
+                )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — full rebuild")
+        self.assertFalse(eng._world_state_step.last_seed_used)
+        self.assertEqual(eng._world_state_step.last_rounds, 2)  # 1 delta + 1 full
+        self.assertTrue(any("mobile turn distrusted" in m for m in cm.output))
+
+    def test_prose_containing_unchanged_is_not_sentinel(self):
+        rounds = [
+            {"content": "WORLD STATE — the mood is unchanged since arrival."}
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run(
+                '[MC speaks aloud]: "hello"', seed_doc="SEEDED DOC MARKER"
+            )
+        finally:
+            mod.call_llm = original
+        # A doc that merely mentions the word streams through as a normal delta.
+        self.assertEqual(doc, "WORLD STATE — the mood is unchanged since arrival.")
+        self.assertTrue(eng._world_state_step.last_seed_used)
+
 
 # ---------------------------------------------------------------------------
 # 12f. Speculative seed lifecycle — speculate_step1 / _consume_seed
