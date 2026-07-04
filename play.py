@@ -61,6 +61,13 @@ _SYSTEM_REFRESH_TEMPERATURE = 0.9
 # step-1 prompt shape and wants its own A/B.
 _BG_SEED = os.environ.get("RPJOT_BG_SEED", "") == "1"
 _BG_REFRESH = os.environ.get("RPJOT_BG_REFRESH", "") == "1"
+# MC aliases for third-person self-movement + the record_event MC gate
+# (e.g. RPJOT_MC_ALIASES=bartholomew,bart). Unset = first-person/mc-slug only.
+_MC_ALIASES = frozenset(
+    a.strip().lower()
+    for a in os.environ.get("RPJOT_MC_ALIASES", "").split(",")
+    if a.strip()
+)
 # Stream step-3 prose to the console token-by-token (perceived latency:
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
@@ -784,6 +791,10 @@ def game_loop(engine, seed_summaries=False):
     pair_sizes: deque = deque(maxlen=5)
     # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
     engine.seed_enabled = _BG_SEED
+    engine.mc_aliases = engine.mc_aliases | _MC_ALIASES
+    # rpjot's logger, not play's: the alias set must land in the session
+    # debug file so an under-firing gate is diagnosable from the log alone.
+    _rpjot_module.logger.info("[MC] alias set: %s", sorted(engine.mc_aliases))
     bg_thread = None
     if _STREAM:
         engine.prose_stream_cb = make_stream_printer(engine)

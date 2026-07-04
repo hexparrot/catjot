@@ -3894,6 +3894,96 @@ class TestStationaryClassifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12f-bis. Third-person self-movement (mc_aliases branch)
+# ---------------------------------------------------------------------------
+
+
+class TestThirdPersonMovement(unittest.TestCase):
+    """The alias branch: players who write 'Bartholomew enters the gallery'.
+
+    Live finding 2026-07-03: 58/60 turns classified stationary and navigate_to
+    fired 0 times, because the classifier only knew first-person "I <verb>".
+    Empty alias set must reproduce legacy behavior bit-for-bit.
+    """
+
+    ALIASES = frozenset({"bartholomew", "bart"})
+
+    def _stat(self, classified_input, aliases=ALIASES):
+        from rpjot import ComplianceStep
+
+        return ComplianceStep._is_stationary_turn(classified_input, aliases)
+
+    def test_third_person_move_is_mobile(self):
+        self.assertFalse(
+            self._stat("[MC action]: Bartholomew enters the gallery, smirking.")
+        )
+
+    def test_third_person_alias_short_form(self):
+        self.assertFalse(self._stat("[MC action]: Bart walks to the cellar."))
+
+    def test_empty_aliases_is_legacy_stationary(self):
+        # back-compat: without aliases the same input stays stationary.
+        self.assertTrue(
+            self._stat(
+                "[MC action]: Bartholomew enters the gallery.", aliases=frozenset()
+            )
+        )
+
+    def test_npc_subject_is_stationary(self):
+        # an NPC moving is not the MC moving — no alias match, nudge fires.
+        self.assertTrue(self._stat("[MC action]: Evie walks toward the door."))
+
+    def test_third_person_without_move_verb_is_stationary(self):
+        self.assertTrue(
+            self._stat("[MC action]: Bartholomew studies the painting closely.")
+        )
+
+    def test_gerund_is_stationary(self):
+        # deliberation about movement is not movement (no gerunds in 3P set).
+        self.assertTrue(
+            self._stat("[MC action]: Bartholomew considers going to the cellar.")
+        )
+
+    def test_quoted_body_is_stationary(self):
+        self.assertTrue(
+            self._stat('[MC action]: "Bartholomew goes wherever he pleases."')
+        )
+
+    def test_speech_prefix_still_wins(self):
+        # the prefix table is checked first: speech is stationary even if the
+        # body reads like third-person movement.
+        self.assertTrue(
+            self._stat("[MC speaks aloud]: Bartholomew leaves. That's a promise.")
+        )
+
+    def test_first_person_branch_unaffected_by_aliases(self):
+        self.assertFalse(self._stat("[MC action]: I follow her.", self.ALIASES))
+
+    def test_nudge_omitted_for_third_person_move(self):
+        from rpjot import ComplianceStep
+
+        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
+        eng.init_pipeline()
+        step = eng._compliance_step
+        moved = step._compose_step2_user_content(
+            "[MC action]: Bartholomew enters the gallery.", "WORLD STATE: x"
+        )
+        self.assertNotIn("DIRECTOR NOTE", moved)
+
+    def test_nudge_still_fires_for_npc_invitation(self):
+        # the swept neg_navto shape: an invitation is not movement.
+        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
+        eng.init_pipeline()
+        step = eng._compliance_step
+        invited = step._compose_step2_user_content(
+            '[MC speaks aloud]: "Show me the gallery sometime."', "WORLD STATE: x"
+        )
+        self.assertIn("DIRECTOR NOTE", invited)
+
+
+# ---------------------------------------------------------------------------
 # 12g. Production-shape tool activation — LLM-gated (W9 / T6, D9)
 # ---------------------------------------------------------------------------
 

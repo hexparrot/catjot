@@ -169,6 +169,11 @@ def _compact_schemas_with_nav_desc(engine):
 def classify_heuristic(text):
     """A deliberately simple, DEFINITIVE surface classifier (CLASSIFIER=heuristic).
 
+    PARITY DEBT (2026-07-03): production _is_stationary_turn now also has a
+    third-person alias branch (mc_aliases + _MOVE_VERBS_3P) that this harness
+    lacks. Port it here BEFORE any re-sweep, or third-person arms will be
+    mislabeled stationary and the sweep results won't transfer.
+
     Seeded by the 'starts with I -> speech / think: -> stationary' idea. The
     naive 'starts with I' rule collides with genuine movement ('I follow her
     down the corridor'), so `mobile` additionally requires a movement verb;

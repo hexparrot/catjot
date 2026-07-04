@@ -928,10 +928,22 @@ class ComplianceStep:
     # First-person movement verbs that turn an [MC action] into real travel —
     # the MC's own body moving. Ported verbatim from bakeoff_navnudge's
     # classify_heuristic so production classification matches the swept harness.
+    # PARITY DEBT: the third-person alias branch below does NOT exist in
+    # classify_heuristic — port it there before any nudge re-sweep, or the
+    # harness will mislabel third-person arms as stationary.
     _MOVE_VERBS = frozenset({
         "follow", "go", "walk", "head", "step", "enter", "climb", "cross",
         "descend", "ascend", "run", "stride", "move", "leave", "exit",
         "return", "approach",
+    })
+
+    # Third-person conjugations for the alias branch. Explicit forms (mirrors
+    # _LED_VERBS style) — never derived with +"s", and deliberately no gerunds:
+    # "Bartholomew considers going to the cellar" must stay stationary.
+    _MOVE_VERBS_3P = frozenset({
+        "follows", "goes", "walks", "heads", "steps", "enters", "climbs",
+        "crosses", "descends", "ascends", "runs", "strides", "moves",
+        "leaves", "exits", "returns", "approaches",
     })
 
     def __init__(self, engine: "RPJotEngine") -> None:
@@ -947,7 +959,9 @@ class ComplianceStep:
         return s.startswith(cls._NUDGE_PREFIXES)
 
     @classmethod
-    def _is_stationary_turn(cls, classified_input: str) -> bool:
+    def _is_stationary_turn(
+        cls, classified_input: str, mc_aliases: frozenset = frozenset()
+    ) -> bool:
         """True when the MC did not physically move this turn (→ inject the nudge).
 
         Implements the sigil→mobility table (§3.5). Speech, likely-speech, inner
@@ -958,6 +972,12 @@ class ComplianceStep:
         the corridor" collision and the quoted-dialogue guard. Any UNRECOGNIZED
         prefix fails OPEN to not-stationary (no injection = baseline behavior),
         so a future sigil can never silently suppress navigate_to.
+
+        mc_aliases (lowercase) adds a third-person branch for players who write
+        "Bartholomew enters the gallery": mobile iff the first body token is an
+        MC alias AND a movement verb (either conjugation set) is present AND the
+        body is unquoted. Empty alias set = legacy behavior exactly; the same
+        "wants to go" collision class as first person is accepted (§3.5 note).
         """
         s = (classified_input or "").lstrip()
         if s.startswith(cls._STATIONARY_PREFIXES):
@@ -967,10 +987,16 @@ class ComplianceStep:
         body = s.split("]", 1)[-1].lstrip(": ").strip()
         low = body.lower()
         quoted = body[:1] in {'"', "'"}
+        words = low.split()
         first_person_move = low.startswith("i ") and any(
-            w.strip('.,;:"') in cls._MOVE_VERBS for w in low.split()
+            w.strip('.,;:"') in cls._MOVE_VERBS for w in words
         )
-        return not (first_person_move and not quoted)
+        first_token = words[0].strip('.,;:!?"\'*') if words else ""
+        third_person_move = first_token in mc_aliases and any(
+            w.strip('.,;:"') in cls._MOVE_VERBS or w.strip('.,;:"') in cls._MOVE_VERBS_3P
+            for w in words
+        )
+        return not ((first_person_move or third_person_move) and not quoted)
 
     def _compose_step2_user_content(
         self, classified_input: str, world_doc: str
@@ -988,7 +1014,7 @@ class ComplianceStep:
             parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
         parts.append(f"NARRATOR RULE: {self.engine._NARRATOR_RULE}")
         parts.append(classified_input)
-        if self._is_stationary_turn(classified_input):
+        if self._is_stationary_turn(classified_input, self.engine.mc_aliases):
             parts.append(self._STATIONARY_NUDGE)
         return "\n\n".join(parts)
 
@@ -1004,7 +1030,7 @@ class ComplianceStep:
         canonical_results: list[tuple[str, str]] = []
         accumulated_think: list[str] = []
 
-        if self._is_stationary_turn(classified_input):
+        if self._is_stationary_turn(classified_input, engine.mc_aliases):
             logger.info("[STEP2] stationary nudge → injected")
         user_content = self._compose_step2_user_content(classified_input, world_doc)
 
@@ -1361,6 +1387,12 @@ class RPJotEngine:
         self.prose_stream_cb = None
         self._prose_streamed: bool = False
         self.main_character = main_character
+        # MC alias set (lowercase) for third-person self-movement detection
+        # and the record_event MC-present gate. The play loop extends it from
+        # RPJOT_MC_ALIASES; it always contains the mc slug itself. Empty env =
+        # legacy behavior (first-person only, exp:mc only) — safe but
+        # under-fires on third-person players.
+        self.mc_aliases: frozenset = frozenset({main_character.lower()})
         self.session = SessionState(
             location=location,
             people_present=people_present or set(),
@@ -1832,7 +1864,7 @@ class RPJotEngine:
             )
 
         # Decoupling gate: defer to navigate_to on mobile self-moves.
-        if not ComplianceStep._is_stationary_turn(classified_input):
+        if not ComplianceStep._is_stationary_turn(classified_input, self.mc_aliases):
             _log("mobile-defer")
             return world_doc
 
