@@ -1116,6 +1116,83 @@ class ComplianceStep:
         return canonical_results, accumulated_think
 
 
+class _StreamThinkGate:
+    """Stateful display filter for streamed prose (RPJOT_STREAM).
+
+    Thinking models may emit <think>…</think> (and, as a prose fallback,
+    <tool_call>…</tool_call>) before the narrative; the canonical path strips
+    them post-hoc via strip_think_tags. For live display we must withhold
+    those blocks as tokens arrive: feed(text) returns only the displayable
+    portion, holding back any suffix that could be a partial tag split across
+    token boundaries.
+
+    The stored narrative is always the strip_think_tags result of the full
+    accumulated text — this gate shapes ONLY what is shown live. Accepted
+    edge: an orphaned </think> with no opener (strip_think_tags' third case)
+    streams the pre-tag text to the display while the stored form drops it.
+    Rare, and the stored form is authoritative.
+    """
+
+    _OPENERS = ("<think>", "<tool_call>")
+    _CLOSERS = {"<think>": "</think>", "<tool_call>": "</tool_call>"}
+
+    def __init__(self):
+        self._buf = ""
+        self._swallow_until = None  # closing tag we are inside, or None
+        self._emitted_any = False
+
+    def _held_tail_len(self, s: str) -> int:
+        """Longest suffix of s that is a proper prefix of an opener tag."""
+        max_probe = max(len(op) for op in self._OPENERS) - 1
+        for k in range(min(len(s), max_probe), 0, -1):
+            tail = s[-k:]
+            if any(op.startswith(tail) for op in self._OPENERS):
+                return k
+        return 0
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        out = []
+        while True:
+            if self._swallow_until is not None:
+                idx = self._buf.find(self._swallow_until)
+                if idx == -1:
+                    # Retain just enough tail to catch a split closing tag.
+                    keep = len(self._swallow_until) - 1
+                    if len(self._buf) > keep:
+                        self._buf = self._buf[-keep:]
+                    break
+                self._buf = self._buf[idx + len(self._swallow_until) :]
+                self._swallow_until = None
+                continue
+
+            # Scanning/prose mode: emit up to the earliest full opener.
+            earliest = None
+            for op in self._OPENERS:
+                i = self._buf.find(op)
+                if i != -1 and (earliest is None or i < earliest[0]):
+                    earliest = (i, op)
+            if earliest is not None:
+                i, op = earliest
+                out.append(self._buf[:i])
+                self._buf = self._buf[i + len(op) :]
+                self._swallow_until = self._CLOSERS[op]
+                continue
+
+            hold = self._held_tail_len(self._buf)
+            cut = len(self._buf) - hold
+            out.append(self._buf[:cut])
+            self._buf = self._buf[cut:]
+            break
+
+        display = "".join(out)
+        if not self._emitted_any:
+            display = display.lstrip()
+        if display:
+            self._emitted_any = True
+        return display
+
+
 class ProseStep:
     """Step 3: Pure narrative prose generation. No tools."""
 

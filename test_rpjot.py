@@ -2644,6 +2644,153 @@ class TestBGConsoleGate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12h². Prose streaming — call_llm SSE mode + _StreamThinkGate
+# ---------------------------------------------------------------------------
+
+
+class TestCallLLMStreaming(unittest.TestCase):
+    """call_llm(on_token=...) parses SSE and returns the standard shape."""
+
+    class _FakeResp:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def raise_for_status(self):
+            pass
+
+        def iter_lines(self):
+            return iter(self._lines)
+
+        def json(self):  # non-streaming path fallback
+            return {"choices": [{"message": {"role": "assistant", "content": "x"}}]}
+
+    def _sse(self, text):
+        return (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": text}}]})
+        ).encode()
+
+    def test_streaming_accumulates_and_calls_on_token(self):
+        import catjot as catjot_module
+
+        lines = [
+            b"",  # keepalive
+            self._sse("The gal"),
+            self._sse("lery "),
+            b"data: {malformed",  # skipped, stream survives
+            self._sse("hums."),
+            b"data: [DONE]",
+            self._sse("after done — never seen"),
+        ]
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, stream=False):
+            captured["payload"] = json
+            captured["stream_kw"] = stream
+            return self._FakeResp(lines)
+
+        tokens = []
+        original = catjot_module.requests.post
+        catjot_module.requests.post = fake_post
+        try:
+            msg = catjot_module.call_llm(
+                [{"role": "user", "content": "hi"}], on_token=tokens.append
+            )
+        finally:
+            catjot_module.requests.post = original
+        self.assertEqual(tokens, ["The gal", "lery ", "hums."])
+        self.assertEqual(msg, {"role": "assistant", "content": "The gallery hums."})
+        self.assertTrue(captured["payload"]["stream"])
+        self.assertTrue(captured["stream_kw"])
+
+    def test_non_streaming_payload_has_no_stream_key(self):
+        import catjot as catjot_module
+
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, stream=False):
+            captured["payload"] = json
+            return self._FakeResp([])
+
+        original = catjot_module.requests.post
+        catjot_module.requests.post = fake_post
+        try:
+            catjot_module.call_llm([{"role": "user", "content": "hi"}])
+        finally:
+            catjot_module.requests.post = original
+        self.assertNotIn("stream", captured["payload"])
+
+
+class TestStreamThinkGate(unittest.TestCase):
+    """Live-display filter: think/tool_call blocks withheld, prose streams."""
+
+    def _feed_all(self, gate, chunks):
+        return "".join(gate.feed(c) for c in chunks)
+
+    def test_plain_prose_passes_through(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        self.assertEqual(gate.feed("The gallery "), "The gallery ")
+        self.assertEqual(gate.feed("hums."), "hums.")
+
+    def test_think_prefix_swallowed(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        shown = self._feed_all(
+            gate,
+            ["<think>plan the", " scene</think>", "\n\nThe gallery hums."],
+        )
+        self.assertEqual(shown, "The gallery hums.")
+
+    def test_tag_split_across_feeds(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        shown = self._feed_all(
+            gate, ["<th", "ink>hidden</th", "ink>Prose", " continues"]
+        )
+        self.assertEqual(shown, "Prose continues")
+
+    def test_unclosed_think_displays_nothing(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        shown = self._feed_all(gate, ["<think>reasoning that never", " closes"])
+        self.assertEqual(shown, "")
+
+    def test_tool_call_block_swallowed(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        shown = self._feed_all(
+            gate,
+            ["Before. <tool_call>", '{"name": "x"}', "</tool_call> After."],
+        )
+        self.assertEqual(shown, "Before.  After.")
+
+    def test_matches_strip_think_tags_on_closed_cases(self):
+        from rpjot import _StreamThinkGate, RPJotEngine
+
+        text = "<think>inner plan</think>\n\nThe hall glows. <tool_call>{}</tool_call>Then quiet."
+        # Feed in awkward 3-char chunks to stress tag reassembly.
+        gate = _StreamThinkGate()
+        chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
+        shown = self._feed_all(gate, chunks)
+        _, clean = RPJotEngine.strip_think_tags(text)
+        self.assertEqual(shown.strip(), clean.strip())
+
+    def test_false_alarm_angle_bracket_flushes(self):
+        from rpjot import _StreamThinkGate
+
+        gate = _StreamThinkGate()
+        # "<t" could open a tag; "he" disambiguates — text must not be lost.
+        shown = self._feed_all(gate, ["He said <t", "hen> we left"])
+        self.assertEqual(shown, "He said <then> we left")
+
+
+# ---------------------------------------------------------------------------
 # 12i. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
