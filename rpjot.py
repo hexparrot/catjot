@@ -1756,11 +1756,18 @@ class RPJotEngine:
         """Match a KNOWN room named in a led-move input (LM §3.1 fallback).
 
         Only returns a room that already exists (a known child of the current
-        location or a known root) — never create-new, so a mention of an unknown
-        word cannot mint a room. Returns None if nothing known is named.
+        location, a known sibling under the same parent, or a known root) —
+        never create-new, so a mention of an unknown word cannot mint a room.
+        Returns None if nothing known is named.
         """
         current = self.session.location
         children = {c: f"{current}/{c}" for c in self._child_room_slugs(current)}
+        siblings = {}
+        if "/" in current:
+            parent = current.rsplit("/", 1)[0]
+            siblings = {
+                s: f"{parent}/{s}" for s in self._sibling_room_slugs(current)
+            }
         roots = self._known_location_roots()
         toks = [
             re.sub(r"[^a-z0-9-]+", "-", w.strip('.,;:!?"\'').lower()).strip("-")
@@ -1771,6 +1778,8 @@ class RPJotEngine:
         for cand in candidates:
             if cand in children:
                 return children[cand]
+            if cand in siblings:
+                return siblings[cand]
             if cand in roots:
                 return cand
         return None
@@ -2441,13 +2450,26 @@ class RPJotEngine:
                     slugs.append(child)
         return slugs
 
+    def _sibling_room_slugs(self, current: str) -> list:
+        """One-level sibling room slugs of `current` — children of its parent.
+
+        A single-component room has no parent under PWD_WORLD and therefore no
+        siblings here (top-level neighbors are _known_location_roots territory).
+        Deduped, order-preserving, excludes current's own leaf.
+        """
+        if not current or "/" not in current:
+            return []
+        parent, leaf = current.rsplit("/", 1)
+        return [s for s in self._child_room_slugs(parent) if s != leaf]
+
     def _canonicalize_room(self, proposed: str, current: str) -> str | None:
         """Resolve a proposed room string to a canonical slug (LM §3.2).
 
-        Precedence: exact node → known child of current → known root →
-        resolve_destination (only if it lands on an existing node) → create-new
-        (nested under current, never a far-away guess). Returns None on empty or
-        undeterminable input, feeding _remark_location's fail-safe.
+        Precedence: exact node → known child of current → known sibling of
+        current → known root → resolve_destination (only if it lands on an
+        existing node) → create-new (nested under current, never a far-away
+        guess). Returns None on empty or undeterminable input, feeding
+        _remark_location's fail-safe.
         """
         if not proposed:
             return None
@@ -2469,6 +2491,15 @@ class RPJotEngine:
             for child in self._child_room_slugs(current):
                 if child == leaf:
                     return f"{current}/{child}"
+
+        # 2.5. Known sibling of the current location (match on last component) —
+        # the quarters→gallery class: a move between rooms sharing a parent,
+        # which neither the child walk nor the root check can ever resolve.
+        if current and "/" in current:
+            parent = current.rsplit("/", 1)[0]
+            for sib in self._sibling_room_slugs(current):
+                if sib == leaf:
+                    return f"{parent}/{sib}"
 
         # 3. Known top-level root (match on first component).
         roots = self._known_location_roots()

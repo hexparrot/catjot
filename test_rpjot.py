@@ -1012,6 +1012,27 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
         # children must NOT emit a garbage "east" slug from garden-east.
         self.assertEqual(self.engine._child_room_slugs("manor/garden"), [])
 
+    # --- _sibling_room_slugs ---
+
+    def test_sibling_room_slugs_lists_parents_other_children(self):
+        siblings = self.engine._sibling_room_slugs("manor/foyer")
+        self.assertIn("garden", siblings)
+        self.assertIn("garden-east", siblings)
+        self.assertNotIn("foyer", siblings)  # never lists itself
+
+    def test_sibling_room_slugs_top_level_has_none(self):
+        # a single-component room has no parent under PWD_WORLD; top-level
+        # neighbors are _known_location_roots territory, not siblings.
+        self.assertEqual(self.engine._sibling_room_slugs("manor"), [])
+
+    def test_sibling_room_slugs_prefix_boundary(self):
+        # garden's siblings come from manor's children; garden-east is a real
+        # sibling (not a boundary artifact) and garden itself is excluded.
+        siblings = self.engine._sibling_room_slugs("manor/garden")
+        self.assertIn("foyer", siblings)
+        self.assertIn("garden-east", siblings)
+        self.assertNotIn("garden", siblings)
+
     # --- _canonicalize_room precedence (§3.2) ---
 
     def test_canon_room_exact_node(self):
@@ -1039,6 +1060,48 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
             self.engine._canonicalize_room("wine-cellar", "manor/foyer"),
             "manor/foyer/wine-cellar",
         )
+
+    def test_canon_room_sibling_of_current(self):
+        # closet is a sibling of library under foyer. resolve_destination would
+        # anchor a bare name at the ROOT ("manor/closet" — no node), so before
+        # the sibling step this create-new'd "manor/foyer/library/closet".
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(
+                message="The closet.",
+                tag="",
+                context="seed",
+                pwd="/story/location/manor/foyer/closet",
+            ),
+        )
+        self.assertEqual(
+            self.engine._canonicalize_room("closet", "manor/foyer/library"),
+            "manor/foyer/closet",
+        )
+
+    def test_canon_room_child_beats_sibling(self):
+        # "library" names both a child of foyer and (after this seed) a sibling
+        # of foyer under manor — the child must win (precedence #2 over #2.5).
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(
+                message="The manor library.",
+                tag="",
+                context="seed",
+                pwd="/story/location/manor/library",
+            ),
+        )
+        self.assertEqual(
+            self.engine._canonicalize_room("library", "manor/foyer"),
+            "manor/foyer/library",
+        )
+
+    def test_canon_room_underscores_normalized(self):
+        # the live-session fragmentation class: manor/garden_east and
+        # manor/garden-east must be the same room.
+        canon = self.engine._canonicalize_room("manor/garden_east", "manor")
+        self.assertEqual(canon, "manor/garden-east")
+        self.assertNotIn("_", canon)
 
     def test_canon_room_none_on_empty(self):
         self.assertIsNone(self.engine._canonicalize_room("", "manor"))
@@ -5411,6 +5474,15 @@ class TestLocationPrecision(unittest.TestCase):
             "CURRENT ROOM: UNCHANGED",
         )
         self.assertEqual(eng.session.location, self.ROOT)
+
+    def test_lexical_led_fallback_sibling_room(self):
+        # garage is a SIBLING of foyer (both children of ravenwood-manor) —
+        # the quarters→gallery class the child/root candidate set missed.
+        eng = self._engine(self.FOYER)
+        eng._remark_location(
+            "[MC action]: she pulls me into the garage", "CURRENT ROOM: UNCHANGED"
+        )
+        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
 
     # --- deferred / self-heal: unnamed led move, then next-turn re-mark lands ---
 
