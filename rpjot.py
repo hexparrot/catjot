@@ -581,6 +581,34 @@ class WorldStateStep:
         # delta path. Read by run_turn to finalize seed hit/miss status.
         self.last_seed_used = False
 
+    def _rooms_vocab_block(self) -> str:
+        """[ROOMS KNOWN HERE] — canonical child + sibling vocabulary (LM §3.4).
+
+        Lets the CURRENT ROOM line emit canonical slugs instead of prose in
+        BOTH step-1 shapes. Siblings included (LM §3.7 follow-up) so a move
+        between rooms sharing a parent — the live quarters→gallery miss — can
+        be named canonically. Returns '' when nothing is known.
+        """
+        engine = self.engine
+        sess = engine.session
+        try:
+            children = engine._child_room_slugs(sess.location)
+            siblings = engine._sibling_room_slugs(sess.location)
+        except Exception as exc:
+            logger.warning("[STEP1] rooms-vocab build failed: %s", exc)
+            return ""
+        groups = []
+        if children:
+            groups.append("children: " + ", ".join(children))
+        if siblings:
+            groups.append("siblings: " + ", ".join(siblings))
+        if not groups:
+            return ""
+        return (
+            "[ROOMS KNOWN HERE] (canonical slugs — reuse these exact names):\n"
+            + " | ".join(groups)
+        )
+
     def _warning_block(self) -> str:
         """Cast + location drift warnings for the SCENE STATE header, or ''."""
         warnings = [
@@ -632,6 +660,14 @@ class WorldStateStep:
 
         cast_block = self._warning_block()
 
+        # The seed doc's own CURRENT ROOM line was stripped at speculation
+        # time (it was judged against a placeholder input), so the delta model
+        # has no exemplar — the vocabulary block plus the explicit first-line
+        # instruction are what let a short delta still emit a usable room
+        # signal (the live sessions' [REMARK] silence).
+        rooms_vocab = self._rooms_vocab_block()
+        rooms_block = f"{rooms_vocab}\n\n" if rooms_vocab else ""
+
         return (
             f"SCENE STATE:\n"
             f"  location: {sess.location}\n"
@@ -639,6 +675,7 @@ class WorldStateStep:
             f"  people_present: {present}\n"
             f"{cast_block}\n"
             f"NPC TRACKER (session memory — every named character on file):\n{roster}\n\n"
+            f"{rooms_block}"
             f"PRECOMPUTED WORLD STATE (assembled moments ago for this exact "
             f"scene and cast):\n{seed_doc}\n\n"
             f"PLAYER INPUT:\n{classified_input}\n\n"
@@ -647,8 +684,10 @@ class WorldStateStep:
             "use tool calls ONLY to look up characters, objects, or lore newly "
             "mentioned in the player input and not already covered above. If "
             "nothing new is needed, output the updated WORLD STATE document "
-            "directly. Follow the same output conventions (including the "
-            "CURRENT ROOM line). Exception: if the player input requires NO "
+            "directly. Your VERY FIRST line must be "
+            "`CURRENT ROOM: <canonical slug path>` (reuse an exact slug from "
+            "ROOMS KNOWN HERE when one fits) or `CURRENT ROOM: UNCHANGED`. "
+            "Exception: if the player input requires NO "
             "update at all — no new characters, objects, lore, or scene changes "
             "to fold in — reply with exactly:\nUNCHANGED"
         )
@@ -678,18 +717,9 @@ class WorldStateStep:
         if shared:
             parts.append(f"\n[LOCATION & SHARED LORE]\n{shared}")
 
-        # [ROOMS KNOWN HERE] — canonical child-room vocabulary (LM §3.4). Lets the
-        # step-1 CURRENT ROOM line emit canonical slugs instead of prose.
-        try:
-            child_slugs = engine._child_room_slugs(sess.location)
-        except Exception as exc:
-            logger.warning("[STEP1] baseline rooms-known build failed: %s", exc)
-            child_slugs = []
-        if child_slugs:
-            parts.append(
-                "\n[ROOMS KNOWN HERE] (canonical child slugs — reuse these exact "
-                "names):\n" + ", ".join(child_slugs)
-            )
+        rooms_vocab = self._rooms_vocab_block()
+        if rooms_vocab:
+            parts.append("\n" + rooms_vocab)
 
         # [EVENTS IN THIS ROOM & SUB-ROOMS] — down-walk recall (LM §3.6),
         # complementing the ancestor up-walk in [LOCATION & SHARED LORE].

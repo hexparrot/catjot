@@ -2252,6 +2252,54 @@ class TestStep1DeltaMode(unittest.TestCase):
         self.assertIn("SEEDED DOC MARKER", user_msg)
         self.assertNotIn("BASELINE CONTEXT", user_msg)
 
+    def _rooms_fixture_engine(self):
+        """Engine at manor/foyer with a child and a sibling room on file."""
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+        for room in ("manor", "manor/foyer", "manor/foyer/closet", "manor/garage"):
+            Note.append(
+                TMP_CATNOTE,
+                Note.jot(
+                    message=room, tag="", context="seed",
+                    pwd=f"/story/location/{room}",
+                ),
+            )
+        eng = _make_engine(location="manor/foyer", people={"player"})
+        eng.init_pipeline()
+        self.addCleanup(self._restore_notefile)
+        return eng
+
+    @staticmethod
+    def _restore_notefile():
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def test_seeded_message_carries_rooms_vocab_and_first_line_rule(self):
+        # the delta model gets no CURRENT ROOM exemplar (the seed's line was
+        # stripped at speculation time) — the vocabulary block and the explicit
+        # first-line instruction are what make a 0-round delta emit one.
+        eng = self._rooms_fixture_engine()
+        msg = eng._world_state_step._build_seeded_message(
+            "[MC action]: I wave", "SEED DOC"
+        )
+        self.assertIn("[ROOMS KNOWN HERE]", msg)
+        self.assertIn("children: closet", msg)
+        self.assertIn("siblings: garage", msg)
+        self.assertIn("VERY FIRST line", msg)
+        self.assertIn("CURRENT ROOM: UNCHANGED", msg)
+        # the whole-doc UNCHANGED short-circuit clause must survive too
+        self.assertIn("reply with exactly:\nUNCHANGED", msg)
+
+    def test_baseline_rooms_vocab_lists_siblings(self):
+        eng = self._rooms_fixture_engine()
+        baseline = eng._world_state_step._build_baseline_context("[MC action]: hm")
+        self.assertIn("[ROOMS KNOWN HERE]", baseline)
+        self.assertIn("children: closet", baseline)
+        self.assertIn("siblings: garage", baseline)
+
     def test_delta_exhaustion_falls_back_to_full(self):
         # 3 tool rounds exhaust the delta bound; the 4th call (full path)
         # returns text. last_rounds counts every real LLM call this turn.
