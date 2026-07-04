@@ -5807,6 +5807,49 @@ class TestLocationPrecision(unittest.TestCase):
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
         self.assertEqual(rec.location_last_seen, "ravenwood-manor/cottage")
 
+    # --- scene hint on location change (minimal rotation pressure) ---
+
+    def test_scene_hint_injected_once_after_move(self):
+        eng = self._mc_engine(self.FOYER)
+        eng.init_pipeline()
+        eng.session.current_scene = "arrival"
+        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        self.assertTrue(eng._scene_hint_pending)
+        step = eng._compliance_step
+        first = step._compose_step2_user_content("[MC action]: I wait", "WS: x")
+        self.assertIn("call begin_scene", first)
+        self.assertIn("'arrival'", first)
+        second = step._compose_step2_user_content("[MC action]: I wait", "WS: x")
+        self.assertNotIn("call begin_scene", second)  # one-shot
+
+    def test_scene_hint_not_set_without_active_scene(self):
+        eng = self._mc_engine(self.FOYER)
+        eng._commit_location("ravenwood-manor/garage", source="remark")
+        self.assertFalse(eng._scene_hint_pending)
+
+    def test_scene_hint_set_by_navigate_to(self):
+        eng = self._mc_engine(self.FOYER)
+        eng.session.current_scene = "arrival"
+        eng._tool_navigate_to("cottage")
+        self.assertTrue(eng._scene_hint_pending)
+
+    def test_begin_scene_clears_pending_hint(self):
+        eng = self._mc_engine(self.FOYER)
+        eng.session.current_scene = "arrival"
+        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        eng._tool_begin_scene("garage-tinkering", "A new beat in the garage.")
+        self.assertFalse(eng._scene_hint_pending)
+
+    def test_stationary_nudge_wording_untouched(self):
+        # the swept nudge text is a bakeoff winner — pin it against drift.
+        from rpjot import ComplianceStep
+
+        self.assertTrue(
+            ComplianceStep._STATIONARY_NUDGE.startswith(
+                "DIRECTOR NOTE (this turn): the MC has not moved themselves"
+            )
+        )
+
     # --- deferred / self-heal: unnamed led move, then next-turn re-mark lands ---
 
     def test_deferred_unnamed_led_move_self_heals_next_turn(self):

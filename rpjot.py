@@ -1047,6 +1047,16 @@ class ComplianceStep:
             parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
         parts.append(f"NARRATOR RULE: {self.engine._NARRATOR_RULE}")
         parts.append(classified_input)
+        if self.engine._scene_hint_pending:
+            # One-shot scene-rotation pressure: consumed here so the hint
+            # appears exactly once after a location move (begin_scene also
+            # clears it if the model rotated within the moving turn).
+            self.engine._scene_hint_pending = False
+            parts.append(
+                "DIRECTOR NOTE: the location changed since scene "
+                f"'{self.engine.session.current_scene}' began — if this is a "
+                "new dramatic beat, call begin_scene."
+            )
         if self._is_stationary_turn(classified_input, self.engine.mc_aliases):
             parts.append(self._STATIONARY_NUDGE)
         return "\n\n".join(parts)
@@ -1409,6 +1419,10 @@ class RPJotEngine:
         # Mobile-turn MC location from record_event, reconciled after step 2
         # iff navigate_to never fired (never races a real traversal).
         self._pending_loc_hint: str | None = None
+        # Minimal scene-rotation pressure: set whenever the session moves while
+        # a scene is active; injected as a one-line DIRECTOR NOTE into the NEXT
+        # step-2 message, then cleared. No thresholds, no auto-rotation.
+        self._scene_hint_pending: bool = False
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -1961,6 +1975,8 @@ class RPJotEngine:
         for slug in self.session.people_present:
             if slug != self.main_character:
                 self.npc_tracker.mark_present(slug, path, self._turn_count)
+        if self.session.current_scene:
+            self._scene_hint_pending = True
         logger.info("[COMMIT-LOC] session.location → %s (source=%s)", path, source)
 
     def _reconcile_loc_hint(self, canonical_results: list) -> None:
@@ -3675,6 +3691,8 @@ class RPJotEngine:
         self.session.mood = {}
         self._cache_drop("social_map")
         self._ensure_location_node(to_loc)  # LM §3.5: guarantee a node for the arrival room
+        if self.session.current_scene:
+            self._scene_hint_pending = True  # next-turn begin_scene hint
 
         # NPC tracker: update last-seen location for all present NPCs
         for slug in self.session.people_present:
@@ -4459,6 +4477,8 @@ class RPJotEngine:
         self.session.current_scene = name
         self._cache_drop("social_map")
         self._system_refresh_pending = True
+        # A fresh scene satisfies any pending location-move rotation hint.
+        self._scene_hint_pending = False
 
         note = Note.jot(
             message=description,
