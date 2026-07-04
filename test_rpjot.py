@@ -2406,6 +2406,7 @@ class TestStep1DeltaMode(unittest.TestCase):
             mod.call_llm = original
         self.assertEqual(doc, "SEEDED DOC MARKER")
         self.assertTrue(eng._world_state_step.last_seed_used)
+        self.assertTrue(eng._world_state_step.last_unchanged)
         self.assertEqual(eng._world_state_step.last_rounds, 1)
         self.assertTrue(
             any("UNCHANGED short-circuit" in m for m in cm.output)
@@ -2459,6 +2460,7 @@ class TestStep1DeltaMode(unittest.TestCase):
         # A doc that merely mentions the word streams through as a normal delta.
         self.assertEqual(doc, "WORLD STATE — the mood is unchanged since arrival.")
         self.assertTrue(eng._world_state_step.last_seed_used)
+        self.assertFalse(eng._world_state_step.last_unchanged)  # ordinary hit
 
 
 # ---------------------------------------------------------------------------
@@ -2667,6 +2669,25 @@ class TestSeedRunTurn(unittest.TestCase):
         self.assertIn("PRECOMPUTED WORLD STATE", step1_user)
         self.assertIn("precomputed gallery", step1_user)
         # Speculative provenance adopted (capture order preserved).
+        self.assertEqual(eng._turn_refs[0], "1783000001")
+
+    def test_unchanged_short_circuit_reports_hit_unchanged(self):
+        rounds = [
+            {"content": "UNCHANGED"},  # step 1 delta short-circuits
+            {"content": "nothing canonical"},  # step 2
+            {"content": "The gallery hums."},  # step 3
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        self._plant_seed(eng, refs=["1783000001"])
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                self._run(eng)  # "[MC action]: I wave" — stationary
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING] turn=" in m]
+        self.assertIn("seed=hit-unchanged", timing[0])
+        # Seed doc reused verbatim, provenance still adopted.
+        self.assertEqual(eng._seed_status, "hit-unchanged")
         self.assertEqual(eng._turn_refs[0], "1783000001")
 
     def test_delta_failure_reports_miss_and_drops_seed_refs(self):

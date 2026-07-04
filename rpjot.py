@@ -580,6 +580,9 @@ class WorldStateStep:
         # True when the most recent run() produced its doc via the seeded
         # delta path. Read by run_turn to finalize seed hit/miss status.
         self.last_seed_used = False
+        # True when that hit was the UNCHANGED short-circuit (seed reused
+        # verbatim, no re-emit) — reported as seed=hit-unchanged in [TIMING].
+        self.last_unchanged = False
 
     def _rooms_vocab_block(self) -> str:
         """[ROOMS KNOWN HERE] — canonical child + sibling vocabulary (LM §3.4).
@@ -792,6 +795,10 @@ class WorldStateStep:
         last_rounds accumulates across both so [TIMING] counts every real call.
         """
         self.last_seed_used = False
+        # True only when the UNCHANGED short-circuit fired — run_turn reports
+        # it as seed=hit-unchanged so the live campaign can measure the
+        # sentinel's fire rate and savings separately from ordinary delta hits.
+        self.last_unchanged = False
 
         if seed_doc is not None:
             messages = [
@@ -814,6 +821,7 @@ class WorldStateStep:
                     "[SEED] UNCHANGED short-circuit: precomputed doc reused verbatim"
                 )
                 self.last_seed_used = True
+                self.last_unchanged = True
                 return seed_doc
             if unchanged:
                 logger.warning(
@@ -2058,7 +2066,14 @@ class RPJotEngine:
             classified_input, seed_doc=seed["doc"] if seed else None
         )
         if seed and self._world_state_step.last_seed_used:
-            self._seed_status = "hit"
+            # hit-unchanged = the sentinel short-circuit reused the seed doc
+            # verbatim (no re-emit) — distinguished so the live campaign can
+            # measure its fire rate and savings separately.
+            self._seed_status = (
+                "hit-unchanged"
+                if self._world_state_step.last_unchanged
+                else "hit"
+            )
             # Adopt speculative provenance first (capture order), the delta
             # run's own lookups after. On a delta failure the full rebuild's
             # captures already stand — seed refs are NOT adopted (the doc
