@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 from collections import deque
 from datetime import datetime
 
@@ -53,6 +55,13 @@ _SLASH_EXACT = frozenset(
 _SLASH_PREFIX = ("/objects", "/yomi")
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
+
+# Idle-window background work (opt-in, default off). The engine never reads
+# env; the play loop owns the flags and the thread. Independent flags because
+# the risk profiles differ: refresh is trivially safe, seeding changes the
+# step-1 prompt shape and wants its own A/B.
+_BG_SEED = os.environ.get("RPJOT_BG_SEED", "") == "1"
+_BG_REFRESH = os.environ.get("RPJOT_BG_REFRESH", "") == "1"
 
 _PARAPHRASE_INSTRUCTION = (
     "You are a narrator-briefing editor. "
@@ -360,6 +369,50 @@ def refresh_system_message(engine, step2_messages):
 
 
 # ---------------------------------------------------------------------------
+# Idle-window background worker (entropy refresh + speculative step-1 seed)
+# ---------------------------------------------------------------------------
+
+
+def _idle_worker(engine, step2_messages):
+    """Idle-window work, run while the player sits at the input() prompt.
+
+    Read-only vs disk; never raises (background thread). Refresh runs first:
+    its result is unconditionally consumed next turn (the seed may miss), and
+    finishing the step2_messages[0] swap early shrinks the already-benign
+    window in which /prompt could read it mid-swap (list item assignment is
+    GIL-atomic — a reader sees old or new, never torn).
+    """
+    stats = {}
+    try:
+        if _BG_REFRESH and engine._system_refresh_pending:
+            t = time.perf_counter()
+            refresh_system_message(engine, step2_messages)
+            stats["refresh_s"] = time.perf_counter() - t
+        if _BG_SEED:
+            t = time.perf_counter()
+            engine.speculate_step1()
+            stats["spec_s"] = time.perf_counter() - t
+    except Exception as exc:
+        logger.warning("[BG] idle worker failed: %s", exc)
+    engine._bg_stats = stats
+
+
+def start_idle_work(engine, step2_messages):
+    """Start the idle worker thread, or return None when both flags are off.
+
+    daemon=True: /quit and Ctrl-C abandon the thread mid-flight — safe
+    because the worker performs zero disk writes (step-1 tools read-only).
+    """
+    if not (_BG_SEED or _BG_REFRESH):
+        return None
+    thread = threading.Thread(
+        target=_idle_worker, args=(engine, step2_messages), daemon=True
+    )
+    thread.start()
+    return thread
+
+
+# ---------------------------------------------------------------------------
 # Persistent-history compaction (R1 / W4)
 # ---------------------------------------------------------------------------
 # The per-call guard trims a *copy* at send time; it never shrinks the
@@ -646,6 +699,9 @@ def game_loop(engine, seed_summaries=False):
         seed_digest_from_summaries(engine, step2_messages, step3_messages)
     # Trailing-5-turn appended-pair sizes → turns-until-85% estimate in /prompt.
     pair_sizes: deque = deque(maxlen=5)
+    # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
+    engine.seed_enabled = _BG_SEED
+    bg_thread = None
 
     def _avg_pair_toks():
         return (sum(pair_sizes) / len(pair_sizes)) if pair_sizes else None
@@ -761,6 +817,19 @@ def game_loop(engine, seed_summaries=False):
                 continue
 
         # --- Normal player input → 3-step pipeline ---
+        # Join the idle worker BEFORE any foreground LLM call: no two calls
+        # ever overlap on the (single-slot) endpoint. Meta-commands and empty
+        # input `continue` above this line without joining; /quit and
+        # EOF/Ctrl-C `break` above it (daemon thread abandoned — no disk
+        # writes in the worker, so that is safe).
+        if bg_thread is not None:
+            t_join = time.perf_counter()
+            bg_thread.join()
+            bg_thread = None
+            wait_s = time.perf_counter() - t_join
+            if isinstance(engine._bg_stats, dict):
+                engine._bg_stats["wait_s"] = wait_s
+
         classified = classify_input(user_input)
 
         try:
@@ -781,6 +850,8 @@ def game_loop(engine, seed_summaries=False):
                 + _msg_toks({"content": "(no response)"})
             )
             compact_history(engine, step2_messages, step3_messages)
+            # Also services a pending refresh here — the sync path never did.
+            bg_thread = start_idle_work(engine, step2_messages)
             continue
 
         display_narrative(narrative)
@@ -806,8 +877,12 @@ def game_loop(engine, seed_summaries=False):
         # index 0 (system), so the digest installed at index 1 is preserved.
         compact_history(engine, step2_messages, step3_messages)
 
-        if engine._system_refresh_pending:
+        # Sync fallback when background refresh is off (byte-identical to
+        # the legacy path); otherwise the idle worker handles it.
+        if engine._system_refresh_pending and not _BG_REFRESH:
             refresh_system_message(engine, step2_messages)
+
+        bg_thread = start_idle_work(engine, step2_messages)
 
 
 # ---------------------------------------------------------------------------

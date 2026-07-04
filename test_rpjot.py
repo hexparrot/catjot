@@ -2426,7 +2426,124 @@ class TestSeedRunTurn(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12h. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# 12h. Idle worker — play.py background refresh + speculation
+# ---------------------------------------------------------------------------
+
+
+class TestIdleWorker(unittest.TestCase):
+    """_idle_worker/start_idle_work: flag gating, stats, crash safety."""
+
+    def _flags(self, play, seed=False, refresh=False):
+        """Set play._BG_SEED/_BG_REFRESH; return restorer for finally."""
+        saved = (play._BG_SEED, play._BG_REFRESH)
+        play._BG_SEED, play._BG_REFRESH = seed, refresh
+
+        def restore():
+            play._BG_SEED, play._BG_REFRESH = saved
+
+        return restore
+
+    def test_refresh_path(self):
+        import play
+
+        restore = self._flags(play, refresh=True)
+        eng = _make_engine()
+        eng._system_refresh_pending = True
+        step2 = [{"role": "system", "content": "OLD RULES"}]
+        original = play.call_llm
+        play.call_llm = lambda *a, **k: {"content": "REFRESHED RULES"}
+        try:
+            play._idle_worker(eng, step2)
+        finally:
+            play.call_llm = original
+            restore()
+        self.assertEqual(step2[0]["content"], "REFRESHED RULES")
+        self.assertFalse(eng._system_refresh_pending)
+        self.assertIn("refresh_s", eng._bg_stats)
+
+    def test_refresh_skipped_when_not_pending(self):
+        import play
+
+        restore = self._flags(play, refresh=True)
+        eng = _make_engine()
+        eng._system_refresh_pending = False
+        step2 = [{"role": "system", "content": "OLD RULES"}]
+        original = play.call_llm
+        play.call_llm = lambda *a, **k: self.fail("call_llm must not run")
+        try:
+            play._idle_worker(eng, step2)
+        finally:
+            play.call_llm = original
+            restore()
+        self.assertEqual(step2[0]["content"], "OLD RULES")
+        self.assertNotIn("refresh_s", eng._bg_stats)
+
+    def test_seed_path(self):
+        import play
+
+        restore = self._flags(play, seed=True)
+        eng = _make_engine()
+        called = []
+        eng.speculate_step1 = lambda: called.append(1)
+        try:
+            play._idle_worker(eng, [])
+        finally:
+            restore()
+        self.assertEqual(called, [1])
+        self.assertIn("spec_s", eng._bg_stats)
+
+    def test_both_off_no_thread_no_work(self):
+        import play
+
+        restore = self._flags(play)  # both off
+        eng = _make_engine()
+        eng.speculate_step1 = lambda: self.fail("must not speculate")
+        try:
+            self.assertIsNone(play.start_idle_work(eng, []))
+            play._idle_worker(eng, [])
+        finally:
+            restore()
+        self.assertEqual(eng._bg_stats, {})
+
+    def test_worker_never_raises(self):
+        import play
+
+        restore = self._flags(play, seed=True)
+        eng = _make_engine()
+
+        def boom():
+            raise RuntimeError("endpoint exploded")
+
+        eng.speculate_step1 = boom
+        try:
+            with self.assertLogs("play", level="WARNING") as cm:
+                play._idle_worker(eng, [])  # must not raise
+        finally:
+            restore()
+        self.assertTrue(any("[BG] idle worker failed" in m for m in cm.output))
+        self.assertIsInstance(eng._bg_stats, dict)
+
+    def test_thread_smoke(self):
+        import play
+
+        restore = self._flags(play, seed=True)
+        eng = _make_engine()
+        called = []
+        eng.speculate_step1 = lambda: called.append(1)
+        try:
+            thread = play.start_idle_work(eng, [])
+            self.assertIsNotNone(thread)
+            self.assertTrue(thread.daemon)
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        finally:
+            restore()
+        self.assertEqual(called, [1])
+        self.assertIn("spec_s", eng._bg_stats)
+
+
+# ---------------------------------------------------------------------------
+# 12i. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
 
