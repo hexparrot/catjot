@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import sys
+import time
 
 import requests
 from dataclasses import dataclass, field as _dc_field
@@ -154,6 +155,19 @@ PWD_OBJECTS = "/story/object"  # canonical object descriptions (OBJECT_TOOLING �
 TAG_YOMI = "yomi:"  # yomi:alice
 TAG_REL = "rel:"  # rel:bond, rel:history, rel:wound …
 TAG_INT = "int:"  # int:secret, int:desire, int:mask …
+
+# ref:1750000100 — direct entry citation (TS_CITATIONS C1). Engine-stamped
+# retrieval provenance ONLY: a targeted step-1 lookup surfaced the cited entry
+# this turn. Never model-emitted; no tool schema exposes it (C2). The key is
+# the cited note's epoch int verbatim and may resolve to every note sharing
+# that second (C3) — dereference rides the existing TIMESTAMP match.
+TAG_REF = "ref:"
+
+# Citation caps (TS_CITATIONS C5/C6): refs captured per targeted lookup,
+# ref words stamped per written note, timestamps dereferenced per bundle.
+_REF_CAP_PER_LOOKUP = 3
+_REF_CAP_PER_NOTE = 6
+_REF_DEREF_CAP = 12
 
 # LOCATION_MARKING §3.1 — the gated lexical fallback for a led/passive move.
 # A passive-arrival cue = a _LED_VERBS word co-occurring with a directional
@@ -547,6 +561,9 @@ class WorldStateStep:
 
     def __init__(self, engine: "RPJotEngine") -> None:
         self.engine = engine
+        # LLM rounds consumed by the most recent run(); read by run_turn's
+        # [TIMING] line. Set on every exit path.
+        self.last_rounds = 0
 
     def _build_initial_message(self, classified_input: str) -> str:
         sess = self.engine.session
@@ -671,11 +688,13 @@ class WorldStateStep:
 
         tool_results_collected: list[str] = []
         max_iter = 8
+        self.last_rounds = 0
 
         for i in range(max_iter):
             messages = engine._guard_payload(
                 messages, schema_overhead=engine._cached_step1_schema_toks
             )
+            t_call = time.perf_counter()
             try:
                 response_msg = call_llm(
                     messages,
@@ -686,13 +705,18 @@ class WorldStateStep:
                 )
             except requests.exceptions.RequestException as exc:
                 logger.warning("[STEP1] LLM call failed: %s", exc)
+                self.last_rounds = i
                 break
+            logger.debug(
+                "[TIMING] step1 call %d: %.1fs", i + 1, time.perf_counter() - t_call
+            )
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
                 # Final text output from Step 1 is the WorldStateDoc
                 content = response_msg.get("content", "")
                 _, world_doc = engine.strip_think_tags(content)
+                self.last_rounds = i + 1  # i tool rounds + the final text call
                 logger.info(
                     "[STEP1] complete: %d tool rounds, world_doc=%d tok",
                     i,
@@ -715,6 +739,7 @@ class WorldStateStep:
                 messages.append(
                     {"role": "tool", "tool_call_id": tool_id, "content": result}
                 )
+            self.last_rounds = i + 1
 
         logger.warning("[STEP1] max iterations reached; using collected results")
         return self._fallback_doc(tool_results_collected)
@@ -800,6 +825,9 @@ class ComplianceStep:
 
     def __init__(self, engine: "RPJotEngine") -> None:
         self.engine = engine
+        # LLM rounds consumed by the most recent run(); read by run_turn's
+        # [TIMING] line. Set on every exit path.
+        self.last_rounds = 0
 
     @classmethod
     def _should_nudge_zero_canonical(cls, classified_input: str) -> bool:
@@ -878,10 +906,16 @@ class ComplianceStep:
         i = 0
         bound = max_iterations
         nudged = False
+        self.last_rounds = 0
+        # Followup dedupe (TOOL_UNIFY U6): the FOLLOWUP_* constants repeat
+        # verbatim across rounds; each repeat is a fresh "do more" prompt that
+        # pressures the loop into another round. One injection per turn each.
+        seen_instructions: set = set()
         while i < bound:
             messages = engine._guard_payload(
                 messages, schema_overhead=engine._cached_compact_step2_schema_toks
             )
+            t_call = time.perf_counter()
             try:
                 response_msg = call_llm(
                     messages,
@@ -891,7 +925,11 @@ class ComplianceStep:
                 )
             except requests.exceptions.RequestException as exc:
                 logger.warning("[STEP2] LLM call failed: %s", exc)
+                self.last_rounds = i
                 break
+            logger.debug(
+                "[TIMING] step2 call %d: %.1fs", i + 1, time.perf_counter() - t_call
+            )
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
@@ -914,6 +952,7 @@ class ComplianceStep:
                     )
                     logger.info("[STEP2] zero-canonical nudge → injected")
                     i += 1
+                    self.last_rounds = i
                     continue
 
                 if nudged:
@@ -923,6 +962,7 @@ class ComplianceStep:
                         else "acknowledged (no canon)"
                     )
                     logger.info("[STEP2] zero-canonical nudge → %s", outcome)
+                self.last_rounds = i + 1  # i tool rounds + the final text call
                 logger.info(
                     "[STEP2] complete: %d tool rounds, canonical=%d think=%d",
                     i,
@@ -936,6 +976,7 @@ class ComplianceStep:
                 accumulated_think.append(think.strip())
 
             messages.append(response_msg)
+            round_instructions: list = []
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
                 fn_args = tc["function"]["arguments"]
@@ -951,14 +992,24 @@ class ComplianceStep:
                     tool_id, result
                 )
                 messages.append(tool_msg)
-                if instruction:
-                    # Prefixed so the model does not mistake a system-issued
-                    # followup for player input (T5).
-                    messages.append(
-                        {"role": "user", "content": f"[DIRECTIVE] {instruction}"}
-                    )
+                if instruction and instruction not in seen_instructions:
+                    seen_instructions.add(instruction)
+                    round_instructions.append(instruction)
+
+            # Tool-result messages stay contiguous under their assistant
+            # tool_calls block (standard ordering); one batched directive per
+            # round instead of one per tool call. Prefixed so the model does
+            # not mistake a system-issued followup for player input (T5).
+            if round_instructions:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "[DIRECTIVE] " + " ".join(round_instructions),
+                    }
+                )
 
             i += 1
+            self.last_rounds = i
 
         logger.warning("[STEP2] max iterations reached")
         return canonical_results, accumulated_think
@@ -1061,6 +1112,14 @@ class RPJotEngine:
         self._cached_compact_step2_schema_toks: int = 0
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
+        # Citation capture (TS_CITATIONS §3.1): `now` timestamps of notes
+        # surfaced by this turn's TARGETED step-1 lookups, in capture order.
+        # Reset at the top of run_turn; stamped onto C4-scoped step-2 writes.
+        self._turn_refs: list = []
+        # Cache-hit replay (§3.4): the query cache returns rendered strings,
+        # so note timestamps are destroyed at the render boundary — this maps
+        # cache key → captured refs, evicted in lockstep with _query_cache.
+        self._ref_cache: dict = {}
         # Cast-drift warnings (T1): NPC slugs named in the turn's text but absent
         # from people_present. Detection only; surfaced in /stats and the next
         # step-1 SCENE STATE header, cleared when the discrepancy resolves.
@@ -1168,6 +1227,22 @@ class RPJotEngine:
         ("place_object", "room"),
     ]
 
+    # Legacy fine-grained rel:/int: tools hidden from the LLM-facing compact
+    # menu (TOOL_UNIFY U1). They stay registered and dispatchable — an old
+    # resumed history or a habituated model can still call them by name — but
+    # the model's step-2 menu offers record_relationship / record_interior
+    # instead. Census basis: across all real sessions the rel:* tags fired
+    # zero times and int:* once, while these 19 schemas cost 56% of the
+    # compact step-2 budget and diluted every selection with distractors.
+    _COMPACT_HIDDEN_TOOLS = frozenset({
+        "record_bond", "record_history", "record_dynamic",
+        "record_power_dynamic", "record_wound", "record_promise",
+        "record_debt", "record_lie", "record_leverage", "record_impression",
+        "record_secret", "record_desire", "record_longing", "record_jealousy",
+        "record_mask", "record_subtext", "record_reputation", "record_trigger",
+        "record_unspoken",
+    })
+
     # Function-level (tool) descriptions that survive step-2 schema compaction.
     # Compaction strips ALL function descriptions by default (§3.1), so the model
     # selects among 31 step-2 tools essentially by name. This map is EMPTY unless
@@ -1199,6 +1274,43 @@ class RPJotEngine:
             "dropped, stowed, left behind; also to note a lasting change to its "
             "condition."
         ),
+        # The merged recorders' names are broader than any legacy tool name,
+        # so a selection one-liner is load-bearing (TOOL_UNIFY U1); the
+        # kind-enum itself survives compaction as parameter structure.
+        "record_relationship": (
+            "Record a durable fact BETWEEN two characters — kind picks bond, "
+            "history, dynamic, power, wound, promise, debt, lie, leverage, or "
+            "impression; char_a is the actor/source, char_b the target."
+        ),
+        "record_interior": (
+            "Record one character's hidden interior — kind picks secret, "
+            "desire, longing, jealousy, mask, subtext, reputation, trigger, or "
+            "unspoken; content is the private material itself."
+        ),
+        # U2 restorations, priority-ordered — trim from the bottom if the
+        # budget ever tightens. Each targets a selection boundary a name
+        # alone cannot carry (the nudge_pos_desc precedent: one restored
+        # one-liner took a 17% selection miss to 0%).
+        "record_knowledge": (
+            "Record information only a specific subset of those present learn "
+            "— whispers, private talk, an act with limited witnesses; use "
+            "record_event for openly witnessed happenings."
+        ),
+        "set_people_present": (
+            "Replace the full who-is-here list the moment anyone enters or "
+            "leaves the scene; a present character omitted from this list "
+            "silently drops out of play."
+        ),
+        "save_character": (
+            "Save a character's canonical profile when a named character "
+            "first appears or their lasting traits are established — this is "
+            "what future lookups recall."
+        ),
+        "save_object": (
+            "Define a new object's permanent canonical record — name, "
+            "appearance, fixed properties; interactions with it are events, "
+            "not saves (use place_object)."
+        ),
     }
 
     @property
@@ -1219,6 +1331,9 @@ class RPJotEngine:
         for s in self._step2_schemas:
             fn = s["function"]
             name = fn["name"]
+            # Hidden legacy tools stay dispatchable but leave the menu (U1).
+            if name in self._COMPACT_HIDDEN_TOOLS:
+                continue
             params = fn.get("parameters", {})
             stripped_props = {}
             for k, pdef in params.get("properties", {}).items():
@@ -1507,6 +1622,9 @@ class RPJotEngine:
             self.init_pipeline()
 
         logger.info("[TURN %d] run_turn: START", self._turn_count + 1)
+        t0 = time.perf_counter()
+        # Citation capture is strictly turn-scoped (TS_CITATIONS §3.1).
+        self._turn_refs = []
 
         # Step 1
         world_doc = self._world_state_step.run(classified_input)
@@ -1515,11 +1633,13 @@ class RPJotEngine:
         # Location re-mark (LM §3.1): commit a precise session.location before any
         # step-2 record tool runs, and strip the CURRENT ROOM line from world_doc.
         world_doc = self._remark_location(classified_input, world_doc)
+        t1 = time.perf_counter()
 
         # Step 2
         canonical_results, accumulated_think = self._compliance_step.run(
             classified_input, world_doc, step2_messages
         )
+        t2 = time.perf_counter()
         logger.info(
             "[TURN] step2 done: canonical=%d think=%d",
             len(canonical_results),
@@ -1541,7 +1661,22 @@ class RPJotEngine:
             accumulated_think,
             step3_messages,
         )
+        t3 = time.perf_counter()
         logger.info("[TURN] step3 done: narrative=%d tok", _tok(narrative))
+        # Per-turn wall-clock accounting (TOOL_UNIFY U0): one parseable line per
+        # turn so latency work is measured, not assumed. `it` counts LLM calls
+        # consumed by each step's loop (step1 includes the re-mark in its span).
+        logger.info(
+            "[TIMING] turn=%d step1=%.1fs/%dit step2=%.1fs/%dit step3=%.1fs "
+            "total=%.1fs",
+            self._turn_count + 1,
+            t1 - t0,
+            self._world_state_step.last_rounds,
+            t2 - t1,
+            self._compliance_step.last_rounds,
+            t3 - t2,
+            t3 - t0,
+        )
 
         # Cast-drift detection (T1): compare who the turn's text names against
         # who the session thinks is present. Detection only — never mutates cast.
@@ -1695,24 +1830,83 @@ class RPJotEngine:
         hit = self.session._query_cache.get(key)
         if hit is not None:
             logger.debug("[CACHE] HIT  %s (%d tok)", key, _tok(hit))
+            # Replay captured provenance (TS_CITATIONS §3.4): a cache hit must
+            # capture the same refs the original lookup did, or hits silently
+            # produce citation-free turns. No-op for keys that never captured.
+            for t in self._ref_cache.get(key, []):
+                if t not in self._turn_refs:
+                    self._turn_refs.append(t)
         return hit
 
-    def _cache_put(self, key: str, value: str) -> None:
+    def _cache_put(self, key: str, value: str, refs: list | None = None) -> None:
         cache = self.session._query_cache
         # FIFO eviction cap (R6): the cache is invalidated on writes but never
         # globally evicted, so bound it to keep long sessions from leaking RAM.
         if key not in cache and len(cache) >= _QUERY_CACHE_MAX:
             oldest = next(iter(cache))
             del cache[oldest]
+            self._ref_cache.pop(oldest, None)
             logger.debug("[CACHE] EVICT(FIFO) %s (cap %d)", oldest, _QUERY_CACHE_MAX)
         cache[key] = value
+        # Lockstep with the rendered string — stale refs must never outlive it.
+        if refs:
+            self._ref_cache[key] = list(refs)
+        else:
+            self._ref_cache.pop(key, None)
         logger.debug("[CACHE] SET  %s (%d tok)", key, _tok(value))
 
     def _cache_drop(self, *keys: str) -> None:
         for k in keys:
             if k in self.session._query_cache:
                 del self.session._query_cache[k]
+                self._ref_cache.pop(k, None)
                 logger.debug("[CACHE] EVICT %s", k)
+
+    def _cite(self, notes, cap: int = _REF_CAP_PER_LOOKUP) -> list:
+        """Capture retrieval provenance from one targeted lookup (C2/C5).
+
+        Records the `now` of the newest `cap` notes the lookup actually
+        surfaced into the per-turn ref set, newest-first. Returns the captured
+        list so cached lookups can store it beside the rendered string (§3.4).
+        Ambient tools (get_people_present, examine_location, prepare_context)
+        and the deterministic baseline blocks never call this — citing
+        everything in context would make every ref meaningless.
+        """
+        newest = sorted(notes, key=lambda n: n.now, reverse=True)[:cap]
+        captured = [n.now for n in newest]
+        for t in captured:
+            if t not in self._turn_refs:
+                self._turn_refs.append(t)
+        return captured
+
+    def _stamp_refs(self, tag_str: str) -> str:
+        """Append this turn's captured refs to a derived-note tag (C4/C5).
+
+        The C5 guard: any ref with ts >= now-at-stamp-time is dropped — a
+        note can never cite itself, a same-turn sibling, or the future. Live
+        turns always pass (LLM latency >> 1 s); tests seed past `now=`
+        values. At most _REF_CAP_PER_NOTE ref words per note, capture order,
+        deduped against words already present. Canonical and structural
+        writers never call this (C4) — identity nodes carry no provenance.
+        """
+        if not self._turn_refs:
+            return tag_str
+        existing = set((tag_str or "").split())
+        cutoff = int(time.time())
+        stamped = []
+        for t in self._turn_refs:
+            if t >= cutoff:
+                continue
+            word = f"{TAG_REF}{t}"
+            if word in existing:
+                continue
+            existing.add(word)
+            stamped.append(word)
+            if len(stamped) >= _REF_CAP_PER_NOTE:
+                break
+        if not stamped:
+            return tag_str
+        return ((tag_str or "").strip() + " " + " ".join(stamped)).strip()
 
     # ------------------------------------------------------------------
     # Utility: JSON extraction from LLM prose
@@ -2125,6 +2319,28 @@ class RPJotEngine:
                 best = n
         return best
 
+    @staticmethod
+    def _parse_refs(tag_str: str) -> list:
+        """Extract cited epoch ints from a tag string (TS_CITATIONS C1).
+
+        Only well-formed `ref:{digits}` words parse; garbage (`ref:`,
+        `ref:abc`) is skipped silently — a malformed word is inert, never an
+        error. Order of appearance is preserved.
+        """
+        refs = []
+        for word in (tag_str or "").split():
+            if not word.startswith(TAG_REF):
+                continue
+            body = word[len(TAG_REF):]
+            if body.isdigit():
+                refs.append(int(body))
+        return refs
+
+    @staticmethod
+    def _format_refs(refs) -> str:
+        """Render ref ints as tag words — the C1 verbatim form, no padding."""
+        return " ".join(f"{TAG_REF}{int(t)}" for t in refs)
+
     def _bundle_from_notes(self, notes) -> ContextBundle:
         """Wrap an explicit note list in a transient ContextBundle (LM §3.6).
 
@@ -2140,6 +2356,40 @@ class RPJotEngine:
         """Non-canonical obj:{slug} sighting notes, in file/append order."""
         with NoteContext(Note.NOTEFILE, (SearchType.TAG, f"{TAG_OBJ}{slug}")) as nc:
             return [n for n in nc if not n.pwd.startswith(PWD_OBJECTS + "/")]
+
+    def _backlinks(self, ts: int) -> list:
+        """Notes citing entry `ts` — one TAG search for the literal ref word.
+
+        Named seam for tests and future tooling ("what cites this entry");
+        zero new semantics (TS_CITATIONS §3.3).
+        """
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.TAG, f"{TAG_REF}{int(ts)}")
+        ) as nc:
+            return list(nc)
+
+    def _deref_citations(self, bundle: ContextBundle) -> ContextBundle:
+        """Depth-1 citation dereference (TS_CITATIONS C6), mutating `bundle`.
+
+        Collects ref ints from the bundle's visible notes, adds at most
+        _REF_DEREF_CAP timestamps, and regenerates ONCE — never per-term
+        __iadd__ (each call rescans the whole notefile). Refs carried by the
+        dereferenced notes are NOT followed — cycle-safe by construction, no
+        visited-set. A dangling ref resolves to an empty TIMESTAMP match — a
+        silent no-op (C8). Wired into gather_pov_context only.
+        """
+        ref_ts = []
+        seen = set()
+        for n in bundle:
+            for t in self._parse_refs(n.tag):
+                if t not in seen:
+                    seen.add(t)
+                    ref_ts.append(t)
+        if not ref_ts:
+            return bundle
+        bundle.ts.update(ref_ts[:_REF_DEREF_CAP])
+        bundle._regen_notes()
+        return bundle
 
     def _object_canonical_description(self, slug: str) -> str:
         """Canonical description: newest note at the canonical pwd, with a legacy
@@ -2245,7 +2495,10 @@ class RPJotEngine:
         logger.debug(
             "[CTX] gather_pov_context(%s): querying %d terms", char_name, len(terms)
         )
-        return ContextBundle(terms)
+        # The one deref site (TS_CITATIONS §3.3): a note in this POV citing a
+        # prior entry pulls that entry verbatim into the character's context —
+        # provenance instead of a decaying paraphrase.
+        return self._deref_citations(ContextBundle(terms))
 
     def build_scene_context_map(self, focus_hint: str = "") -> dict:
         """Return per-character condensed context plus a shared location snapshot.
@@ -2412,7 +2665,16 @@ class RPJotEngine:
         else:
             notes = sorted(bundle, key=lambda n: n.now, reverse=True)
             note_count = len(notes)
-            parts = [n.context.strip() + "\n\n" + n.message.strip() for n in notes]
+            parts = []
+            for n in notes:
+                part = n.context.strip() + "\n\n" + n.message.strip()
+                # Provenance marker (TS_CITATIONS §3.3): tags are otherwise
+                # invisible at render time, so without this line a citation
+                # buys nothing when the prose model reads the note.
+                refs = self._parse_refs(n.tag)
+                if refs:
+                    part += "\n[refs: " + " ".join(str(t) for t in refs) + "]"
+                parts.append(part)
             text = "\n\n".join(parts).strip()
 
         raw_toks = _tok(text)
@@ -2497,6 +2759,8 @@ class RPJotEngine:
             "Summarize the following notes into the most narratively relevant facts.\n"
             "Preserve: the most recent description of each entity, key events, active "
             "character details, and any story-significant objects or clues.\n"
+            "If a fact carries a bracketed [refs: ...] marker, keep the marker "
+            "attached to that fact.\n"
             f"Target length: {target_toks} tokens. Reply with the condensed context "
             "only — no preamble, no explanation.\n\n"
             f"CONTEXT:\n{raw_text}"
@@ -2666,6 +2930,7 @@ class RPJotEngine:
 
         if self.session.current_scene:
             tag_str = f"{tag_str} {TAG_SCENE}{self.session.current_scene}"
+        tag_str = self._stamp_refs(tag_str)
 
         note = Note.jot(
             message=description,
@@ -3222,8 +3487,9 @@ class RPJotEngine:
         context_str = self._cache_get(cache_key)
         if context_str is None:
             ctx = self.gather_character_knowledge(name)
+            captured = self._cite(ctx)
             context_str = self.render_context(ctx, focus_hint=name)
-            self._cache_put(cache_key, context_str)
+            self._cache_put(cache_key, context_str, refs=captured)
         result = json.dumps(
             {
                 "character": context_str or f"[no notes found for character: {name}]",
@@ -3287,8 +3553,19 @@ class RPJotEngine:
             self._cache_put(cache_key, result)
             return result
 
+        sightings = self._object_sightings(slug)
         timeline = self.render_context(
-            self._bundle_from_notes(self._object_sightings(slug)), focus_hint=slug
+            self._bundle_from_notes(sightings), focus_hint=slug
+        )
+        # Cite the canonical node + the 2 newest sightings (TS §4 Phase 2) —
+        # together they are exactly the per-lookup cap of 3.
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_OBJECTS}/{slug}")
+        ) as nc:
+            canon_note = self._newest_by_now(list(nc))
+        newest_sightings = sorted(sightings, key=lambda n: n.now, reverse=True)[:2]
+        captured = self._cite(
+            ([canon_note] if canon_note is not None else []) + newest_sightings
         )
         result = json.dumps(
             {
@@ -3302,7 +3579,7 @@ class RPJotEngine:
                 ),
             }
         )
-        self._cache_put(cache_key, result)
+        self._cache_put(cache_key, result, refs=captured)
         logger.info("get_object result: %s → %s", slug, entry["residence"])
         return result
 
@@ -3339,6 +3616,7 @@ class RPJotEngine:
 
         roster = []  # all known character slugs
         matches = []  # full profiles for role-matching characters
+        match_notes = []  # matched profile notes — cited; the roster is not
 
         seen_pwds = set()
         seen_names = set()
@@ -3368,6 +3646,7 @@ class RPJotEngine:
                             "profile": note.message.strip(),
                         }
                     )
+                    match_notes.append(note)
 
         # NPC tracker: register any roster characters not yet tracked
         for char_name in roster:
@@ -3380,6 +3659,9 @@ class RPJotEngine:
                     turn=self._turn_count,
                 )
             self.npc_tracker.mark_saved(char_name)
+
+        if match_notes:
+            self._cite(match_notes)
 
         logger.info(
             "find_character: role=%r roster=%d matches=%d",
@@ -3433,6 +3715,7 @@ class RPJotEngine:
         # Intentionally unions all world/location notes with the query so the LLM
         # receives both established world lore and the specific match in one bundle.
         ctx = self.gather_context([PWD_WORLD, query])
+        self._cite(ctx)
         context_str = self.render_context(ctx, focus_hint=query)
         result = json.dumps(
             {
@@ -3514,7 +3797,7 @@ class RPJotEngine:
 
         private_note = Note.jot(
             message=content,
-            tag=witness_tags,
+            tag=self._stamp_refs(witness_tags),
             context=context or f"private knowledge: {', '.join(clean_witnesses)}",
             pwd=f"{PWD_EVENTS}/{self.session.location}",
         )
@@ -3540,7 +3823,7 @@ class RPJotEngine:
 
             public_note = Note.jot(
                 message=observable_act,
-                tag=public_tags,
+                tag=self._stamp_refs(public_tags),
                 context=(
                     f"observable act — non-witnesses: {', '.join(non_witnesses) or 'none'}"
                 ),
@@ -3656,6 +3939,7 @@ class RPJotEngine:
             )
 
         bundle = self.gather_context([f"{TAG_SCENE}{scene_name}"])
+        self._cite(bundle)
         context_str = self.render_context(bundle, focus_hint=scene_name)
 
         logger.info(
@@ -3747,7 +4031,7 @@ class RPJotEngine:
         tag_str = f"{TAG_CONS}{trait}"
         note = Note.jot(
             message=f"{description}\n\nBehavioral guidance: {behavioral_guidance}",
-            tag=tag_str,
+            tag=self._stamp_refs(tag_str),
             context=f"conscience: {character} — {trait}",
             pwd=f"{PWD_CONSCIENCE}/{character}",
         )
@@ -3885,7 +4169,7 @@ class RPJotEngine:
 
         note = Note.jot(
             message=insight,
-            tag=f"{TAG_YOMI}{character}",
+            tag=self._stamp_refs(f"{TAG_YOMI}{character}"),
             context=f"yomi: {self.main_character} → {character}",
             pwd=f"{PWD_YOMI}/{character}",
         )
@@ -3937,9 +4221,10 @@ class RPJotEngine:
         context_str = self._cache_get(cache_key)
         if context_str is None:
             bundle = ContextBundle(f"{PWD_YOMI}/{character}")
+            captured = self._cite(bundle)
             context_str = self.render_context(bundle, focus_hint=character)
             if context_str.strip():
-                self._cache_put(cache_key, context_str)
+                self._cache_put(cache_key, context_str, refs=captured)
         logger.info(
             "get_yomi: character=%s rendered=%d tok", character, _tok(context_str)
         )
@@ -3984,9 +4269,10 @@ class RPJotEngine:
         context_str = self._cache_get(cache_key)
         if context_str is None:
             bundle = self.gather_context([f"{PWD_CONSCIENCE}/{character}"])
+            captured = self._cite(bundle)
             context_str = self.render_context(bundle, focus_hint=character)
             if context_str.strip():
-                self._cache_put(cache_key, context_str)
+                self._cache_put(cache_key, context_str, refs=captured)
         logger.info(
             "get_conscience: character=%s rendered=%d tok", character, _tok(context_str)
         )
@@ -4115,7 +4401,7 @@ class RPJotEngine:
         pair = self._rel_key(char_a, char_b)
         note = Note.jot(
             message=f"Bond type: {bond_type}\n\n{description}",
-            tag=f"{TAG_REL}bond {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            tag=self._stamp_refs(f"{TAG_REL}bond {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"bond: {char_a} ↔ {char_b} ({bond_type})",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4163,7 +4449,7 @@ class RPJotEngine:
         pair = self._rel_key(char_a, char_b)
         note = Note.jot(
             message=f"{event}\n\nSignificance: {significance}",
-            tag=f"{TAG_REL}history {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            tag=self._stamp_refs(f"{TAG_REL}history {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"shared history: {char_a} ↔ {char_b}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4204,7 +4490,7 @@ class RPJotEngine:
         pair = self._rel_key(char_a, char_b)
         note = Note.jot(
             message=f"Pattern: {pattern}\n\n{description}",
-            tag=f"{TAG_REL}dynamic {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}",
+            tag=self._stamp_refs(f"{TAG_REL}dynamic {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"dynamic: {char_a} ↔ {char_b} ({pattern})",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4260,7 +4546,7 @@ class RPJotEngine:
         pair = self._rel_key(holder, subject)
         note = Note.jot(
             message=f"Holder: {holder} | Subject: {subject} | Basis: {basis}\n\n{description}",
-            tag=f"{TAG_REL}power {TAG_CHAR}{holder} {TAG_CHAR}{subject}",
+            tag=self._stamp_refs(f"{TAG_REL}power {TAG_CHAR}{holder} {TAG_CHAR}{subject}"),
             context=f"power dynamic: {holder} over {subject} ({basis})",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4310,7 +4596,7 @@ class RPJotEngine:
         awareness = "known to inflicter" if known_to_inflicter else "inflicter unaware"
         note = Note.jot(
             message=f"Inflicter: {inflicter} | Wounded: {wounded} | {awareness}\n\n{description}",
-            tag=f"{TAG_REL}wound {TAG_CHAR}{inflicter} {TAG_CHAR}{wounded}",
+            tag=self._stamp_refs(f"{TAG_REL}wound {TAG_CHAR}{inflicter} {TAG_CHAR}{wounded}"),
             context=f"wound: {inflicter} → {wounded}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4368,7 +4654,7 @@ class RPJotEngine:
             body += f"\n\nStakes: {stakes}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_REL}promise {TAG_CHAR}{promiser} {TAG_CHAR}{recipient}",
+            tag=self._stamp_refs(f"{TAG_REL}promise {TAG_CHAR}{promiser} {TAG_CHAR}{recipient}"),
             context=f"promise: {promiser} → {recipient}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4411,7 +4697,7 @@ class RPJotEngine:
         pair = self._rel_key(debtor, creditor)
         note = Note.jot(
             message=f"Debtor: {debtor} | Creditor: {creditor}\n\nOwed: {what_is_owed}\n\nOrigin: {origin}",
-            tag=f"{TAG_REL}debt {TAG_CHAR}{debtor} {TAG_CHAR}{creditor}",
+            tag=self._stamp_refs(f"{TAG_REL}debt {TAG_CHAR}{debtor} {TAG_CHAR}{creditor}"),
             context=f"debt: {debtor} owes {creditor}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4454,7 +4740,7 @@ class RPJotEngine:
         pair = self._rel_key(liar, target)
         note = Note.jot(
             message=f"Liar: {liar} | Target: {target}\n\nStatement: {statement}\n\nTruth: {truth}",
-            tag=f"{TAG_REL}lie {TAG_CHAR}{liar} {TAG_CHAR}{target}",
+            tag=self._stamp_refs(f"{TAG_REL}lie {TAG_CHAR}{liar} {TAG_CHAR}{target}"),
             context=f"lie: {liar} → {target}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4492,7 +4778,7 @@ class RPJotEngine:
         pair = self._rel_key(holder, subject)
         note = Note.jot(
             message=f"Holder: {holder} | Subject: {subject}\n\n{description}",
-            tag=f"{TAG_REL}leverage {TAG_CHAR}{holder} {TAG_CHAR}{subject}",
+            tag=self._stamp_refs(f"{TAG_REL}leverage {TAG_CHAR}{holder} {TAG_CHAR}{subject}"),
             context=f"leverage: {holder} over {subject}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4540,7 +4826,7 @@ class RPJotEngine:
             body += f"\n\nTriggered by: {trigger}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_REL}impression {TAG_CHAR}{observer} {TAG_CHAR}{subject}",
+            tag=self._stamp_refs(f"{TAG_REL}impression {TAG_CHAR}{observer} {TAG_CHAR}{subject}"),
             context=f"impression: {observer} of {subject}",
             pwd=f"{PWD_REL}/{pair}",
         )
@@ -4587,7 +4873,7 @@ class RPJotEngine:
             body += f"\n\nConcealed from: {concealed_from}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_INT}secret {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}secret {TAG_CHAR}{character}"),
             context=f"secret: {character}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4635,7 +4921,7 @@ class RPJotEngine:
             body += f"\n\nSubtext: {subtext}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_INT}desire {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}desire {TAG_CHAR}{character}"),
             context=f"desire: {character}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4676,7 +4962,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_record_longing: %r for %r", character, subject)
         note = Note.jot(
             message=f"Longing for: {subject}\n\n{description}",
-            tag=f"{TAG_INT}longing {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}longing {TAG_CHAR}{character}"),
             context=f"longing: {character} for {subject}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4725,7 +5011,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_record_jealousy: %r of %r", character, target)
         note = Note.jot(
             message=f"Envious of: {target} | Over: {subject_of_competition}\n\n{description}",
-            tag=f"{TAG_INT}jealousy {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}jealousy {TAG_CHAR}{character}"),
             context=f"jealousy: {character} of {target}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4766,7 +5052,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_record_mask: character=%r", character)
         note = Note.jot(
             message=f"Public persona: {public_persona}\n\nPrivate self: {private_self}",
-            tag=f"{TAG_INT}mask {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}mask {TAG_CHAR}{character}"),
             context=f"mask: {character}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4811,7 +5097,7 @@ class RPJotEngine:
             body += f"\n\nAimed at: {audience}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_INT}subtext {TAG_CHAR}{speaker}",
+            tag=self._stamp_refs(f"{TAG_INT}subtext {TAG_CHAR}{speaker}"),
             context=f"subtext: {speaker}",
             pwd=f"{PWD_INTERIOR}/{speaker}",
         )
@@ -4856,7 +5142,7 @@ class RPJotEngine:
             body += f"\n\nContext: {in_context}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_INT}reputation {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}reputation {TAG_CHAR}{character}"),
             context=f"reputation: {character}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4904,7 +5190,7 @@ class RPJotEngine:
             body += f"\n\nOrigin: {origin}"
         note = Note.jot(
             message=body,
-            tag=f"{TAG_INT}trigger {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}trigger {TAG_CHAR}{character}"),
             context=f"trigger: {character}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4948,7 +5234,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_record_unspoken: %r → %r", character, target)
         note = Note.jot(
             message=f"To: {target}\n\nUnsaid: {what_they_want_to_say}\n\nWhy unsaid: {why_unsaid}",
-            tag=f"{TAG_INT}unspoken {TAG_CHAR}{character}",
+            tag=self._stamp_refs(f"{TAG_INT}unspoken {TAG_CHAR}{character}"),
             context=f"unspoken: {character} → {target}",
             pwd=f"{PWD_INTERIOR}/{character}",
         )
@@ -4957,6 +5243,250 @@ class RPJotEngine:
         return json.dumps(
             {"character": character, "target": target, "status": "recorded"}
         )
+
+    # ── Consolidated relationship/interior recorders (TOOL_UNIFY U1) ──
+    #
+    # The 19 fine-grained rel:/int: tools above remain the storage
+    # implementations, but are hidden from the LLM-facing compact menu
+    # (_COMPACT_HIDDEN_TOOLS): the sessions tag census measured them at
+    # near-zero activation while costing 56% of the compact step-2 schema
+    # and acting as 19 distractors in every selection. These two kind-enum
+    # tools are the model's surface; they delegate so tags, pwd, cache
+    # drops, and reader visibility are byte-identical to the legacy tools.
+    # `power` (not `power_dynamic`) so the enum value matches the stored
+    # rel:power tag.
+
+    _REL_KINDS = (
+        "bond", "history", "dynamic", "power", "wound",
+        "promise", "debt", "lie", "leverage", "impression",
+    )
+    _INT_KINDS = (
+        "secret", "desire", "longing", "jealousy", "mask",
+        "subtext", "reputation", "trigger", "unspoken",
+    )
+
+    @rp_tool(
+        description=(
+            "Record a durable fact about the relationship BETWEEN two characters. "
+            "kind selects what it is: bond (what they are to each other), history "
+            "(shared past event), dynamic (recurring push-pull pattern), power "
+            "(who holds power and why), wound (emotional injury inflicted), "
+            "promise, debt, lie, leverage, or impression (one's assessment of the "
+            "other). char_a is always the actor or source — the holder, promiser, "
+            "debtor, liar, inflicter, or observer; char_b is the target or "
+            "recipient. description carries the main content; label is a short "
+            "kebab-case type tag (bond type / pattern / power basis); detail is "
+            "the second layer (significance, stakes, origin, the concealed truth)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": list(_REL_KINDS),
+                    "description": "Which relationship fact is being recorded",
+                },
+                "char_a": {
+                    "type": "string",
+                    "description": "Actor/source character slug (holder, promiser, debtor, liar, inflicter, observer)",
+                },
+                "char_b": {
+                    "type": "string",
+                    "description": "Target/recipient character slug",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "The main content — what is true, what happened, what is owed or claimed",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short kebab-case type label (bond type, pattern, power basis) — optional",
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Second layer: significance, stakes, origin, or the concealed truth — optional",
+                },
+            },
+            "required": ["kind", "char_a", "char_b", "description"],
+        },
+    )
+    def _tool_record_relationship(
+        self,
+        kind: str,
+        char_a: str,
+        char_b: str,
+        description: str,
+        label: str = "",
+        detail: str = "",
+    ) -> str:
+        logger.info(
+            "ENTER _tool_record_relationship: kind=%r %r ↔ %r", kind, char_a, char_b
+        )
+        delegates = {
+            "bond": lambda: self._tool_record_bond(
+                char_a, char_b,
+                bond_type=label or "unspecified",
+                description=description,
+            ),
+            "history": lambda: self._tool_record_history(
+                char_a, char_b,
+                event=description,
+                significance=detail or "(unspecified)",
+            ),
+            "dynamic": lambda: self._tool_record_dynamic(
+                char_a, char_b,
+                pattern=label or "unspecified",
+                description=description,
+            ),
+            "power": lambda: self._tool_record_power_dynamic(
+                holder=char_a, subject=char_b,
+                basis=label or "unspecified",
+                description=description,
+            ),
+            "wound": lambda: self._tool_record_wound(
+                inflicter=char_a, wounded=char_b, description=description,
+            ),
+            "promise": lambda: self._tool_record_promise(
+                promiser=char_a, recipient=char_b,
+                commitment=description, stakes=detail,
+            ),
+            "debt": lambda: self._tool_record_debt(
+                debtor=char_a, creditor=char_b,
+                what_is_owed=description,
+                origin=detail or "(unspecified)",
+            ),
+            "lie": lambda: self._tool_record_lie(
+                liar=char_a, target=char_b,
+                statement=description,
+                truth=detail or "(truth unrecorded)",
+            ),
+            "leverage": lambda: self._tool_record_leverage(
+                holder=char_a, subject=char_b, description=description,
+            ),
+            "impression": lambda: self._tool_record_impression(
+                observer=char_a, subject=char_b,
+                impression=description, trigger=detail,
+            ),
+        }
+        delegate = delegates.get(kind)
+        if delegate is None:
+            return json.dumps(
+                {
+                    "error": f"unknown kind: {kind}",
+                    "hint": "one of: " + ", ".join(self._REL_KINDS),
+                }
+            )
+        return delegate()
+
+    @rp_tool(
+        description=(
+            "Record one character's hidden interior life. kind selects what it "
+            "is: secret (actively concealed truth), desire (hidden agenda), "
+            "longing (suppressed yearning for someone), jealousy (envy over "
+            "something specific), mask (public persona vs private self), subtext "
+            "(what a statement really meant), reputation (how they are perceived "
+            "vs reality), trigger (stimulus causing involuntary reaction), or "
+            "unspoken (what they want to say but cannot). content is the private "
+            "material itself; target is the other person involved (concealed-"
+            "from, desired, longed-for, envied, or the audience); detail is the "
+            "counterpart layer (private self, actual meaning, reality, reaction, "
+            "why it stays unsaid)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": list(_INT_KINDS),
+                    "description": "Which interior fact is being recorded",
+                },
+                "character": {
+                    "type": "string",
+                    "description": "Whose interior this is (the speaker, for subtext)",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The primary material — the secret, desire, persona, statement, trigger, or unsaid thing",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Other person involved: concealed-from, desired, longed-for, envied, or audience — optional",
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Counterpart layer: private self, actual meaning, reality, reaction, why-unsaid — optional",
+                },
+            },
+            "required": ["kind", "character", "content"],
+        },
+    )
+    def _tool_record_interior(
+        self,
+        kind: str,
+        character: str,
+        content: str,
+        target: str = "",
+        detail: str = "",
+    ) -> str:
+        logger.info(
+            "ENTER _tool_record_interior: kind=%r character=%r", kind, character
+        )
+        delegates = {
+            "secret": lambda: self._tool_record_secret(
+                character, secret=content, concealed_from=target,
+            ),
+            "desire": lambda: self._tool_record_desire(
+                character, desire=content, target=target, subtext=detail,
+            ),
+            "longing": lambda: self._tool_record_longing(
+                character,
+                subject=target or "(unnamed)",
+                description=content,
+            ),
+            "jealousy": lambda: self._tool_record_jealousy(
+                character,
+                target=target or "(unnamed)",
+                subject_of_competition=detail or "(unspecified)",
+                description=content,
+            ),
+            "mask": lambda: self._tool_record_mask(
+                character,
+                public_persona=content,
+                private_self=detail or "(unspecified)",
+            ),
+            "subtext": lambda: self._tool_record_subtext(
+                speaker=character,
+                statement=content,
+                actual_meaning=detail or "(unspecified)",
+                audience=target,
+            ),
+            "reputation": lambda: self._tool_record_reputation(
+                character,
+                perceived_as=content,
+                reality=detail or "(unspecified)",
+                in_context=target,
+            ),
+            "trigger": lambda: self._tool_record_trigger(
+                character,
+                trigger=content,
+                reaction=detail or "(unspecified)",
+            ),
+            "unspoken": lambda: self._tool_record_unspoken(
+                character,
+                target=target or "(unnamed)",
+                what_they_want_to_say=content,
+                why_unsaid=detail or "(unspecified)",
+            ),
+        }
+        delegate = delegates.get(kind)
+        if delegate is None:
+            return json.dumps(
+                {
+                    "error": f"unknown kind: {kind}",
+                    "hint": "one of: " + ", ".join(self._INT_KINDS),
+                }
+            )
+        return delegate()
 
     @rp_tool(
         description=(

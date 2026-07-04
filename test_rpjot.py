@@ -1934,6 +1934,112 @@ class TestZeroCanonicalNudge(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12e-2. Per-turn timing telemetry — [TIMING] line + last_rounds (TOOL_UNIFY U0)
+# ---------------------------------------------------------------------------
+
+
+class TestTimingTelemetry(unittest.TestCase):
+    """run_turn emits one parseable [TIMING] line; steps track LLM-call counts."""
+
+    def _patched(self, rounds):
+        """Context: swap call_llm for a scripted fake; returns (engine, calls)."""
+        import rpjot as rpjot_module
+
+        calls = {"i": 0}
+
+        def fake_call_llm(messages, **kwargs):
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        return rpjot_module, original, eng, calls
+
+    def _record_event_round(self):
+        return {
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "record_event",
+                        "arguments": json.dumps(
+                            {"description": "paced the room", "tags": "exp:player"}
+                        ),
+                    },
+                }
+            ]
+        }
+
+    def test_timing_line_emitted_per_turn(self):
+        rounds = [
+            {"content": "WORLD STATE — the room"},  # step 1 text → 1 call
+            {"content": "nothing canonical"},  # step 2 text → 1 call
+            {"content": "The room stays quiet."},  # step 3 prose
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                eng.run_turn(
+                    "[MC attention] I glance around the room",
+                    [{"role": "system", "content": "rules"}],
+                    [{"role": "system", "content": "prose"}],
+                )
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING]" in m]
+        self.assertEqual(len(timing), 1)
+        self.assertRegex(
+            timing[0],
+            r"\[TIMING\] turn=1 step1=\d+\.\ds/1it "
+            r"step2=\d+\.\ds/1it step3=\d+\.\ds total=\d+\.\ds",
+        )
+
+    def test_step2_last_rounds_counts_calls(self):
+        rounds = [
+            self._record_event_round(),  # tool round
+            {"content": "done"},  # exit text
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            eng._compliance_step.run(
+                "[MC action]: I open the door",
+                "WORLD STATE: a room",
+                [{"role": "system", "content": "rules"}],
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(eng._compliance_step.last_rounds, 2)
+
+    def test_step1_last_rounds_single_text_call(self):
+        rounds = [{"content": "WORLD STATE — the room"}]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            eng._world_state_step.run("[MC attention] I look around")
+        finally:
+            mod.call_llm = original
+        self.assertEqual(eng._world_state_step.last_rounds, 1)
+
+    def test_step2_last_rounds_at_max_iterations(self):
+        # The fake repeats its final round, so the loop runs to the bound.
+        rounds = [self._record_event_round()]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            eng._compliance_step.run(
+                "[MC action]: I open the door",
+                "WORLD STATE: a room",
+                [{"role": "system", "content": "rules"}],
+                max_iterations=4,
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(eng._compliance_step.last_rounds, 4)
+
+
+# ---------------------------------------------------------------------------
 # 12e. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
@@ -1965,11 +2071,35 @@ class TestCompactSchemaKeepList(unittest.TestCase):
         self.assertIn("description", self._props("save_location")["name"])
 
     def test_non_keeplist_tool_has_no_param_descriptions(self):
-        for tool in ("record_bond", "record_mood", "save_object"):
+        # record_relationship/record_interior: the kind enum survives as
+        # structure, but no merged-tool param keeps its description.
+        for tool in (
+            "record_mood",
+            "save_yomi",
+            "begin_scene",
+            "record_relationship",
+            "record_interior",
+        ):
             for k, pdef in self._props(tool).items():
                 self.assertNotIn(
                     "description", pdef, f"{tool}.{k} kept a description"
                 )
+
+    def test_hidden_legacy_tools_absent_from_compact_menu(self):
+        # U1: the 19 fine-grained rel/int tools leave the LLM-facing menu but
+        # stay registered and dispatchable (safety net for old histories).
+        for name in self.engine._COMPACT_HIDDEN_TOOLS:
+            self.assertNotIn(name, self.compact)
+            self.assertIn(name, self.engine._step2_handlers)
+
+    def test_merged_tools_present_with_kind_enums(self):
+        rel_kind = self._props("record_relationship")["kind"]
+        int_kind = self._props("record_interior")["kind"]
+        self.assertEqual(tuple(rel_kind["enum"]), RPJotEngine._REL_KINDS)
+        self.assertEqual(tuple(int_kind["enum"]), RPJotEngine._INT_KINDS)
+
+    def test_compact_menu_is_fifteen_tools(self):
+        self.assertEqual(len(self.compact), 15)
 
     def test_compact_budget_under_3000(self):
         self.assertLessEqual(self.engine._cached_compact_step2_schema_toks, 3000)
@@ -1992,6 +2122,643 @@ class TestCompactSchemaKeepList(unittest.TestCase):
             if "description" in s["function"]
         }
         self.assertEqual(described, dict(keep))
+
+
+# ---------------------------------------------------------------------------
+# 12e-3. Consolidated recorders — record_relationship / record_interior (U1)
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidatedDispatch(unittest.TestCase):
+    """The merged kind-enum recorders delegate to the legacy writers.
+
+    The reader-visible contract — tag words and pwd — must be identical to
+    the legacy tools' output: readers key off pwd/tag, never tool names, so
+    storage stays byte-compatible while only the LLM-facing surface shrinks.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _dispatch(self, name, args):
+        return self.engine._dispatch_step2(name, json.dumps(args))
+
+    def _last_note(self):
+        notes = list(Note.iterate(Note.NOTEFILE))
+        self.assertTrue(notes, "no note was written")
+        return notes[-1]
+
+    def test_all_rel_kinds_write_legacy_tag_and_pwd(self):
+        from rpjot import PWD_REL
+
+        for kind in RPJotEngine._REL_KINDS:
+            with self.subTest(kind=kind):
+                result = self._dispatch(
+                    "record_relationship",
+                    {
+                        "kind": kind,
+                        "char_a": "evie",
+                        "char_b": "sam",
+                        "description": "a defining fact between them",
+                    },
+                )
+                self.assertNotIn("error", json.loads(result))
+                note = self._last_note()
+                words = note.tag.split()
+                self.assertIn(f"rel:{kind}", words)
+                self.assertIn("char:evie", words)
+                self.assertIn("char:sam", words)
+                self.assertEqual(note.pwd, f"{PWD_REL}/evie-sam")
+
+    def test_all_int_kinds_write_legacy_tag_and_pwd(self):
+        from rpjot import PWD_INTERIOR
+
+        for kind in RPJotEngine._INT_KINDS:
+            with self.subTest(kind=kind):
+                result = self._dispatch(
+                    "record_interior",
+                    {
+                        "kind": kind,
+                        "character": "evie",
+                        "content": "a private truth",
+                        "target": "sam",
+                        "detail": "the second layer",
+                    },
+                )
+                self.assertNotIn("error", json.loads(result))
+                note = self._last_note()
+                words = note.tag.split()
+                self.assertIn(f"int:{kind}", words)
+                self.assertIn("char:evie", words)
+                self.assertEqual(note.pwd, f"{PWD_INTERIOR}/evie")
+
+    def test_merged_bond_matches_legacy_bond_output(self):
+        self._dispatch(
+            "record_relationship",
+            {
+                "kind": "bond",
+                "char_a": "evie",
+                "char_b": "sam",
+                "description": "grew up together in the manor",
+                "label": "old-friends",
+            },
+        )
+        merged = self._last_note()
+        self._dispatch(
+            "record_bond",
+            {
+                "char_a": "evie",
+                "char_b": "sam",
+                "bond_type": "old-friends",
+                "description": "grew up together in the manor",
+            },
+        )
+        legacy = self._last_note()
+        self.assertEqual(merged.tag, legacy.tag)
+        self.assertEqual(merged.pwd, legacy.pwd)
+        self.assertEqual(merged.message, legacy.message)
+
+    def test_merged_subtext_matches_legacy_subtext_output(self):
+        self._dispatch(
+            "record_interior",
+            {
+                "kind": "subtext",
+                "character": "evie",
+                "content": "Lovely weather for a walk.",
+                "target": "sam",
+                "detail": "come with me, away from the others",
+            },
+        )
+        merged = self._last_note()
+        self._dispatch(
+            "record_subtext",
+            {
+                "speaker": "evie",
+                "statement": "Lovely weather for a walk.",
+                "actual_meaning": "come with me, away from the others",
+                "audience": "sam",
+            },
+        )
+        legacy = self._last_note()
+        self.assertEqual(merged.tag, legacy.tag)
+        self.assertEqual(merged.pwd, legacy.pwd)
+        self.assertEqual(merged.message, legacy.message)
+
+    def test_unknown_kind_returns_error_json(self):
+        result = self._dispatch(
+            "record_relationship",
+            {"kind": "nemesis", "char_a": "a", "char_b": "b", "description": "x"},
+        )
+        payload = json.loads(result)
+        self.assertIn("error", payload)
+        self.assertIn("bond", payload["hint"])
+        # Nothing may be written on a rejected kind.
+        self.assertEqual(len(list(Note.iterate(Note.NOTEFILE))), 0)
+
+    def test_omitted_optionals_still_produce_valid_notes(self):
+        result = self._dispatch(
+            "record_interior",
+            {"kind": "longing", "character": "evie", "content": "to be seen"},
+        )
+        self.assertNotIn("error", json.loads(result))
+        note = self._last_note()
+        self.assertIn("int:longing", note.tag.split())
+        self.assertTrue(note.message.strip())
+
+
+# ---------------------------------------------------------------------------
+# 12e-4. Entry citations — read side over seeded fixtures (TS_CITATIONS, U3)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryCitation(unittest.TestCase):
+    """C1/C3/C6/C7/C8 read-side contract over hand-seeded ref: fixtures.
+
+    No writers exist yet at this phase — refs only exist where the fixture
+    seeds them, exactly how TestObjectPermanence seeds obj: history.
+    """
+
+    T = 1_750_000_000
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_EVENTS, PWD_INTERIOR
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+
+        T = self.T
+        seeds = [
+            # grand-origin note — cited by the event, must NOT surface via
+            # depth-1 deref from the interior note (non-transitivity).
+            dict(
+                message="grand-origin note",
+                tag="exp:sam",
+                context="origin",
+                pwd=f"{PWD_EVENTS}/foyer",
+                now=T,
+            ),
+            # the betrayal event — outside evie's POV terms (exp:sam only).
+            dict(
+                message="Sam read Evie's letters aloud at the fountain.",
+                tag=f"exp:sam ref:{T}",
+                context="the betrayal",
+                pwd=f"{PWD_EVENTS}/foyer",
+                now=T + 100,
+            ),
+            # citing interior note — visible in evie's POV, cites the event.
+            dict(
+                message="Evie still carries the fountain betrayal.",
+                tag=f"int:secret char:evie ref:{T + 100}",
+                context="secret: evie",
+                pwd=f"{PWD_INTERIOR}/evie",
+                now=T + 200,
+            ),
+            # same-second twins (C3): one ref must resolve to both.
+            dict(
+                message="twin-A of the shared second",
+                tag="exp:sam",
+                context="twin",
+                pwd=f"{PWD_EVENTS}/foyer",
+                now=T + 300,
+            ),
+            dict(
+                message="twin-B of the shared second",
+                tag="exp:sam",
+                context="twin",
+                pwd=f"{PWD_EVENTS}/foyer",
+                now=T + 300,
+            ),
+            dict(
+                message="Evie wants what the twins had.",
+                tag=f"int:desire char:evie ref:{T + 300}",
+                context="desire: evie",
+                pwd=f"{PWD_INTERIOR}/evie",
+                now=T + 400,
+            ),
+            # dangling ref (C8): cites a second no note occupies.
+            dict(
+                message="Evie longs for a moment no record holds.",
+                tag=f"int:longing char:evie ref:{T + 900_000}",
+                context="longing: evie",
+                pwd=f"{PWD_INTERIOR}/evie",
+                now=T + 500,
+            ),
+        ]
+        for s in seeds:
+            Note.append(Note.NOTEFILE, Note.jot(**s))
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    # --- C1: form ---
+
+    def test_parse_refs_round_trip(self):
+        refs = RPJotEngine._parse_refs("int:secret ref:123 char:x ref:456")
+        self.assertEqual(refs, [123, 456])
+        self.assertEqual(RPJotEngine._format_refs(refs), "ref:123 ref:456")
+
+    def test_garbage_ref_words_skipped(self):
+        self.assertEqual(
+            RPJotEngine._parse_refs("ref: ref:abc ref:12x ref:-5 reference:9"),
+            [],
+        )
+
+    # --- flagship: deref pulls the cited entry into the POV ---
+
+    def test_citing_note_pulls_cited_event_into_pov(self):
+        bundle = self.engine.gather_pov_context("evie")
+        messages = [n.message for n in bundle]
+        self.assertTrue(
+            any("letters aloud" in m for m in messages),
+            "cited event was not dereferenced into the POV bundle",
+        )
+
+    def test_rendered_pov_carries_refs_marker(self):
+        bundle = self.engine.gather_pov_context("evie")
+        rendered = self.engine.render_context(bundle)
+        self.assertIn(f"[refs: {self.T + 100}]", rendered)
+
+    # --- C6: depth-1 only ---
+
+    def test_deref_is_not_transitive(self):
+        bundle = self.engine.gather_pov_context("evie")
+        messages = [n.message for n in bundle]
+        self.assertFalse(
+            any("grand-origin" in m for m in messages),
+            "depth-2 ref was followed — deref must stop at one hop",
+        )
+
+    def test_deref_cap_honored(self):
+        from rpjot import _REF_DEREF_CAP, PWD_EVENTS, PWD_INTERIOR
+
+        T2 = self.T + 10_000
+        for i in range(14):
+            Note.append(
+                Note.NOTEFILE,
+                Note.jot(
+                    message=f"capnote-{i}",
+                    tag="exp:sam",
+                    context="cap target",
+                    pwd=f"{PWD_EVENTS}/foyer",
+                    now=T2 + i,
+                ),
+            )
+        ref_words = " ".join(f"ref:{T2 + i}" for i in range(14))
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message="the over-citing note",
+                tag=f"int:secret char:overciter {ref_words}",
+                context="secret: overciter",
+                pwd=f"{PWD_INTERIOR}/overciter",
+                now=T2 + 500,
+            ),
+        )
+        bundle = self.engine.gather_pov_context("overciter")
+        cap_messages = [n.message for n in bundle if n.message.startswith("capnote-")]
+        self.assertEqual(len(cap_messages), _REF_DEREF_CAP)
+
+    # --- C3: multi-resolution ---
+
+    def test_same_second_ref_derefs_all(self):
+        bundle = self.engine.gather_pov_context("evie")
+        messages = " ".join(n.message for n in bundle)
+        self.assertIn("twin-A", messages)
+        self.assertIn("twin-B", messages)
+
+    # --- C8: durability / decay ---
+
+    def test_dangling_ref_is_silent_noop(self):
+        bundle = self.engine.gather_pov_context("evie")
+        rendered = self.engine.render_context(bundle)
+        # No crash, and the marker renders as-is for the dangling second.
+        self.assertIn(f"[refs: {self.T + 900_000}]", rendered)
+
+    # --- C7: inertness ---
+
+    def test_ref_words_inert_to_object_registry(self):
+        from rpjot import PWD_WORLD
+
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message="An iron key rests on the sill.",
+                tag=f"obj:iron-key ref:{self.T}",
+                context="sighting",
+                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                now=self.T + 600,
+            ),
+        )
+        registry = self.engine._object_registry()
+        self.assertIn("iron-key", registry)
+        self.assertEqual(
+            registry["iron-key"]["residence"].get("room"), "ravenwood-manor"
+        )
+
+    # --- backlinks seam ---
+
+    def test_backlinks_finds_citing_note(self):
+        backlinks = self.engine._backlinks(self.T + 100)
+        self.assertEqual(len(backlinks), 1)
+        self.assertIn("fountain betrayal", backlinks[0].message)
+
+
+# ---------------------------------------------------------------------------
+# 12e-5. Citation capture — targeted lookups + cache replay (TS §3.1/§3.4, U4)
+# ---------------------------------------------------------------------------
+
+
+class TestCitationCapture(unittest.TestCase):
+    """Targeted step-1 lookups capture provenance; cache hits replay it."""
+
+    T = 1_750_000_000
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_CHARS, PWD_OBJECTS, PWD_WORLD
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+
+        T = self.T
+        seeds = [
+            dict(
+                message="Evie, the youngest sister, sharp-eyed and careful.",
+                tag="char:evie",
+                context="profile",
+                pwd=f"{PWD_CHARS}/evie",
+                now=T,
+            ),
+            dict(
+                message="The iron key, cold and old.",
+                tag="obj:iron-key",
+                context="canonical",
+                pwd=f"{PWD_OBJECTS}/iron-key",
+                now=T + 100,
+            ),
+            dict(
+                message="The key sits on the mantel.",
+                tag="obj:iron-key",
+                context="sighting",
+                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                now=T + 200,
+            ),
+            dict(
+                message="Evie pockets the key.",
+                tag="obj:iron-key",
+                context="sighting",
+                pwd=f"{PWD_CHARS}/evie/inventory",
+                now=T + 300,
+            ),
+            dict(
+                message="The key changes hands again.",
+                tag="obj:iron-key",
+                context="sighting",
+                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                now=T + 400,
+            ),
+        ]
+        for s in seeds:
+            Note.append(Note.NOTEFILE, Note.jot(**s))
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine._turn_refs = []
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def test_targeted_lookup_captures_refs(self):
+        self.engine._tool_get_character("evie")
+        self.assertIn(self.T, self.engine._turn_refs)
+
+    def test_cache_hit_capture_parity(self):
+        self.engine._tool_get_character("evie")
+        first = list(self.engine._turn_refs)
+        self.assertTrue(first)
+        self.engine._turn_refs = []
+        self.engine._tool_get_character("evie")  # cache hit path
+        self.assertEqual(self.engine._turn_refs, first)
+
+    def test_cache_drop_evicts_ref_cache_in_lockstep(self):
+        self.engine._tool_get_character("evie")
+        self.assertIn("char:evie", self.engine._ref_cache)
+        self.engine._cache_drop("char:evie")
+        self.assertNotIn("char:evie", self.engine._ref_cache)
+
+    def test_get_object_cites_canonical_plus_two_newest_sightings(self):
+        self.engine._tool_get_object("iron-key")
+        # canonical (T+100) + the two newest sightings (T+400, T+300);
+        # the oldest sighting (T+200) is beyond the per-lookup cap.
+        self.assertIn(self.T + 100, self.engine._turn_refs)
+        self.assertIn(self.T + 400, self.engine._turn_refs)
+        self.assertIn(self.T + 300, self.engine._turn_refs)
+        self.assertNotIn(self.T + 200, self.engine._turn_refs)
+
+    def test_ambient_tools_capture_nothing(self):
+        import rpjot as rpjot_module
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = lambda *a, **k: {
+            "content": '{"description": "a quiet room", "mood": "calm"}'
+        }
+        try:
+            self.engine._tool_get_people_present()
+            self.engine._tool_examine_location()
+        finally:
+            rpjot_module.call_llm = original
+        self.assertEqual(self.engine._turn_refs, [])
+
+    def test_per_lookup_cap(self):
+        from rpjot import _REF_CAP_PER_LOOKUP, PWD_CHARS
+
+        for i in range(6):
+            Note.append(
+                Note.NOTEFILE,
+                Note.jot(
+                    message=f"More about Evie, part {i}.",
+                    tag="char:evie",
+                    context="profile addendum",
+                    pwd=f"{PWD_CHARS}/evie",
+                    now=self.T + 1000 + i,
+                ),
+            )
+        self.engine._tool_get_character("evie")
+        self.assertEqual(len(self.engine._turn_refs), _REF_CAP_PER_LOOKUP)
+
+
+# ---------------------------------------------------------------------------
+# 12e-6. Citation stamps — C4 scope + C5 guard on step-2 writers (U5)
+# ---------------------------------------------------------------------------
+
+
+class TestCitationStamps(unittest.TestCase):
+    """Derived-narrative writers stamp _turn_refs; canonical writers never do."""
+
+    T = 1_750_000_000
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_EVENTS
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+        # A past event other lookups could have surfaced this turn.
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message="Sam read Evie's letters aloud at the fountain.",
+                tag="exp:sam",
+                context="the betrayal",
+                pwd=f"{PWD_EVENTS}/foyer",
+                now=self.T,
+            ),
+        )
+        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine._turn_refs = [self.T]
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _dispatch(self, name, args):
+        return self.engine._dispatch_step2(name, json.dumps(args))
+
+    def _notes(self):
+        return list(Note.iterate(Note.NOTEFILE))
+
+    def test_record_event_stamps(self):
+        self._dispatch(
+            "record_event",
+            {"description": "Evie confronts Sam.", "tags": "exp:evie exp:sam"},
+        )
+        self.assertIn(f"ref:{self.T}", self._notes()[-1].tag.split())
+
+    def test_record_knowledge_stamps_both_notes(self):
+        self._dispatch(
+            "record_knowledge",
+            {
+                "content": "Evie admits she kept one letter.",
+                "witnesses": ["evie"],
+                "observable_act": "Evie murmurs something to herself.",
+            },
+        )
+        private, public = self._notes()[-2], self._notes()[-1]
+        self.assertIn(f"ref:{self.T}", private.tag.split())
+        self.assertIn(f"ref:{self.T}", public.tag.split())
+
+    def test_merged_relationship_stamps(self):
+        # I-3: delegation through record_relationship preserves stamping.
+        self._dispatch(
+            "record_relationship",
+            {
+                "kind": "wound",
+                "char_a": "sam",
+                "char_b": "evie",
+                "description": "The reading-aloud still stings.",
+            },
+        )
+        words = self._notes()[-1].tag.split()
+        self.assertIn("rel:wound", words)
+        self.assertIn(f"ref:{self.T}", words)
+
+    def test_canonical_and_structural_writers_stamp_nothing(self):
+        self._dispatch(
+            "save_character",
+            {"name": "winnie", "description": "The steady housekeeper."},
+        )
+        self._dispatch(
+            "save_location",
+            {"name": "east-parlor", "description": "Dust and velvet."},
+        )
+        self._dispatch(
+            "begin_scene",
+            {"name": "confrontation", "description": "Evie corners Sam."},
+        )
+        for note in self._notes()[1:]:  # skip the seeded event
+            self.assertFalse(
+                [w for w in note.tag.split() if w.startswith("ref:")],
+                f"canonical/structural note stamped a ref: {note.tag}",
+            )
+
+    def test_future_and_same_second_refs_dropped_at_stamp(self):
+        import time as _time
+
+        self.engine._turn_refs = [int(_time.time()) + 100]
+        self._dispatch(
+            "record_event",
+            {"description": "Nothing cites the future.", "tags": "exp:evie"},
+        )
+        self.assertFalse(
+            [w for w in self._notes()[-1].tag.split() if w.startswith("ref:")]
+        )
+
+    def test_per_note_cap(self):
+        from rpjot import _REF_CAP_PER_NOTE
+
+        self.engine._turn_refs = [self.T + i for i in range(_REF_CAP_PER_NOTE + 3)]
+        self._dispatch(
+            "record_event",
+            {"description": "A heavily sourced event.", "tags": "exp:evie"},
+        )
+        ref_words = [
+            w for w in self._notes()[-1].tag.split() if w.startswith("ref:")
+        ]
+        self.assertEqual(len(ref_words), _REF_CAP_PER_NOTE)
+
+    def test_stamp_dedupes_existing_word(self):
+        stamped = self.engine._stamp_refs(f"exp:evie ref:{self.T}")
+        self.assertEqual(stamped.split().count(f"ref:{self.T}"), 1)
+
+    def test_no_ref_in_any_schema(self):
+        # C2: no tool schema exposes, accepts, or describes citations.
+        blob = json.dumps(
+            self.engine._step1_schemas
+            + self.engine._step2_schemas
+            + self.engine._compact_step2_schemas
+        )
+        self.assertNotIn("ref:", blob)
+
+    def test_stamped_knowledge_derefs_into_pov(self):
+        # End-to-end write→read over the mocked pipeline: a stamped private
+        # note pulls the cited event into the witness's POV next lookup.
+        self._dispatch(
+            "record_knowledge",
+            {"content": "Evie admits she kept one letter.", "witnesses": ["evie"]},
+        )
+        bundle = self.engine.gather_pov_context("evie")
+        messages = [n.message for n in bundle]
+        self.assertTrue(any("letters aloud" in m for m in messages))
 
 
 # ---------------------------------------------------------------------------
@@ -2412,6 +3179,96 @@ class TestSynthesisSeams(unittest.TestCase):
         self.assertTrue(
             ComplianceStep._ZERO_CANONICAL_NUDGE.startswith("[DIRECTIVE] ")
         )
+
+    def _run_batching_loop(self, rounds, followup_by_call=None):
+        """Drive ComplianceStep.run with scripted rounds; returns messages seen
+        by the final LLM call (the fullest view of the loop's transcript)."""
+        import rpjot as rpjot_module
+
+        calls = {"i": 0, "last_msgs": None}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["last_msgs"] = [dict(m) for m in messages]
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        n = {"i": 0}
+
+        def fake_dispatch(name, args):
+            n["i"] += 1
+            instruction = (
+                followup_by_call[n["i"] - 1]
+                if followup_by_call
+                else "gather more before narrating"
+            )
+            payload = {"ok": True}
+            if instruction:
+                payload["followup_instruction"] = instruction
+            return json.dumps(payload)
+
+        eng._dispatch_step2 = fake_dispatch
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            eng._compliance_step.run(
+                "[MC action]: I act",
+                "WORLD",
+                [{"role": "system", "content": "rules"}],
+            )
+        finally:
+            rpjot_module.call_llm = original
+        return calls["last_msgs"]
+
+    def _tool_round(self, count):
+        return {
+            "tool_calls": [
+                {
+                    "id": f"c{k}",
+                    "type": "function",
+                    "function": {"name": "record_event", "arguments": "{}"},
+                }
+                for k in range(count)
+            ]
+        }
+
+    def test_multi_tool_round_batches_one_directive(self):
+        # U6: two tool calls with followups in ONE round → exactly one
+        # [DIRECTIVE] message, placed after contiguous tool results.
+        msgs = self._run_batching_loop(
+            [self._tool_round(2), {"content": "done"}],
+            followup_by_call=["first instruction", "second instruction"],
+        )
+        directives = [
+            m for m in msgs
+            if m.get("role") == "user"
+            and str(m.get("content")).startswith("[DIRECTIVE]")
+        ]
+        self.assertEqual(len(directives), 1)
+        self.assertIn("first instruction", directives[0]["content"])
+        self.assertIn("second instruction", directives[0]["content"])
+        # Tool results are contiguous: no user message between them.
+        roles = [m.get("role") for m in msgs]
+        first_tool = roles.index("tool")
+        self.assertEqual(roles[first_tool : first_tool + 2], ["tool", "tool"])
+
+    def test_repeated_instruction_deduped_across_rounds(self):
+        # The same verbatim followup in round 2 is dropped (per-turn dedupe).
+        msgs = self._run_batching_loop(
+            [self._tool_round(1), self._tool_round(1), {"content": "done"}],
+            followup_by_call=[
+                "gather more before narrating",
+                "gather more before narrating",
+            ],
+        )
+        directives = [
+            m for m in msgs
+            if m.get("role") == "user"
+            and str(m.get("content")).startswith("[DIRECTIVE]")
+        ]
+        self.assertEqual(len(directives), 1)
 
 
 # ---------------------------------------------------------------------------
