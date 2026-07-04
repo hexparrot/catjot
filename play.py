@@ -14,17 +14,20 @@ from rpjot import (
     RPJotEngine,
     LLMError,
     PWD_SUMMARIES,
+    PWD_EVENTS,
+    PWD_SCENES,
     TAG_LOC,
     PWD_WORLD,
     PWD_YOMI,
     PWD_REL,
     PWD_INTERIOR,
+    MAX_TOKENS_CONDENSE,
     _STEP3_SYSTEM,
     MODEL_CONTEXT_LIMIT_TOKS,
     _RESPONSE_RESERVE_TOKS,
     _msg_toks,
 )
-from catjot import Note, ContextBundle, call_llm
+from catjot import Note, ContextBundle, NoteContext, SearchType, call_llm
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -471,6 +474,170 @@ def seed_digest_from_summaries(engine, step2_messages, step3_messages):
     logger.info("[HIST] seeded STORY SO FAR from %d summary notes", len(notes))
 
 
+# ---------------------------------------------------------------------------
+# True resume — restore last location, participants, and scene from the notes
+# ---------------------------------------------------------------------------
+
+
+def _newest_under(search_pair):
+    """Return the most-recently-appended note matching *search_pair*, or None.
+
+    Ties on `now` (same-second appends) resolve to the last note in file order,
+    since NoteContext yields chronologically and we keep replacing on `>=`.
+    """
+    best = None
+    with NoteContext(Note.NOTEFILE, search_pair) as nc:
+        for note in nc:
+            if best is None or note.now >= best.now:
+                best = note
+    return best
+
+
+def _location_node_exists(path: str) -> bool:
+    """True if a canonical /story/location/{path} node exists (exact match)."""
+    if not path:
+        return False
+    with NoteContext(Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{path}")) as nc:
+        return len(nc) > 0
+
+
+def recover_deterministic_state():
+    """Recover (location, scene) from the note file — no LLM, runs pre-engine.
+
+    Location: the room suffix of the newest note under PWD_EVENTS (every
+    navigate_to / record_event / yomi note lands at /story/events/{room}).
+    Scene: the name suffix of the newest note under PWD_SCENES (begin_scene).
+    Either is None when the file has no such notes (e.g. a seed-only session).
+    """
+    location = None
+    ev = _newest_under((SearchType.TREE, PWD_EVENTS))
+    if ev and ev.pwd.startswith(PWD_EVENTS + "/"):
+        location = ev.pwd.removeprefix(PWD_EVENTS + "/").strip("/") or None
+
+    scene = None
+    sc = _newest_under((SearchType.TREE, PWD_SCENES))
+    if sc and sc.pwd.startswith(PWD_SCENES + "/"):
+        scene = sc.pwd.removeprefix(PWD_SCENES + "/").split("/")[0] or None
+
+    logger.info("[RESUME] deterministic recovery: location=%s scene=%s", location, scene)
+    return location, scene
+
+
+_RESUME_INFER_MODEL_TOKS = MAX_TOKENS_CONDENSE
+
+
+def infer_resume_state(engine, det_location):
+    """Infer non-persisted live state (cast, mood, attention) from summaries.
+
+    people_present, mood and attention are never written to the note file, so
+    they can only be reconstructed by reading the story. One LLM pass over the
+    newest summaries returns them as JSON. The deterministic room is handed in
+    as ground truth. Returns None on any failure (no summaries, LLM error, or
+    unparseable reply) so the caller degrades to deterministic-only recovery.
+    """
+    bundle = ContextBundle(PWD_SUMMARIES)
+    notes = sorted(bundle, key=lambda n: n.now, reverse=True)[:_SEED_SUMMARY_COUNT]
+    if not notes:
+        return None
+    # Oldest-first so the recap reads in chronological order.
+    raw = "\n\n".join(
+        f"[{n.context.strip()}] {n.message.strip()}" for n in reversed(notes)
+    )
+    prompt = (
+        "You are restoring the live state of a paused roleplay session from its "
+        "most recent turn summaries (oldest first).\n"
+        f"The last room recorded in the event log is: {det_location or 'unknown'}.\n"
+        "Reply with a SINGLE JSON object and nothing else:\n"
+        '{"location": "<room slug — the event-log room unless the summaries '
+        'clearly show a later move>", "people_present": ["<character slugs '
+        'sharing the scene with the player, excluding mc>"], "mood": '
+        '{"<slug>": "<one- or two-word emotional state>"}, "attention": '
+        '{"<slug>": "<who or what they are focused on>"}}\n'
+        "Use lowercase-hyphenated slugs. Omit characters who have left the scene. "
+        "When unsure, use an empty list or object.\n\n"
+        f"SUMMARIES:\n{raw}"
+    )
+    try:
+        response = call_llm(
+            [{"role": "user", "content": prompt}],
+            max_tokens=_RESUME_INFER_MODEL_TOKS,
+        )
+        content = response.get("content", "")
+        _, cleaned = engine.strip_think_tags(content)
+        data = engine.extract_json_from_response(cleaned)
+        if not isinstance(data, dict):
+            return None
+        logger.info("[RESUME] inferred state: %s", data)
+        return data
+    except Exception as exc:  # LLM error or unparseable JSON — degrade gracefully
+        logger.warning(
+            "[RESUME] inference failed (%s); using deterministic state only", exc
+        )
+        return None
+
+
+def apply_resume_state(engine, det_location, det_scene, inferred):
+    """Commit recovered state onto the engine (mirrors _remark_location's commit).
+
+    Deterministic location is authoritative; an inferred location overrides it
+    only when it canonicalizes to an already-existing node (never mint a phantom
+    room on resume). People/mood/attention come from inference. The scene is
+    re-entered (current_scene set) without writing a new scene-header note, so
+    the story continues mid-scene.
+    """
+    inferred = inferred or {}
+    sess = engine.session
+
+    # --- Location -----------------------------------------------------------
+    base = det_location or sess.location
+    path = base
+    proposed = inferred.get("location")
+    if proposed:
+        canon = engine._canonicalize_room(str(proposed), base)
+        if canon and canon != base and _location_node_exists(canon):
+            path = canon
+    if path and path != sess.location:
+        engine._ensure_location_node(path)
+        sess.location = path
+        sess.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
+        engine._cache_drop("social_map")
+
+    # --- People present (not persisted; inferred). MC is always present. -----
+    people = {"mc"}
+    for slug in inferred.get("people_present") or []:
+        s = str(slug).strip().lower()
+        if s and s != "mc":
+            people.add(s)
+    sess.people_present = people
+    engine._cache_drop("social_map")  # social map depends on the (now restored) cast
+    for slug in people:
+        if not engine.npc_tracker.is_registered(slug):
+            engine.npc_tracker.register(slug, slug, location=sess.location, turn=0)
+        engine.npc_tracker.mark_present(slug, location=sess.location, turn=0)
+
+    # --- Mood / attention: keep only entries for the present cast. -----------
+    def _present_only(d):
+        if not isinstance(d, dict):
+            return {}
+        return {k: v for k, v in d.items() if k in people}
+
+    sess.mood = _present_only(inferred.get("mood"))
+    sess.attention = _present_only(inferred.get("attention"))
+
+    # --- Scene: re-enter without a new scene-header note. --------------------
+    if det_scene:
+        sess.current_scene = det_scene
+
+    # First turn must rebuild the system doc for the restored scene/location.
+    engine._system_refresh_pending = True
+    logger.info(
+        "[RESUME] applied: loc=%s scene=%s present=%s",
+        sess.location,
+        sess.current_scene,
+        sorted(sess.people_present),
+    )
+
+
 def game_loop(engine, seed_summaries=False):
     """Main game loop using the 3-step pipeline."""
     step2_messages = build_step2_initial_messages()
@@ -648,6 +815,43 @@ def game_loop(engine, seed_summaries=False):
 # ---------------------------------------------------------------------------
 
 
+_OPENING_DESCRIPTION = (
+    "The story opens at the exterior of Ravenwood Manor. The player character has "
+    "just arrived having been dropped off and the taxi now fully out of sight."
+)
+
+
+def _resume_engine():
+    """Reconstruct the engine at the last visited location, cast, and scene.
+
+    Deterministic recovery (location + scene) runs before construction so the
+    engine boots at the right room; inference then restores the non-persisted
+    cast/mood/attention. A seed-only session (no scene note) falls back to the
+    opening scene, matching a fresh start.
+    """
+    det_location, det_scene = recover_deterministic_state()
+    engine = RPJotEngine(
+        location=det_location or "ravenwood-manor",
+        people_present={"mc"},
+    )
+    engine.register_all_tools()
+    engine.init_pipeline()
+
+    inferred = infer_resume_state(engine, det_location)
+    apply_resume_state(engine, det_location, det_scene, inferred)
+
+    if det_scene is None:
+        # Never played past turn 0 — bootstrap the opening scene as a new game.
+        engine._tool_begin_scene("opening", _OPENING_DESCRIPTION)
+
+    print(
+        f"Resumed at: {engine.session.location} | "
+        f"present: {', '.join(sorted(engine.session.people_present))} | "
+        f"scene: {engine.session.current_scene or '(none)'}"
+    )
+    return engine
+
+
 def create_session() -> str:
     """Copy seed.jot into a fresh timestamped session file and return its path."""
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
@@ -696,20 +900,18 @@ def main():
 
     set_session_file(session_file)
 
-    engine = RPJotEngine(
-        location="ravenwood-manor",
-        people_present={"mc"},
-    )
-    engine.register_all_tools()
-    engine.init_pipeline()
-
-    # Bootstrap the opening scene so current_scene is never empty from turn one.
-    engine._tool_begin_scene(
-        "opening",
-        "The story opens at the exterior of Ravenwood Manor. The player character has just arrived "
-        "having been dropped off and the taxi now fully out of sight.",
-    )
-    engine._system_refresh_pending = False
+    if resuming:
+        engine = _resume_engine()
+    else:
+        engine = RPJotEngine(
+            location="ravenwood-manor",
+            people_present={"mc"},
+        )
+        engine.register_all_tools()
+        engine.init_pipeline()
+        # Bootstrap the opening scene so current_scene is never empty from turn one.
+        engine._tool_begin_scene("opening", _OPENING_DESCRIPTION)
+        engine._system_refresh_pending = False
 
     # On resume, seed the STORY SO FAR digest from prior /summaries so the model
     # has story recall from turn one (S1).

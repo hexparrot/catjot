@@ -2596,6 +2596,210 @@ class TestResumeDigestSeeding(unittest.TestCase):
             os.remove(empty)
 
 
+class TestTrueResume(unittest.TestCase):
+    """True resume: restore last location, cast, and scene from the note file."""
+
+    def setUp(self):
+        import tempfile
+        from rpjot import PWD_EVENTS, PWD_SCENES, PWD_WORLD, PWD_SUMMARIES
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+
+        def add(pwd, tag, msg, now, context="ctx"):
+            Note.append(
+                Note.NOTEFILE,
+                Note.jot(message=msg, tag=tag, context=context, pwd=pwd, now=now),
+            )
+
+        # Canonical location nodes (so canonicalization/existence checks work).
+        for room in ("foyer", "garden", "manor/study"):
+            add(f"{PWD_WORLD}/{room}", f"loc:{room}", f"{room} node.", now=100)
+        # Movement/event trail — newest event lands in manor/study.
+        add(f"{PWD_EVENTS}/foyer", "nav", "Arrived in foyer.", now=200)
+        add(f"{PWD_EVENTS}/garden", "nav", "Walked to garden.", now=300)
+        add(f"{PWD_EVENTS}/manor/study", "nav", "Entered study.", now=400)
+        # Scene trail — newest scene is the study conversation.
+        add(f"{PWD_SCENES}/opening", "scene:opening", "Opening.", now=210)
+        add(f"{PWD_SCENES}/study-talk", "scene:study-talk", "Study talk.", now=410)
+        # Turn summaries so infer has something to read.
+        for i in range(3):
+            add(PWD_SUMMARIES, "summary", f"Turn {i} in the study with Evie.", now=500 + i)
+
+        self.PWD_EVENTS = PWD_EVENTS
+        self.PWD_SCENES = PWD_SCENES
+        self.PWD_WORLD = PWD_WORLD
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    # --- recover_deterministic_state ---------------------------------------
+
+    def test_recover_returns_newest_location_and_scene(self):
+        import play
+
+        location, scene = play.recover_deterministic_state()
+        self.assertEqual(location, "manor/study")
+        self.assertEqual(scene, "study-talk")
+
+    def test_recover_empty_file_is_none(self):
+        import play
+        import tempfile
+
+        saved = Note.NOTEFILE
+        fd, empty = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = empty
+        try:
+            self.assertEqual(play.recover_deterministic_state(), (None, None))
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(empty)
+
+    # --- infer_resume_state -------------------------------------------------
+
+    def _engine_at(self, location="manor/study"):
+        return _make_engine(location=location, people={"mc"})
+
+    def test_infer_parses_llm_json(self):
+        import play
+        from unittest.mock import patch
+
+        engine = self._engine_at()
+        payload = (
+            '{"location": "manor/study", "people_present": ["evie"], '
+            '"mood": {"evie": "wary"}, "attention": {"evie": "mc"}}'
+        )
+        with patch.object(play, "call_llm", return_value={"content": payload}):
+            data = play.infer_resume_state(engine, "manor/study")
+        self.assertEqual(data["people_present"], ["evie"])
+        self.assertEqual(data["mood"], {"evie": "wary"})
+
+    def test_infer_bad_json_returns_none(self):
+        import play
+        from unittest.mock import patch
+
+        engine = self._engine_at()
+        with patch.object(play, "call_llm", return_value={"content": "no json here"}):
+            self.assertIsNone(play.infer_resume_state(engine, "manor/study"))
+
+    def test_infer_llm_error_returns_none(self):
+        import play
+        from unittest.mock import patch
+
+        engine = self._engine_at()
+        with patch.object(play, "call_llm", side_effect=RuntimeError("boom")):
+            self.assertIsNone(play.infer_resume_state(engine, "manor/study"))
+
+    def test_infer_no_summaries_returns_none(self):
+        import play
+        import tempfile
+        from unittest.mock import patch
+
+        saved = Note.NOTEFILE
+        fd, empty = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = empty
+        try:
+            engine = self._engine_at()
+            with patch.object(play, "call_llm") as m:
+                self.assertIsNone(play.infer_resume_state(engine, "foyer"))
+                m.assert_not_called()  # short-circuits before any LLM call
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(empty)
+
+    # --- apply_resume_state -------------------------------------------------
+
+    def test_apply_commits_deterministic_location(self):
+        import play
+
+        engine = self._engine_at(location="foyer")
+        play.apply_resume_state(engine, "manor/study", "study-talk", None)
+        self.assertEqual(engine.session.location, "manor/study")
+        self.assertTrue(
+            any("manor/study" in d for d in engine.session.location_context.dirs)
+        )
+        self.assertTrue(engine._system_refresh_pending)
+
+    def test_apply_restores_cast_mood_attention_filtered(self):
+        import play
+
+        engine = self._engine_at(location="manor/study")
+        inferred = {
+            "location": "manor/study",
+            "people_present": ["evie", "MC"],
+            "mood": {"evie": "wary", "ghost": "angry"},  # ghost not present
+            "attention": {"evie": "mc"},
+        }
+        play.apply_resume_state(engine, "manor/study", "study-talk", inferred)
+        self.assertEqual(engine.session.people_present, {"mc", "evie"})
+        self.assertEqual(engine.session.mood, {"evie": "wary"})  # ghost dropped
+        self.assertEqual(engine.session.attention, {"evie": "mc"})
+        self.assertTrue(engine.npc_tracker.is_registered("evie"))
+
+    def test_apply_reenters_scene_without_new_note(self):
+        import play
+
+        def scene_note_count():
+            with NoteContext_TREE(self.PWD_SCENES) as n:
+                return len(n)
+
+        before = scene_note_count()
+        engine = self._engine_at(location="manor/study")
+        play.apply_resume_state(engine, "manor/study", "study-talk", None)
+        self.assertEqual(engine.session.current_scene, "study-talk")
+        self.assertEqual(scene_note_count(), before)  # no scene-header appended
+
+    def test_apply_inferred_location_override_gated_by_node(self):
+        import play
+
+        # Existing node → override accepted.
+        engine = self._engine_at(location="foyer")
+        play.apply_resume_state(
+            engine, "foyer", "study-talk", {"location": "garden"}
+        )
+        self.assertEqual(engine.session.location, "garden")
+
+        # Phantom room → override rejected, deterministic room kept.
+        engine2 = self._engine_at(location="foyer")
+        play.apply_resume_state(
+            engine2, "foyer", "study-talk", {"location": "atlantis"}
+        )
+        self.assertEqual(engine2.session.location, "foyer")
+
+    # --- end-to-end ---------------------------------------------------------
+
+    def test_resume_engine_end_to_end(self):
+        import play
+        from unittest.mock import patch
+
+        payload = (
+            '{"location": "manor/study", "people_present": ["evie"], '
+            '"mood": {"evie": "guarded"}, "attention": {}}'
+        )
+        with patch.object(play, "call_llm", return_value={"content": payload}):
+            engine = play._resume_engine()
+        self.assertEqual(engine.session.location, "manor/study")
+        self.assertEqual(engine.session.current_scene, "study-talk")
+        self.assertEqual(engine.session.people_present, {"mc", "evie"})
+        self.assertEqual(engine.session.mood, {"evie": "guarded"})
+        self.assertTrue(engine._system_refresh_pending)
+
+
+def NoteContext_TREE(path):
+    """Small helper: open a NoteContext over a directory subtree for counting."""
+    from catjot import NoteContext, SearchType
+
+    return NoteContext(Note.NOTEFILE, (SearchType.TREE, path))
+
+
 # ---------------------------------------------------------------------------
 # 13. _condense_context -- live LLM + fallback behavior
 # ---------------------------------------------------------------------------
