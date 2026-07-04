@@ -1913,6 +1913,66 @@ class TestCastDrift(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12c-bis. Location drift observability — LOCDRIFT / [REMARK] action log
+# ---------------------------------------------------------------------------
+
+
+class TestLocationDriftObservability(unittest.TestCase):
+    """LOCDRIFT warnings surface in headers + /stats; [REMARK] always logs."""
+
+    def _engine(self):
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        return eng
+
+    def test_no_warning_no_header_block(self):
+        eng = self._engine()
+        self.assertEqual(eng._loc_warning_line(), "")
+        msg = eng._world_state_step._build_initial_message("[MC action]: I wait")
+        self.assertNotIn("LOCATION WARNING", msg)
+
+    def test_warning_surfaces_in_both_headers_and_stats(self):
+        eng = self._engine()
+        eng._loc_warn("event filed at manor/gallery but session is manor/foyer")
+        initial = eng._world_state_step._build_initial_message("[MC action]: hm")
+        seeded = eng._world_state_step._build_seeded_message(
+            "[MC action]: hm", "WORLD STATE: ..."
+        )
+        report = eng.scene_debug_report()
+        for text in (initial, seeded, report):
+            self.assertIn("LOCATION WARNING", text)
+            self.assertIn("manor/gallery", text)
+
+    def test_loc_warn_logs_locdrift(self):
+        eng = self._engine()
+        with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+            eng._loc_warn("drift detail")
+        self.assertTrue(any("[LOCDRIFT]" in line for line in cm.output))
+
+    def test_remark_logs_action_no_line(self):
+        eng = self._engine()
+        with self.assertLogs("rpjot_engine", level="INFO") as cm:
+            eng._remark_location("[MC speaks aloud]: 'hi'", "WORLD STATE: ...")
+        self.assertTrue(any("action=no-line" in line for line in cm.output))
+
+    def test_remark_logs_action_unchanged(self):
+        eng = self._engine()
+        with self.assertLogs("rpjot_engine", level="INFO") as cm:
+            eng._remark_location(
+                "[MC speaks aloud]: 'hi'", "CURRENT ROOM: UNCHANGED\nWORLD STATE:"
+            )
+        self.assertTrue(any("action=unchanged" in line for line in cm.output))
+
+    def test_remark_logs_action_mobile_defer(self):
+        eng = self._engine()
+        with self.assertLogs("rpjot_engine", level="INFO") as cm:
+            eng._remark_location(
+                "[MC action]: I walk into the garden", "CURRENT ROOM: UNCHANGED"
+            )
+        self.assertTrue(any("action=mobile-defer" in line for line in cm.output))
+
+
+# ---------------------------------------------------------------------------
 # 12d. Zero-canonical nudge — ComplianceStep (W6 / T2)
 # ---------------------------------------------------------------------------
 

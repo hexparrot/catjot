@@ -581,6 +581,18 @@ class WorldStateStep:
         # delta path. Read by run_turn to finalize seed hit/miss status.
         self.last_seed_used = False
 
+    def _warning_block(self) -> str:
+        """Cast + location drift warnings for the SCENE STATE header, or ''."""
+        warnings = [
+            w
+            for w in (
+                self.engine._cast_warning_line(),
+                self.engine._loc_warning_line(),
+            )
+            if w
+        ]
+        return "\n" + "\n".join(warnings) + "\n" if warnings else ""
+
     def _build_initial_message(self, classified_input: str) -> str:
         sess = self.engine.session
         present = ", ".join(sorted(sess.people_present)) or "none"
@@ -588,8 +600,7 @@ class WorldStateStep:
 
         baseline = self._build_baseline_context(classified_input)
 
-        cast_warning = self.engine._cast_warning_line()
-        cast_block = f"\n{cast_warning}\n" if cast_warning else ""
+        cast_block = self._warning_block()
 
         return (
             f"SCENE STATE:\n"
@@ -619,8 +630,7 @@ class WorldStateStep:
         present = ", ".join(sorted(sess.people_present)) or "none"
         roster = self.engine.npc_tracker.roster_summary()
 
-        cast_warning = self.engine._cast_warning_line()
-        cast_block = f"\n{cast_warning}\n" if cast_warning else ""
+        cast_block = self._warning_block()
 
         return (
             f"SCENE STATE:\n"
@@ -1328,6 +1338,11 @@ class RPJotEngine:
         # from people_present. Detection only; surfaced in /stats and the next
         # step-1 SCENE STATE header, cleared when the discrepancy resolves.
         self._cast_warnings: list = []
+        # Location-drift warnings (LM follow-up, cast-drift pattern): filed-vs-
+        # session divergences that were NOT auto-committed. Reset at run_turn
+        # start; surfaced in /stats and both step-1 headers via
+        # _loc_warning_line. [LOCDRIFT] log tag.
+        self._loc_warnings: list = []
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -1804,27 +1819,50 @@ class RPJotEngine:
             if raw and raw.upper() != "UNCHANGED":
                 proposed = raw
 
+        # One always-emitted structured line per turn: the live-session
+        # blindness was not knowing whether step 1 said UNCHANGED, omitted the
+        # line, or proposed a room the canonicalizer rejected.
+        def _log(action, path=None):
+            logger.info(
+                "[REMARK] line=%s proposed=%r canonical=%s action=%s",
+                "present" if m else "absent",
+                proposed,
+                path,
+                action,
+            )
+
         # Decoupling gate: defer to navigate_to on mobile self-moves.
         if not ComplianceStep._is_stationary_turn(classified_input):
+            _log("mobile-defer")
             return world_doc
 
         path = None
+        source = "committed"
         # 1. Step-1 structured line (primary — scene understanding, not lexical).
         if proposed is not None:
             path = self._canonicalize_room(proposed, self.session.location)
         # 2. Gated deterministic extraction (fallback) — only on a led cue.
         if path is None and self._has_led_cue(classified_input):
             path = self._extract_led_room(classified_input)
+            source = "lexical-committed" if path else source
 
         # 3. Fail-safe — nothing confident, or already there.
         if not path or path == self.session.location:
+            if path:
+                _log("same-room", path)
+            elif proposed is not None:
+                _log("canon-none")
+            elif m:
+                _log("unchanged")
+            else:
+                _log("no-line")
             return world_doc
 
         self._ensure_location_node(path)
         self.session.location = path
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
         self._cache_drop("social_map")
-        logger.info("[REMARK] session.location → %s", path)
+        _log(source, path)
         return world_doc
 
     def run_turn(
@@ -1879,7 +1917,10 @@ class RPJotEngine:
         world_doc = self._remark_location(classified_input, world_doc)
         t1 = time.perf_counter()
 
-        # Step 2
+        # Step 2. Location-drift warnings clear here, not at run_turn start:
+        # producers live in step 2, so a warning must survive through the NEXT
+        # turn's step-1 header (and the idle seed build) before going stale.
+        self._loc_warnings = []
         canonical_results, accumulated_think = self._compliance_step.run(
             classified_input, world_doc, step2_messages
         )
@@ -2094,6 +2135,17 @@ class RPJotEngine:
             f"{'is' if len(self._cast_warnings) == 1 else 'are'} "
             "not in people_present — call set_people_present if the cast changed."
         )
+
+    def _loc_warn(self, message: str) -> None:
+        """Record a location-drift warning (cast-drift pattern, LOCDRIFT tag)."""
+        self._loc_warnings.append(message)
+        logger.warning("[LOCDRIFT] %s", message)
+
+    def _loc_warning_line(self) -> str:
+        """One-line location-drift warning for headers/reports, or '' if none."""
+        if not self._loc_warnings:
+            return ""
+        return "LOCATION WARNING: " + "; ".join(self._loc_warnings)
 
     def init_pipeline(self) -> None:
         """Instantiate the 3-step pipeline objects. Call after register_all_tools()."""
@@ -6295,10 +6347,13 @@ class RPJotEngine:
         )
         lines.append(HDR)
 
-        # ── CAST DRIFT WARNING ───────────────────────────────────────────
+        # ── CAST / LOCATION DRIFT WARNINGS ───────────────────────────────
         cast_warning = self._cast_warning_line()
         if cast_warning:
             lines.append(f"\n⚠  {cast_warning}")
+        loc_warning = self._loc_warning_line()
+        if loc_warning:
+            lines.append(f"\n⚠  {loc_warning}")
 
         # ── LOCATION HIERARCHY ───────────────────────────────────────────
         lines.append("\nLOCATION HIERARCHY")
