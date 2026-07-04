@@ -14,7 +14,9 @@ Stop on first failure:
 """
 
 import json
+import logging
 import os
+import threading
 import unittest
 
 from catjot import Note, ContextBundle
@@ -2562,12 +2564,83 @@ class TestIdleWorker(unittest.TestCase):
             thread = play.start_idle_work(eng, [])
             self.assertIsNotNone(thread)
             self.assertTrue(thread.daemon)
+            self.assertEqual(thread.name, play._BGConsoleGate.THREAD_NAME)
             thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
+            # Gate attached to the rpjot console handler(s), not the file one.
+            for h in play._rpjot_console_handlers():
+                self.assertIn(play._BG_GATE, h.filters)
         finally:
+            for h in play._rpjot_console_handlers():
+                h.removeFilter(play._BG_GATE)
             restore()
         self.assertEqual(called, [1])
         self.assertIn("spec_s", eng._bg_stats)
+
+
+class TestBGConsoleGate(unittest.TestCase):
+    """Idle-thread console logs are withheld at the prompt, replayed at join."""
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    def _gated_logger(self, name):
+        import play
+
+        gate = play._BGConsoleGate()
+        capture = self._Capture()
+        capture.addFilter(gate)
+        test_logger = logging.getLogger(name)
+        test_logger.setLevel(logging.DEBUG)
+        test_logger.propagate = False
+        test_logger.addHandler(capture)
+        self.addCleanup(test_logger.removeHandler, capture)
+        return gate, capture, test_logger
+
+    def _log_from_idle_thread(self, fn):
+        import play
+
+        worker = threading.Thread(target=fn, name=play._BGConsoleGate.THREAD_NAME)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+
+    def test_gate_buffers_idle_thread_and_passes_main(self):
+        gate, capture, test_logger = self._gated_logger("test-bg-gate")
+        self._log_from_idle_thread(lambda: test_logger.info("from idle thread"))
+        self.assertEqual(capture.records, [])  # withheld from console
+        self.assertEqual(len(gate.buffer), 1)  # ...but buffered
+
+        test_logger.info("from main thread")
+        self.assertEqual(len(capture.records), 1)  # main passes through
+        self.assertEqual(len(gate.buffer), 1)  # untouched
+
+    def test_gate_flush_replays_in_order_and_clears(self):
+        gate, capture, test_logger = self._gated_logger("test-bg-gate-flush")
+
+        def log_three():
+            for i in range(3):
+                test_logger.info("bg record %d", i)
+
+        self._log_from_idle_thread(log_three)
+        self.assertEqual(len(gate.buffer), 3)
+
+        gate.flush_to([capture])  # main thread → passes the filter
+        self.assertEqual(len(capture.records), 3)
+        self.assertEqual(gate.buffer, [])
+        self.assertEqual(capture.records[0].getMessage(), "bg record 0")
+        self.assertEqual(capture.records[2].getMessage(), "bg record 2")
+
+    def test_console_handler_helper_excludes_file_handler(self):
+        import play
+
+        for h in play._rpjot_console_handlers():
+            self.assertNotIsInstance(h, logging.FileHandler)
 
 
 # ---------------------------------------------------------------------------

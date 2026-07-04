@@ -371,6 +371,58 @@ def refresh_system_message(engine, step2_messages):
 # ---------------------------------------------------------------------------
 
 
+class _BGConsoleGate(logging.Filter):
+    """Hold console log records emitted by the idle worker; replay at join.
+
+    The background thread runs while the player reads/types at the input()
+    prompt — its INFO/DEBUG stream garbles the prompt and reads like the
+    engine acting on its own. Attached to the rpjot stderr handler ONLY (the
+    per-session debug file still receives everything live), this filter
+    buffers any record logged from the idle thread and game_loop replays the
+    batch right after the player submits, so console debugging stays complete
+    but never interleaves with reading/typing.
+
+    Thread-safety: appends happen on the worker thread; the swap-and-replay
+    happens on the main thread strictly after join() — a happens-before
+    barrier, so no lock is needed.
+    """
+
+    THREAD_NAME = "rpjot-idle"
+
+    def __init__(self):
+        super().__init__()
+        self.buffer = []
+
+    def filter(self, record):
+        if threading.current_thread().name == self.THREAD_NAME:
+            self.buffer.append(record)
+            return False
+        return True
+
+    def flush_to(self, handlers):
+        """Replay buffered records through handlers (main thread → passes filter)."""
+        buffered, self.buffer = self.buffer, []
+        for handler in handlers:
+            for record in buffered:
+                handler.handle(record)
+
+
+_BG_GATE = _BGConsoleGate()
+
+
+def _rpjot_console_handlers():
+    """The rpjot logger's console handler(s) — excludes the debug-file handler.
+
+    FileHandler subclasses StreamHandler, hence the explicit exclusion.
+    """
+    return [
+        h
+        for h in _rpjot_module.logger.handlers
+        if isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+    ]
+
+
 def _idle_worker(engine, step2_messages):
     """Idle-window work, run while the player sits at the input() prompt.
 
@@ -403,8 +455,16 @@ def start_idle_work(engine, step2_messages):
     """
     if not (_BG_SEED or _BG_REFRESH):
         return None
+    # Gate the rpjot console handler against this thread's log stream
+    # (idempotent — addFilter once). The debug file is left ungated.
+    for h in _rpjot_console_handlers():
+        if _BG_GATE not in h.filters:
+            h.addFilter(_BG_GATE)
     thread = threading.Thread(
-        target=_idle_worker, args=(engine, step2_messages), daemon=True
+        target=_idle_worker,
+        args=(engine, step2_messages),
+        daemon=True,
+        name=_BGConsoleGate.THREAD_NAME,
     )
     thread.start()
     return thread
@@ -827,6 +887,15 @@ def game_loop(engine, seed_summaries=False):
             wait_s = time.perf_counter() - t_join
             if isinstance(engine._bg_stats, dict):
                 engine._bg_stats["wait_s"] = wait_s
+            # Replay the idle worker's console logs now that the player has
+            # submitted — grouped behind a marker instead of interleaving
+            # with the prompt. The debug file already has them live.
+            if _BG_GATE.buffer:
+                _rpjot_module.logger.debug(
+                    "[BG] --- %d idle-window log record(s) follow ---",
+                    len(_BG_GATE.buffer),
+                )
+                _BG_GATE.flush_to(_rpjot_console_handlers())
 
         classified = classify_input(user_input)
 
