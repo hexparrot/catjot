@@ -61,6 +61,9 @@ _SYSTEM_REFRESH_TEMPERATURE = 0.9
 # step-1 prompt shape and wants its own A/B.
 _BG_SEED = os.environ.get("RPJOT_BG_SEED", "") == "1"
 _BG_REFRESH = os.environ.get("RPJOT_BG_REFRESH", "") == "1"
+# Stream step-3 prose to the console token-by-token (perceived latency:
+# reading starts ~1s after step 2 instead of after the full generation).
+_STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
 
 _PARAPHRASE_INSTRUCTION = (
     "You are a narrator-briefing editor. "
@@ -303,6 +306,28 @@ def display_narrative(narrative):
     print("\n" + "=" * 60)
     print(narrative)
     print("=" * 60 + "\n")
+
+
+def make_stream_printer(engine):
+    """Printer for engine.prose_stream_cb (RPJOT_STREAM).
+
+    Prints the top border on the turn's first displayed chunk (keyed off
+    engine._prose_streamed, which ProseStep resets each turn and sets True
+    just before the first emit — so no printer-side state to reset), then
+    streams chunks unbuffered.
+    """
+
+    def _print_chunk(text):
+        if not engine._prose_streamed:
+            print("\n" + "=" * 60)
+        print(text, end="", flush=True)
+
+    return _print_chunk
+
+
+def finish_streamed_narrative():
+    """Close the border after a streamed narrative (body already printed)."""
+    print("\n" + "=" * 60 + "\n")
 
 
 def display_think(think):
@@ -760,6 +785,8 @@ def game_loop(engine, seed_summaries=False):
     # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
     engine.seed_enabled = _BG_SEED
     bg_thread = None
+    if _STREAM:
+        engine.prose_stream_cb = make_stream_printer(engine)
 
     def _avg_pair_toks():
         return (sum(pair_sizes) / len(pair_sizes)) if pair_sizes else None
@@ -902,11 +929,17 @@ def game_loop(engine, seed_summaries=False):
         try:
             narrative = engine.run_turn(classified, step2_messages, step3_messages)
         except LLMError as exc:
+            if engine._prose_streamed:
+                print()  # break the partial streamed line before the error
             print(f"[LLM error: {exc}]")
             continue
 
         if not narrative:
             logger.warning("[NARRATIVE] empty narrative from step 3")
+            if engine._prose_streamed:
+                # Live display showed text the post-hoc strip dropped
+                # (orphaned-tag edge) — close its border first.
+                finish_streamed_narrative()
             display_narrative("(The narrator fell silent.)")
             step2_messages.append({"role": "user", "content": classified})
             step2_messages.append({"role": "assistant", "content": "(no response)"})
@@ -921,7 +954,13 @@ def game_loop(engine, seed_summaries=False):
             bg_thread = start_idle_work(engine, step2_messages)
             continue
 
-        display_narrative(narrative)
+        if engine._prose_streamed:
+            # Body already on screen token-by-token; just close the border.
+            finish_streamed_narrative()
+        else:
+            # Flag off, or the streamed call displayed nothing (all-think
+            # response) — full fallback print.
+            display_narrative(narrative)
 
         note = Note.jot(
             message=narrative,

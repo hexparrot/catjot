@@ -2790,6 +2790,115 @@ class TestStreamThinkGate(unittest.TestCase):
         self.assertEqual(shown, "He said <then> we left")
 
 
+class TestProseStreaming(unittest.TestCase):
+    """ProseStep streams through the gate to prose_stream_cb when set."""
+
+    _RAW = "<think>plan it</think>\n\nThe gallery hums softly."
+
+    def _patched(self, honor_streaming=True):
+        import rpjot as rpjot_module
+
+        captured = {}
+
+        def fake_call_llm(messages, **kwargs):
+            captured["on_token"] = kwargs.get("on_token")
+            on_token = kwargs.get("on_token")
+            if honor_streaming and on_token is not None:
+                # Feed awkward chunks to exercise the gate in situ.
+                for i in range(0, len(self._RAW), 7):
+                    on_token(self._RAW[i : i + 7])
+                return {"role": "assistant", "content": self._RAW}
+            return {"role": "assistant", "content": self._RAW}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        return rpjot_module, original, eng, captured
+
+    def _run_step3(self, eng):
+        return eng._prose_step.run(
+            "[MC action]: I wave",
+            "WORLD STATE: a room",
+            [],
+            [],
+            [{"role": "system", "content": "prose"}],
+        )
+
+    def test_streams_clean_prose_and_sets_flag(self):
+        mod, original, eng, captured = self._patched()
+        chunks = []
+        eng.prose_stream_cb = chunks.append
+        try:
+            narrative = self._run_step3(eng)
+        finally:
+            mod.call_llm = original
+        self.assertIsNotNone(captured["on_token"])
+        self.assertTrue(eng._prose_streamed)
+        self.assertEqual("".join(chunks), "The gallery hums softly.")
+        self.assertEqual(narrative, "The gallery hums softly.")  # canonical path
+
+    def test_no_callback_means_no_streaming(self):
+        mod, original, eng, captured = self._patched()
+        try:
+            narrative = self._run_step3(eng)
+        finally:
+            mod.call_llm = original
+        self.assertIsNone(captured["on_token"])
+        self.assertFalse(eng._prose_streamed)
+        self.assertEqual(narrative, "The gallery hums softly.")
+
+    def test_all_think_response_streams_nothing(self):
+        import rpjot as rpjot_module
+
+        raw = "<think>only reasoning, no prose"
+
+        def fake_call_llm(messages, **kwargs):
+            on_token = kwargs.get("on_token")
+            if on_token is not None:
+                for i in range(0, len(raw), 5):
+                    on_token(raw[i : i + 5])
+            return {"role": "assistant", "content": raw}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        chunks = []
+        eng.prose_stream_cb = chunks.append
+        try:
+            narrative = self._run_step3(eng)
+        finally:
+            rpjot_module.call_llm = original
+        self.assertEqual(chunks, [])
+        self.assertFalse(eng._prose_streamed)  # play falls back to full print
+        self.assertEqual(narrative, "")
+
+    def test_stream_printer_borders_and_flag_gating(self):
+        import io
+        import play
+        from contextlib import redirect_stdout
+
+        eng = _make_engine()
+        printer = play.make_stream_printer(eng)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            eng._prose_streamed = False
+            printer("First ")  # border printed (flag still False here)
+            eng._prose_streamed = True  # ProseStep flips it after first emit
+            printer("chunk.")
+        text = out.getvalue()
+        self.assertEqual(text.count("=" * 60), 1)  # top border exactly once
+        self.assertIn("First chunk.", text.replace("\n", ""))
+
+    def test_stream_flag_off_leaves_cb_unset(self):
+        import play
+
+        self.assertFalse(play._STREAM)  # env not set in the test run
+        eng = _make_engine()
+        self.assertIsNone(eng.prose_stream_cb)
+
+
 # ---------------------------------------------------------------------------
 # 12i. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------

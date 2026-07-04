@@ -1240,6 +1240,31 @@ class ProseStep:
             prose_messages, schema_overhead=engine._cached_bare_schema_toks
         )
 
+        # Live streaming (RPJOT_STREAM): tokens flow through a think gate to
+        # the play loop's printer as they arrive. The canonical narrative is
+        # still the strip_think_tags result of the FULL accumulated text —
+        # streaming shapes only what is shown live. On a mid-stream
+        # RequestException, partial prose may already be on screen; the
+        # LLMError surfaces after it, same contract as today.
+        engine._prose_streamed = False
+        on_token = None
+        if engine.prose_stream_cb is not None:
+            gate = _StreamThinkGate()
+            t_start = time.perf_counter()
+
+            def on_token(text, _gate=gate, _t0=t_start):
+                display = _gate.feed(text)
+                if display:
+                    if not engine._prose_streamed:
+                        logger.debug(
+                            "[STREAM] first token: %.1fs",
+                            time.perf_counter() - _t0,
+                        )
+                    # Callback BEFORE the flag flips: the printer keys the
+                    # turn's top border off _prose_streamed being False.
+                    engine.prose_stream_cb(display)
+                    engine._prose_streamed = True
+
         try:
             response_msg = call_llm(
                 prose_messages,
@@ -1247,6 +1272,7 @@ class ProseStep:
                 tool_choice="none",
                 temperature=STEP3_TEMPERATURE,
                 max_tokens=MAX_TOKENS_STEP3,
+                on_token=on_token,
             )
         except requests.exceptions.RequestException as exc:
             raise LLMError(str(exc)) from None
@@ -1312,6 +1338,13 @@ class RPJotEngine:
         self._seed: dict | None = None
         self._seed_status: str = "off"
         self._bg_stats: dict | None = None
+        # Prose streaming (RPJOT_STREAM): the play loop sets prose_stream_cb
+        # to a str-consuming printer; ProseStep streams the step-3 call
+        # through a _StreamThinkGate into it. _prose_streamed tells the play
+        # loop whether anything was actually displayed live this turn (False
+        # → it falls back to the normal full display).
+        self.prose_stream_cb = None
+        self._prose_streamed: bool = False
         self.main_character = main_character
         self.session = SessionState(
             location=location,
