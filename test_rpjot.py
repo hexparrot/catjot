@@ -3723,7 +3723,7 @@ class TestObjectPermanence(unittest.TestCase):
         self._seed_through(3)
         eng = self._engine()
         lines = eng._objects_here_lines(self.ROOM_B, {"player", self.HOLDER})
-        self.assertIn(f"held — {self.HOLDER}: {self.SLUG}", lines)
+        self.assertIn(f"last seen with {self.HOLDER}: {self.SLUG}", lines)
 
     def test_p3_inventory_note_absent_from_pov_context(self):
         self._seed_through(3)

@@ -12,10 +12,17 @@ It measures a 2×2 factorial — does the nudge_pos_desc precedent transfer to
 place_object, and does the [OBJECTS HERE] vocabulary block have a tool-selection
 side-effect beyond its naming purpose:
 
-  baseline     no fn-desc,  no [OBJECTS HERE] block   (control)
-  fn_desc      place_object fn-desc one-liner in the compact schema, no block
-  objects_here no fn-desc,  [OBJECTS HERE] block injected into the world state
-  fn_desc+oh   both — the proposed production config
+  baseline        no fn-desc, no block                          (control)
+  fn_desc         place_object fn-desc one-liner, no block
+  oh_v1           no fn-desc, ORIGINAL "OBJECTS HERE" block      (the collapse arm)
+  oh_v2           no fn-desc, reworded "KNOWN OBJECTS" block
+  fn_desc+oh_v1   fn-desc + original block
+  fn_desc+oh_v2   fn-desc + reworded block  (proposed production config)
+
+The v1/v2 pair A/Bs the vocabulary-block FRAMING in one run: the first sweep
+showed the original "in this room" state framing collapsed place_object on the
+strongest model (qwen3-235b pos 9/12 -> 0/12), read as "already tracked". v2
+reframes it as a name registry + "last seen" (residence IS the newest sighting).
 
 Unlike bakeoff_navnudge there is NO CLASSIFIER knob: the arms are schema/context
 variants applied UNCONDITIONALLY, not injections gated on a per-turn label.
@@ -76,10 +83,24 @@ PLACE_FUNCTION_DESC = (
 )
 
 # The deterministic vocabulary block (canonical slugs). Its primary job is I9
-# naming; the sweep measures any tool-selection side-effect.
-OBJECTS_HERE_BLOCK = (
+# naming; the sweep measures any tool-selection side-effect. Two framings are
+# A/B'd IN ONE RUN so any recovery is attributable to the reword, not cross-run
+# drift:
+#   V1 — the original "OBJECTS HERE / in this room" state framing. In the first
+#        sweep it collapsed place_object on qwen3-235b (pos 9/12 -> 0/12): the
+#        strong model read "currently here" as "already tracked, no need to log".
+#   V2 — the shipped reword: a name registry + "last seen" (residence is derived
+#        from the newest sighting, so it is genuinely last-known, not current).
+#        Deliberately adds NO place_object call-to-action, so the A/B isolates
+#        the framing from the fn_desc lever.
+OBJECTS_HERE_BLOCK_V1 = (
     "[OBJECTS HERE] (canonical slugs — reuse these exact names):\n"
     "in this room: locket, iron-key, lantern, music-box, satchel"
+)
+OBJECTS_HERE_BLOCK_V2 = (
+    "[KNOWN OBJECTS] (canonical slugs — reuse these exact spellings; last-known "
+    "locations for continuity, not a record of what happened this turn):\n"
+    "last seen in this room: locket, iron-key, lantern, music-box, satchel"
 )
 
 # --- The corpus: bucket + ground truth (expects_place). Every positive noun
@@ -104,7 +125,19 @@ CORPUS = [
          text="The guards confiscate my satchel and drag me to the cells."),
 ]
 
-ARMS = ["baseline", "fn_desc", "objects_here", "fn_desc+oh"]
+# arm -> (place fn-desc present?, [KNOWN OBJECTS] block or None). oh_v1 reproduces
+# the original block (should re-collapse 235b, confirming block-not-noise); oh_v2
+# and fn_desc+oh_v2 test the reword. fn_desc+oh_v2 is the proposed production
+# config.
+ARM_SPEC = {
+    "baseline":       (False, None),
+    "fn_desc":        (True,  None),
+    "oh_v1":          (False, OBJECTS_HERE_BLOCK_V1),
+    "oh_v2":          (False, OBJECTS_HERE_BLOCK_V2),
+    "fn_desc+oh_v1":  (True,  OBJECTS_HERE_BLOCK_V1),
+    "fn_desc+oh_v2":  (True,  OBJECTS_HERE_BLOCK_V2),
+}
+ARMS = list(ARM_SPEC)
 
 
 def bucket_of(phrase):
@@ -195,17 +228,16 @@ def _capped(fn, timeout):
 def selected_calls(engine, phrase, arm):
     """One production-shape step-2 call under `arm`; return [(name, args_dict)].
 
-    The arm is applied unconditionally (no per-turn classification): fn_desc
-    controls place_object's compact fn-description; objects_here injects the
-    vocabulary block into the world state briefing."""
-    with_desc = arm in ("fn_desc", "fn_desc+oh")
-    with_block = arm in ("objects_here", "fn_desc+oh")
+    The arm is applied unconditionally (no per-turn classification): the fn-desc
+    flag controls place_object's compact fn-description; the block (V1 or V2, or
+    None) is injected into the world state briefing."""
+    with_desc, block = ARM_SPEC[arm]
     tools = _compact_schemas(engine, with_desc)
 
     rules = str(ContextBundle("system_role")).strip() or (
         "You are the game master. Use tools to record canon."
     )
-    world = WORLD_DOC + (f"\n\n{OBJECTS_HERE_BLOCK}" if with_block else "")
+    world = WORLD_DOC + (f"\n\n{block}" if block else "")
     parts = [
         f"WORLD STATE BRIEFING:\n{world}",
         f"NARRATOR RULE: {engine._NARRATOR_RULE}",
@@ -354,24 +386,47 @@ def main():
         row += f"{('0%' if not p['expects_place'] else '100%'):>7}"
         print(row)
 
-    # ---- the §4.3 decision: does the fn-desc one-liner clear the bar? ----
+    # ---- decision 1 (§4.3): does the fn-desc one-liner clear the bar? ----
     def _rate(a, group):  # group: 0=pos, 1=neg, 2=fb
         g = agg[a][group]
         return (g[0] / g[1]) if g[1] else 0.0
 
-    print("\nDECISION (§4.3): ship the place_object fn-desc iff it wins "
-          "mention-negative\nwithout losing pickup/handover (vs the same "
-          "[OBJECTS HERE] condition).")
+    print("\nDECISION 1 (§4.3): ship the place_object fn-desc iff it wins "
+          "mention-negative\nwithout losing pickup/handover (vs the same block "
+          "condition).")
     for base, desc, label in (
-        ("baseline", "fn_desc", "no [OBJECTS HERE]"),
-        ("objects_here", "fn_desc+oh", "with [OBJECTS HERE]"),
+        ("baseline", "fn_desc", "no block"),
+        ("oh_v2", "fn_desc+oh_v2", "with [KNOWN OBJECTS] v2"),
     ):
         neg_win = _rate(desc, 1) >= _rate(base, 1)
         pos_hold = _rate(desc, 0) >= _rate(base, 0) - 1e-9
         verdict = "SHIP" if (neg_win and pos_hold) else "HOLD"
-        print(f"  {label:<20} {base} -> {desc}: "
+        print(f"  {label:<24} {base} -> {desc}: "
               f"neg {pct(*agg[base][1])}->{pct(*agg[desc][1])}  "
               f"pos {pct(*agg[base][0])}->{pct(*agg[desc][0])}  => {verdict}")
+
+    # ---- decision 2: does the [KNOWN OBJECTS] reword (V1->V2) recover the block's
+    #      negative tool-selection side-effect (the qwen3-235b collapse)? ----
+    print("\nDECISION 2 (reword): [OBJECTS HERE] v1 -> [KNOWN OBJECTS] v2 should "
+          "raise pos\nwithout dropping mention-negative. Per-model pos shown "
+          "(watch the strong model).")
+    for v1, v2, label in (
+        ("oh_v1", "oh_v2", "block only"),
+        ("fn_desc+oh_v1", "fn_desc+oh_v2", "block + fn_desc"),
+    ):
+        print(f"  aggregate {label:<16} "
+              f"pos {pct(*agg[v1][0])}->{pct(*agg[v2][0])}  "
+              f"neg {pct(*agg[v1][1])}->{pct(*agg[v2][1])}")
+        for m in swept:
+            def _mpos(a):
+                ok = sum(is_correct(res[m][a][p["id"]], p)
+                         for p in CORPUS if p["expects_place"]
+                         and p["bucket"] != "fallback")
+                n = sum(res[m][a][p["id"]]["real"]
+                        for p in CORPUS if p["expects_place"]
+                        and p["bucket"] != "fallback")
+                return pct(ok, n)
+            print(f"      {m:<30} pos {_mpos(v1)} -> {_mpos(v2)}")
 
     # ---- contamination guard ----
     errs = sum(res[m][a][p["id"]]["err"]
@@ -384,9 +439,10 @@ def main():
     if down:
         print(f"Note: {len(down)} model(s) skipped on preflight: {', '.join(down)}")
 
-    print("\nRead: [OBJECTS HERE] ships regardless (Phase 1 vocabulary). This "
-          "sweep only decides the fn-desc one-liner and measures the capture "
-          "channel — a poor score lowers capture rate, never Tier-1 correctness.")
+    print("\nRead: the [KNOWN OBJECTS] block ships regardless (Phase 1 naming). "
+          "This sweep decides the fn-desc one-liner and checks whether the v2 "
+          "reword undoes the block's place_object suppression on strong models — "
+          "a capture-channel measure, never Tier-1 correctness.")
 
 
 if __name__ == "__main__":

@@ -642,9 +642,12 @@ class WorldStateStep:
         if empty:
             parts.append(f"\n[NO CHARACTER NOTES ON FILE FOR]: {', '.join(empty)}")
 
-        # [OBJECTS HERE] — deterministic canonical-slug vocabulary (OBJECT_TOOLING
+        # [KNOWN OBJECTS] — deterministic canonical-slug vocabulary (OBJECT_TOOLING
         # §3.6): objects whose newest residence is this room, plus those held by
-        # present cast. Authoritative over stale room-blob sightings (I7).
+        # present cast. Authoritative over stale room-blob sightings (I7). Framed
+        # as a name registry + last-known locations rather than "OBJECTS HERE" —
+        # the "currently here" reading suppressed place_object on strong models in
+        # the Tier-3 sweep (qwen3-235b objects_here pos 9/12→0/12).
         try:
             obj_lines = engine._objects_here_lines(sess.location, sess.people_present)
         except Exception as exc:
@@ -652,8 +655,9 @@ class WorldStateStep:
             obj_lines = []
         if obj_lines:
             parts.append(
-                "\n[OBJECTS HERE] (canonical slugs — reuse these exact names):\n"
-                + "\n".join(obj_lines)
+                "\n[KNOWN OBJECTS] (canonical slugs — reuse these exact spellings; "
+                "last-known locations for continuity, not a record of what happened "
+                "this turn):\n" + "\n".join(obj_lines)
             )
         return "\n".join(parts) + "\n"
 
@@ -2172,13 +2176,21 @@ class RPJotEngine:
         return in_room, held
 
     def _objects_here_lines(self, location: str, present) -> list:
-        """[OBJECTS HERE] body lines (in-room slugs, then held-by-present)."""
+        """[KNOWN OBJECTS] body lines (in-room slugs, then held-by-present).
+
+        Framed as "last seen" rather than "is here": residence is derived from
+        the newest sighting, so it is genuinely a last-known location, not a
+        current-turn state assertion. The framing matters for tool selection —
+        a "currently here" reading suppressed place_object on strong models in
+        the Tier-3 sweep (the qwen3-235b objects_here collapse); "last seen"
+        reads as continuity reference, not "already handled".
+        """
         in_room, held = self._objects_here(location, present)
         lines = []
         if in_room:
-            lines.append(f"in this room: {', '.join(in_room)}")
+            lines.append(f"last seen in this room: {', '.join(in_room)}")
         for holder in sorted(held):
-            lines.append(f"held — {holder}: {', '.join(sorted(held[holder]))}")
+            lines.append(f"last seen with {holder}: {', '.join(sorted(held[holder]))}")
         return lines
 
     # ===================================================================
