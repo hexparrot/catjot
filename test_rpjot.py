@@ -2040,7 +2040,139 @@ class TestTimingTelemetry(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12e. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# 12e. Step-1 delta mode — WorldStateStep.run(seed_doc=...) (idle-window seed)
+# ---------------------------------------------------------------------------
+
+
+class TestStep1DeltaMode(unittest.TestCase):
+    """Seeded step-1 runs a short delta; any failure falls back to full rebuild."""
+
+    def _patched(self, rounds):
+        """Swap call_llm for a scripted fake that records each payload."""
+        import rpjot as rpjot_module
+
+        calls = {"i": 0, "messages": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["messages"].append([dict(m) for m in messages])
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        return rpjot_module, original, eng, calls
+
+    def _tool_round(self):
+        # Unknown tool name → _safe_dispatch error JSON; loop continues.
+        # Side-effect-free way to burn iterations.
+        return {
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "lookup_thing", "arguments": "{}"},
+                }
+            ]
+        }
+
+    def test_seeded_message_replaces_baseline(self):
+        rounds = [{"content": "WORLD STATE — updated for input"}]
+        mod, original, eng, calls = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run(
+                "[MC action]: I wave", seed_doc="SEEDED DOC MARKER"
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — updated for input")
+        self.assertTrue(eng._world_state_step.last_seed_used)
+        self.assertTrue(eng._world_state_step.last_ok)
+        self.assertEqual(eng._world_state_step.last_rounds, 1)
+        user_msg = calls["messages"][0][1]["content"]
+        self.assertIn("PRECOMPUTED WORLD STATE", user_msg)
+        self.assertIn("SEEDED DOC MARKER", user_msg)
+        self.assertNotIn("BASELINE CONTEXT", user_msg)
+
+    def test_delta_exhaustion_falls_back_to_full(self):
+        # 3 tool rounds exhaust the delta bound; the 4th call (full path)
+        # returns text. last_rounds counts every real LLM call this turn.
+        rounds = [
+            self._tool_round(),
+            self._tool_round(),
+            self._tool_round(),
+            {"content": "WORLD STATE — full rebuild"},
+        ]
+        mod, original, eng, calls = self._patched(rounds)
+        try:
+            with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+                doc = eng._world_state_step.run(
+                    "[MC action]: I wave", seed_doc="SEEDED DOC"
+                )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — full rebuild")
+        self.assertFalse(eng._world_state_step.last_seed_used)
+        self.assertEqual(eng._world_state_step.last_rounds, 4)  # 3 delta + 1 full
+        self.assertTrue(any("[SEED] delta step-1 failed" in m for m in cm.output))
+        # Full-path message carries the baseline, not the seed.
+        full_user_msg = calls["messages"][3][1]["content"]
+        self.assertIn("BASELINE CONTEXT", full_user_msg)
+        self.assertNotIn("PRECOMPUTED WORLD STATE", full_user_msg)
+
+    def test_delta_request_exception_falls_back(self):
+        import requests as requests_module
+
+        rounds = [
+            requests_module.exceptions.RequestException("boom"),
+            {"content": "WORLD STATE — full rebuild"},
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run(
+                "[MC action]: I wave", seed_doc="SEEDED DOC"
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — full rebuild")
+        self.assertFalse(eng._world_state_step.last_seed_used)
+        self.assertEqual(eng._world_state_step.last_rounds, 1)  # 0 delta + 1 full
+
+    def test_empty_delta_doc_falls_back(self):
+        rounds = [{"content": ""}, {"content": "WORLD STATE — full rebuild"}]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run(
+                "[MC action]: I wave", seed_doc="SEEDED DOC"
+            )
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — full rebuild")
+        self.assertFalse(eng._world_state_step.last_seed_used)
+        self.assertEqual(eng._world_state_step.last_rounds, 2)  # 1 delta + 1 full
+
+    def test_full_path_unchanged_without_seed(self):
+        rounds = [{"content": "WORLD STATE — the room"}]
+        mod, original, eng, calls = self._patched(rounds)
+        try:
+            doc = eng._world_state_step.run("[MC attention] I look around")
+        finally:
+            mod.call_llm = original
+        self.assertEqual(doc, "WORLD STATE — the room")
+        self.assertFalse(eng._world_state_step.last_seed_used)
+        self.assertTrue(eng._world_state_step.last_ok)
+        self.assertEqual(eng._world_state_step.last_rounds, 1)
+        user_msg = calls["messages"][0][1]["content"]
+        self.assertIn("BASELINE CONTEXT", user_msg)
+        self.assertNotIn("PRECOMPUTED WORLD STATE", user_msg)
+
+
+# ---------------------------------------------------------------------------
+# 12f. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
 

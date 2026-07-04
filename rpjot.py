@@ -344,6 +344,7 @@ _STEP3_SYSTEM = (
 )
 
 MAX_TOKENS_STEP1 = 4_096  # encyclopedic lookup — needs room to gather
+MAX_ITER_STEP1_DELTA = 3  # seeded delta run — most lookups already in the seed
 MAX_TOKENS_STEP3 = 3_072  # prose — invest output budget here
 STEP3_TEMPERATURE = 1.2  # higher than legacy NARRATIVE_TEMPERATURE for richer variance
 
@@ -564,6 +565,13 @@ class WorldStateStep:
         # LLM rounds consumed by the most recent run(); read by run_turn's
         # [TIMING] line. Set on every exit path.
         self.last_rounds = 0
+        # True only when the most recent loop exited via the clean final-text
+        # path (not fallback/exception). Read by speculate_step1 to reject
+        # unusable docs.
+        self.last_ok = False
+        # True when the most recent run() produced its doc via the seeded
+        # delta path. Read by run_turn to finalize seed hit/miss status.
+        self.last_seed_used = False
 
     def _build_initial_message(self, classified_input: str) -> str:
         sess = self.engine.session
@@ -590,6 +598,39 @@ class WorldStateStep:
             "the player input but not yet present, fetch yomi/conscience/relationships as "
             "needed, search for relevant lore. Output a WORLD STATE document covering "
             "every character in the scene, location atmosphere, and story/scene context."
+        )
+
+    def _build_seeded_message(self, classified_input: str, seed_doc: str) -> str:
+        """Delta-mode initial message: precomputed doc instead of baseline.
+
+        Reuses the cheap in-memory pieces of _build_initial_message (scene
+        state, cast warning, NPC roster) but replaces the expensive
+        _build_baseline_context call — the seed doc already covers the scene.
+        """
+        sess = self.engine.session
+        present = ", ".join(sorted(sess.people_present)) or "none"
+        roster = self.engine.npc_tracker.roster_summary()
+
+        cast_warning = self.engine._cast_warning_line()
+        cast_block = f"\n{cast_warning}\n" if cast_warning else ""
+
+        return (
+            f"SCENE STATE:\n"
+            f"  location: {sess.location}\n"
+            f"  scene: {sess.current_scene or '(none)'}\n"
+            f"  people_present: {present}\n"
+            f"{cast_block}\n"
+            f"NPC TRACKER (session memory — every named character on file):\n{roster}\n\n"
+            f"PRECOMPUTED WORLD STATE (assembled moments ago for this exact "
+            f"scene and cast):\n{seed_doc}\n\n"
+            f"PLAYER INPUT:\n{classified_input}\n\n"
+            "The PRECOMPUTED WORLD STATE above already covers this scene, its "
+            "lore, and every character present. Update it for the player input: "
+            "use tool calls ONLY to look up characters, objects, or lore newly "
+            "mentioned in the player input and not already covered above. If "
+            "nothing new is needed, output the updated WORLD STATE document "
+            "directly. Follow the same output conventions (including the "
+            "CURRENT ROOM line)."
         )
 
     def _build_baseline_context(self, classified_input: str) -> str:
@@ -678,17 +719,69 @@ class WorldStateStep:
             )
         return "\n".join(parts) + "\n"
 
-    def run(self, classified_input: str) -> str:
-        """Run Step 1 and return the WorldStateDoc string."""
-        engine = self.engine
+    def run(self, classified_input: str, seed_doc: str | None = None) -> str:
+        """Run Step 1 and return the WorldStateDoc string.
+
+        With seed_doc (a precomputed WorldStateDoc for the current scene and
+        cast), attempt a short delta run first — the seed replaces the baseline
+        and the model only folds in the player input (MAX_ITER_STEP1_DELTA
+        rounds). On any delta failure, fall back to the normal full rebuild;
+        last_rounds accumulates across both so [TIMING] counts every real call.
+        """
+        self.last_seed_used = False
+
+        if seed_doc is not None:
+            messages = [
+                {"role": "system", "content": _STEP1_SYSTEM},
+                {
+                    "role": "user",
+                    "content": self._build_seeded_message(classified_input, seed_doc),
+                },
+            ]
+            doc = self._run_loop(messages, MAX_ITER_STEP1_DELTA, [])
+            if doc:
+                self.last_seed_used = True
+                return doc
+            delta_rounds = self.last_rounds
+            logger.warning(
+                "[SEED] delta step-1 failed after %d rounds; full rebuild",
+                delta_rounds,
+            )
+            doc = self._run_full(classified_input)
+            self.last_rounds += delta_rounds
+            return doc
+
+        return self._run_full(classified_input)
+
+    def _run_full(self, classified_input: str) -> str:
+        """The full (unseeded) Step 1 path — behavior identical to legacy run()."""
         messages = [
             {"role": "system", "content": _STEP1_SYSTEM},
             {"role": "user", "content": self._build_initial_message(classified_input)},
         ]
-
         tool_results_collected: list[str] = []
-        max_iter = 8
+        doc = self._run_loop(messages, 8, tool_results_collected)
+        if doc is not None:
+            # Clean text exit; empty doc → deterministic fallback (legacy `or`).
+            return doc or self._fallback_doc()
+        logger.warning("[STEP1] max iterations reached; using collected results")
+        return self._fallback_doc(tool_results_collected)
+
+    def _run_loop(
+        self,
+        messages: list,
+        max_iter: int,
+        tool_results_collected: list[str],
+    ) -> str | None:
+        """Shared Step-1 tool loop.
+
+        Returns the stripped WorldStateDoc on a clean final-text exit, or None
+        on RequestException / max-iteration exhaustion. Sets last_ok (clean
+        final-text exit) and last_rounds on every exit path.
+        """
+        engine = self.engine
         self.last_rounds = 0
+        self.last_ok = False
 
         for i in range(max_iter):
             messages = engine._guard_payload(
@@ -706,7 +799,7 @@ class WorldStateStep:
             except requests.exceptions.RequestException as exc:
                 logger.warning("[STEP1] LLM call failed: %s", exc)
                 self.last_rounds = i
-                break
+                return None
             logger.debug(
                 "[TIMING] step1 call %d: %.1fs", i + 1, time.perf_counter() - t_call
             )
@@ -722,7 +815,8 @@ class WorldStateStep:
                     i,
                     _tok(world_doc),
                 )
-                return world_doc.strip() or self._fallback_doc()
+                self.last_ok = True
+                return world_doc.strip()
 
             messages.append(response_msg)
             for tc in tool_calls:
@@ -741,8 +835,7 @@ class WorldStateStep:
                 )
             self.last_rounds = i + 1
 
-        logger.warning("[STEP1] max iterations reached; using collected results")
-        return self._fallback_doc(tool_results_collected)
+        return None
 
     def _fallback_doc(self, collected: list[str] | None = None) -> str:
         """Deterministic worst-case WorldStateDoc when the LLM fails or stalls.
