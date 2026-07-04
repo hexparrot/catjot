@@ -1738,8 +1738,22 @@ class RPJotEngine:
         # Citation capture is strictly turn-scoped (TS_CITATIONS §3.1).
         self._turn_refs = []
 
-        # Step 1
-        world_doc = self._world_state_step.run(classified_input)
+        # Step 1 — seeded delta when the idle-window precompute is valid.
+        seed = self._consume_seed()
+        world_doc = self._world_state_step.run(
+            classified_input, seed_doc=seed["doc"] if seed else None
+        )
+        if seed and self._world_state_step.last_seed_used:
+            self._seed_status = "hit"
+            # Adopt speculative provenance first (capture order), the delta
+            # run's own lookups after. On a delta failure the full rebuild's
+            # captures already stand — seed refs are NOT adopted (the doc
+            # content did not come from those lookups).
+            self._turn_refs = seed["refs"] + [
+                t for t in self._turn_refs if t not in seed["refs"]
+            ]
+        elif seed:
+            self._seed_status = "miss"
         logger.info("[TURN] step1 done: world_doc=%d tok", _tok(world_doc))
 
         # Location re-mark (LM §3.1): commit a precise session.location before any
@@ -1778,9 +1792,14 @@ class RPJotEngine:
         # Per-turn wall-clock accounting (TOOL_UNIFY U0): one parseable line per
         # turn so latency work is measured, not assumed. `it` counts LLM calls
         # consumed by each step's loop (step1 includes the re-mark in its span).
+        # seed/bg/wait (idle-window precompute): seed = this turn's precompute
+        # outcome; bg = LLM seconds the idle worker moved off the critical
+        # path; wait = seconds the player actually stalled at the join.
+        bg_stats = self._bg_stats if isinstance(self._bg_stats, dict) else {}
+        self._bg_stats = None
         logger.info(
             "[TIMING] turn=%d step1=%.1fs/%dit step2=%.1fs/%dit step3=%.1fs "
-            "total=%.1fs",
+            "total=%.1fs seed=%s bg=%.1fs wait=%.1fs",
             self._turn_count + 1,
             t1 - t0,
             self._world_state_step.last_rounds,
@@ -1788,6 +1807,9 @@ class RPJotEngine:
             self._compliance_step.last_rounds,
             t3 - t2,
             t3 - t0,
+            self._seed_status,
+            bg_stats.get("spec_s", 0.0) + bg_stats.get("refresh_s", 0.0),
+            bg_stats.get("wait_s", 0.0),
         )
 
         # Cast-drift detection (T1): compare who the turn's text names against

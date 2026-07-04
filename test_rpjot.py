@@ -1995,7 +1995,8 @@ class TestTimingTelemetry(unittest.TestCase):
         self.assertRegex(
             timing[0],
             r"\[TIMING\] turn=1 step1=\d+\.\ds/1it "
-            r"step2=\d+\.\ds/1it step3=\d+\.\ds total=\d+\.\ds",
+            r"step2=\d+\.\ds/1it step3=\d+\.\ds total=\d+\.\ds "
+            r"seed=off bg=0\.0s wait=0\.0s",
         )
 
     def test_step2_last_rounds_counts_calls(self):
@@ -2306,7 +2307,126 @@ class TestSpeculativeSeed(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12g. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# 12g. Seed wiring in run_turn — hit/miss status, ref adoption, [TIMING] tail
+# ---------------------------------------------------------------------------
+
+
+class TestSeedRunTurn(unittest.TestCase):
+    """run_turn consumes the seed, finalizes hit/miss, and reports timing."""
+
+    def _patched(self, rounds):
+        import rpjot as rpjot_module
+
+        calls = {"i": 0, "messages": []}
+
+        def fake_call_llm(messages, **kwargs):
+            calls["messages"].append([dict(m) for m in messages])
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        return rpjot_module, original, eng, calls
+
+    def _plant_seed(self, eng, refs=None):
+        eng.seed_enabled = True
+        eng._seed = {
+            "doc": "WORLD STATE — precomputed gallery",
+            "refs": refs or [],
+            "state": eng._seed_state_snapshot(),
+            "turn": eng._turn_count,
+            "rounds": 2,
+            "elapsed": 6.0,
+        }
+
+    def _run(self, eng):
+        return eng.run_turn(
+            "[MC action]: I wave",
+            [{"role": "system", "content": "rules"}],
+            [{"role": "system", "content": "prose"}],
+        )
+
+    def test_seed_hit_flow(self):
+        rounds = [
+            {"content": "WORLD STATE — updated"},  # step 1 delta
+            {"content": "nothing canonical"},  # step 2
+            {"content": "The gallery hums."},  # step 3
+        ]
+        mod, original, eng, calls = self._patched(rounds)
+        self._plant_seed(eng, refs=["1783000001"])
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                self._run(eng)
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING] turn=" in m]
+        self.assertEqual(len(timing), 1)
+        self.assertIn("seed=hit", timing[0])
+        # Step-1 message was the seeded delta form.
+        step1_user = calls["messages"][0][1]["content"]
+        self.assertIn("PRECOMPUTED WORLD STATE", step1_user)
+        self.assertIn("precomputed gallery", step1_user)
+        # Speculative provenance adopted (capture order preserved).
+        self.assertEqual(eng._turn_refs[0], "1783000001")
+
+    def test_delta_failure_reports_miss_and_drops_seed_refs(self):
+        rounds = [
+            {"content": ""},  # delta clean-but-empty → full rebuild
+            {"content": "WORLD STATE — full"},  # full path
+            {"content": "nothing canonical"},  # step 2
+            {"content": "Quiet."},  # step 3
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        self._plant_seed(eng, refs=["1783000001"])
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                self._run(eng)
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING] turn=" in m]
+        self.assertIn("seed=miss", timing[0])
+        self.assertNotIn("1783000001", eng._turn_refs)
+
+    def test_enabled_without_seed_reports_miss(self):
+        rounds = [
+            {"content": "WORLD STATE — full"},
+            {"content": "nothing canonical"},
+            {"content": "Quiet."},
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        eng.seed_enabled = True  # no seed planted
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                self._run(eng)
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING] turn=" in m]
+        self.assertIn("seed=miss", timing[0])
+
+    def test_bg_stats_passthrough_and_cleared(self):
+        rounds = [
+            {"content": "WORLD STATE — full"},
+            {"content": "nothing canonical"},
+            {"content": "Quiet."},
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        eng._bg_stats = {"spec_s": 1.5, "refresh_s": 0.5, "wait_s": 0.2}
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                self._run(eng)
+        finally:
+            mod.call_llm = original
+        timing = [m for m in cm.output if "[TIMING] turn=" in m]
+        self.assertIn("bg=2.0s", timing[0])
+        self.assertIn("wait=0.2s", timing[0])
+        self.assertIsNone(eng._bg_stats)
+
+
+# ---------------------------------------------------------------------------
+# 12h. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
 
