@@ -3767,6 +3767,32 @@ class RPJotEngine:
             }
         )
 
+    def _normalize_person_slug(self, name: str) -> str:
+        """Resolve a tool-supplied person name to a canonical cast slug.
+
+        Boundary canonicalization (same disease as the location slugs): the
+        live session saw set_people_present(['Bartholomew Wentworth']) — a
+        display name — replace the whole cast and mint a bogus slug. Slugify;
+        any MC alias token collapses to main_character; a registered display
+        name resolves to its record's slug; unknown names keep their slug and
+        register as new characters downstream.
+        """
+        slug = re.sub(r"[^a-z0-9-]+", "-", (name or "").strip().lower()).strip("-")
+        if not slug:
+            return ""
+        tokens = set(slug.split("-")) | {slug}
+        if tokens & self.mc_aliases:
+            return self.main_character
+        if self.npc_tracker.is_registered(slug):
+            return slug
+        for rec in self.npc_tracker.all():
+            rec_disp = re.sub(
+                r"[^a-z0-9-]+", "-", rec.display_name.strip().lower()
+            ).strip("-")
+            if rec_disp == slug:
+                return rec.slug
+        return slug
+
     @rp_tool(
         description=(
             "Update the complete list of people currently in the scene. "
@@ -3788,6 +3814,10 @@ class RPJotEngine:
     def _tool_set_people_present(self, people: list):
         """Replace the scene's people list with the provided set."""
         logger.info("ENTER _tool_set_people_present: people=%r", people)
+        normalized = {s for s in map(self._normalize_person_slug, people) if s}
+        if normalized != set(people):
+            logger.info("[CAST] normalized %r → %s", people, sorted(normalized))
+        people = sorted(normalized)
         self.session.people_present = set(people)
         self.session.attention = {}
         self.session.mood = {}

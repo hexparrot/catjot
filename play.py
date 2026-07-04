@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -655,7 +656,11 @@ def recover_deterministic_state():
     location = None
     ev = _newest_under((SearchType.TREE, PWD_EVENTS))
     if ev and ev.pwd.startswith(PWD_EVENTS + "/"):
-        location = ev.pwd.removeprefix(PWD_EVENTS + "/").strip("/") or None
+        raw_loc = ev.pwd.removeprefix(PWD_EVENTS + "/").strip("/")
+        # Slug-normalize (same regex as _canonicalize_room): a historically
+        # fragmented pwd (manor/evie_quarters) must not seed session.location
+        # with a non-canonical variant on resume.
+        location = re.sub(r"[^a-z0-9/-]+", "-", raw_loc.lower()).strip("-/") or None
 
     scene = None
     sc = _newest_under((SearchType.TREE, PWD_SCENES))

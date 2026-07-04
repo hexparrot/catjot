@@ -629,6 +629,25 @@ class TestWorldEntityTools(unittest.TestCase):
         result = self.engine._tool_set_people_present(["player"])
         self.assertIsInstance(result, str)
 
+    def test_set_people_display_name_collapses_to_mc(self):
+        # the live cast-wipe class: a display-name variant of the MC replaced
+        # the whole cast with a bogus slug.
+        self.engine.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
+        self.engine._tool_set_people_present(["Bartholomew Wentworth", "evie"])
+        self.assertEqual(
+            self.engine.session.people_present,
+            {self.engine.main_character, "evie"},
+        )
+
+    def test_set_people_display_name_resolves_registered_slug(self):
+        self.engine.npc_tracker.register("evie", "Madame Evie Bellvue")
+        self.engine._tool_set_people_present(["Madame Evie Bellvue", "player"])
+        self.assertEqual(self.engine.session.people_present, {"evie", "player"})
+
+    def test_set_people_unknown_name_slugified(self):
+        self.engine._tool_set_people_present(["Old Guard"])
+        self.assertEqual(self.engine.session.people_present, {"old-guard"})
+
     # --- save_character ---
 
     def test_save_character_returns_string(self):
@@ -4716,6 +4735,24 @@ class TestTrueResume(unittest.TestCase):
         finally:
             Note.NOTEFILE = saved
             os.remove(empty)
+
+    def test_recover_normalizes_fragmented_slug(self):
+        # a historically fragmented pwd (underscores — the live
+        # manor/evie_quarters resume) must recover as the canonical hyphen form.
+        import play
+
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message="Fragmented event.",
+                tag="",
+                context="ctx",
+                pwd=f"{self.PWD_EVENTS}/manor/evie_quarters",
+                now=999,
+            ),
+        )
+        location, _ = play.recover_deterministic_state()
+        self.assertEqual(location, "manor/evie-quarters")
 
     # --- infer_resume_state -------------------------------------------------
 
