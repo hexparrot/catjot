@@ -332,6 +332,15 @@ _STEP1_SYSTEM = (
     "where), not on places merely mentioned, offered, or thought about."
 )
 
+# Placeholder input for the idle-window speculative step-1 run. Explicit
+# no-op directive (not empty): classified_input feeds both the PLAYER INPUT
+# block and the baseline focus_hint ranking, and a blank there sends the
+# model hunting for a phantom input.
+_SPECULATIVE_INPUT = (
+    "[no player input yet — speculative pre-turn lookup: assemble the WORLD "
+    "STATE for the scene exactly as it stands; do not invent new events]"
+)
+
 # System prompt for Step 3: Narrative Prose
 _STEP3_SYSTEM = (
     "You are a vivid literary narrator for an immersive text-based roleplay experience. "
@@ -1217,6 +1226,16 @@ class RPJotEngine:
         # from people_present. Detection only; surfaced in /stats and the next
         # step-1 SCENE STATE header, cleared when the discrepancy resolves.
         self._cast_warnings: list = []
+        # Idle-window precompute (background seed). seed_enabled is set by the
+        # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
+        # the speculative step-1 result {doc, refs, state, turn, rounds,
+        # elapsed}; single-use, validated by _consume_seed. _seed_status feeds
+        # the [TIMING] line; _bg_stats is written by the play loop's idle
+        # worker (spec_s/refresh_s/wait_s) and cleared after logging.
+        self.seed_enabled: bool = False
+        self._seed: dict | None = None
+        self._seed_status: str = "off"
+        self._bg_stats: dict | None = None
         self.main_character = main_character
         self.session = SessionState(
             location=location,
@@ -1787,6 +1806,107 @@ class RPJotEngine:
             )
 
         return narrative
+
+    def _seed_state_snapshot(self) -> tuple:
+        """The invariants a seed is valid against: location, cast, scene."""
+        return (
+            self.session.location,
+            frozenset(self.session.people_present),
+            self.session.current_scene,
+        )
+
+    def speculate_step1(self) -> None:
+        """Idle-window speculative step-1: precompute the next turn's seed.
+
+        Called by the play loop's background worker AFTER all post-turn
+        bookkeeping, while the player is at the input() prompt (engine state
+        cannot drift there — meta-commands are read-only). Runs a full step-1
+        against the post-turn world with a placeholder input and stores the
+        doc for _consume_seed. Never raises; on any failure the seed is
+        simply absent and the next turn takes the normal full path.
+        """
+        if not self._step1_schemas and not self._step2_schemas:
+            self.register_all_tools()
+        if not hasattr(self, "_world_state_step"):
+            self.init_pipeline()
+        if not self.seed_enabled:
+            return
+        self._seed = None
+
+        state = self._seed_state_snapshot()
+        # Citation isolation (TS_CITATIONS §3.1): speculative lookups must not
+        # pollute the just-completed turn's refs. Captured refs travel with
+        # the seed and are adopted by run_turn only on a seed hit.
+        saved_refs = self._turn_refs
+        self._turn_refs = []
+        t0 = time.perf_counter()
+        try:
+            doc = self._world_state_step.run(_SPECULATIVE_INPUT)
+        except Exception as exc:
+            # call_llm can raise beyond RequestException (JSON decode etc.);
+            # a background failure must never surface.
+            logger.warning("[SEED] speculative step-1 failed: %s", exc)
+            return
+        finally:
+            refs = self._turn_refs
+            self._turn_refs = saved_refs
+
+        if not self._world_state_step.last_ok or not doc.strip():
+            # Exhaustion/exception produced a fallback doc — seeding with it
+            # would be worse than a fresh rebuild next turn.
+            logger.debug("[SEED] speculative doc unusable; discarded")
+            return
+
+        # The speculative CURRENT ROOM line was judged against the placeholder
+        # input; strip it so it cannot leak into the seeded prompt. The delta
+        # call emits its own, which _remark_location processes normally.
+        doc = _CURRENT_ROOM_RE.sub("", doc, count=1).lstrip("\n")
+
+        self._seed = {
+            "doc": doc,
+            "refs": refs,
+            "state": state,
+            "turn": self._turn_count,
+            "rounds": self._world_state_step.last_rounds,
+            "elapsed": time.perf_counter() - t0,
+        }
+        logger.info(
+            "[SEED] speculative doc ready (%d tok, %d rounds, %.1fs)",
+            _tok(doc),
+            self._seed["rounds"],
+            self._seed["elapsed"],
+        )
+
+    def _consume_seed(self) -> dict | None:
+        """Pop and validate the speculative seed (single-use, hit or miss).
+
+        Valid iff produced after the previous completed turn (turn counter
+        matches) and the state snapshot still holds — guards first-turn/resume,
+        a prior run_turn that raised mid-turn after partially mutating state,
+        and programmer error. Player-input novelty is NOT an invalidation
+        concern: the delta call's own tool budget handles new lookups.
+        """
+        seed, self._seed = self._seed, None
+        if not self.seed_enabled:
+            self._seed_status = "off"
+            return None
+        if not seed:
+            self._seed_status = "miss"
+            logger.debug("[SEED] no seed available (first turn/resume/failure)")
+            return None
+        if seed["turn"] != self._turn_count:
+            self._seed_status = "miss"
+            logger.debug(
+                "[SEED] stale seed rejected: turn %d != %d",
+                seed["turn"],
+                self._turn_count,
+            )
+            return None
+        if seed["state"] != self._seed_state_snapshot():
+            self._seed_status = "miss"
+            logger.debug("[SEED] stale seed rejected: state snapshot changed")
+            return None
+        return seed
 
     def _scan_cast_drift(self, classified_input: str, narrative: str) -> list:
         """Detect NPCs named in the turn's text but absent from people_present.

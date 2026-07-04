@@ -2172,7 +2172,141 @@ class TestStep1DeltaMode(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12f. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
+# 12f. Speculative seed lifecycle — speculate_step1 / _consume_seed
+# ---------------------------------------------------------------------------
+
+
+class TestSpeculativeSeed(unittest.TestCase):
+    """Idle-window speculation stores a validated, single-use seed."""
+
+    def _patched(self, rounds):
+        import rpjot as rpjot_module
+
+        calls = {"i": 0}
+
+        def fake_call_llm(messages, **kwargs):
+            r = rounds[min(calls["i"], len(rounds) - 1)]
+            calls["i"] += 1
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        eng.seed_enabled = True
+        return rpjot_module, original, eng, calls
+
+    def test_clean_speculation_stores_seed(self):
+        rounds = [
+            {"content": "CURRENT ROOM: UNCHANGED\nWORLD STATE — the gallery"}
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        eng._turn_refs = ["turn-ref-marker"]
+        try:
+            eng.speculate_step1()
+        finally:
+            mod.call_llm = original
+        self.assertIsNotNone(eng._seed)
+        self.assertEqual(eng._seed["doc"], "WORLD STATE — the gallery")
+        self.assertNotIn("CURRENT ROOM", eng._seed["doc"])
+        self.assertEqual(eng._seed["turn"], eng._turn_count)
+        self.assertEqual(eng._seed["state"], eng._seed_state_snapshot())
+        # Citation isolation: the completed turn's refs are untouched; the
+        # speculative run's refs travel with the seed.
+        self.assertEqual(eng._turn_refs, ["turn-ref-marker"])
+        self.assertEqual(eng._seed["refs"], [])
+
+    def test_disabled_speculation_noops(self):
+        rounds = [{"content": "WORLD STATE — the gallery"}]
+        mod, original, eng, calls = self._patched(rounds)
+        eng.seed_enabled = False
+        try:
+            eng.speculate_step1()
+        finally:
+            mod.call_llm = original
+        self.assertIsNone(eng._seed)
+        self.assertEqual(calls["i"], 0)
+
+    def test_fallback_doc_discarded(self):
+        import requests as requests_module
+
+        # Every call raises → full path returns _fallback_doc, last_ok False.
+        rounds = [requests_module.exceptions.RequestException("down")]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            eng.speculate_step1()
+        finally:
+            mod.call_llm = original
+        self.assertIsNone(eng._seed)
+
+    def test_unexpected_exception_swallowed(self):
+        rounds = [ValueError("bad json from endpoint")]
+        mod, original, eng, _ = self._patched(rounds)
+        eng._turn_refs = ["turn-ref-marker"]
+        try:
+            with self.assertLogs("rpjot_engine", level="WARNING") as cm:
+                eng.speculate_step1()  # must not raise
+        finally:
+            mod.call_llm = original
+        self.assertIsNone(eng._seed)
+        self.assertTrue(
+            any("[SEED] speculative step-1 failed" in m for m in cm.output)
+        )
+        # finally-block restored the completed turn's refs.
+        self.assertEqual(eng._turn_refs, ["turn-ref-marker"])
+
+    # -- _consume_seed validation ------------------------------------------
+
+    def _engine_with_seed(self):
+        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng.init_pipeline()
+        eng.seed_enabled = True
+        eng._seed = {
+            "doc": "WORLD STATE — seeded",
+            "refs": ["r1"],
+            "state": eng._seed_state_snapshot(),
+            "turn": eng._turn_count,
+            "rounds": 1,
+            "elapsed": 0.5,
+        }
+        return eng
+
+    def test_consume_hit_on_matching_state(self):
+        eng = self._engine_with_seed()
+        seed = eng._consume_seed()
+        self.assertIsNotNone(seed)
+        self.assertEqual(seed["doc"], "WORLD STATE — seeded")
+        self.assertIsNone(eng._seed)  # single-use pop
+
+    def test_consume_miss_on_location_change(self):
+        eng = self._engine_with_seed()
+        eng.session.location = "somewhere-else"
+        self.assertIsNone(eng._consume_seed())
+        self.assertEqual(eng._seed_status, "miss")
+
+    def test_consume_miss_on_turn_advance(self):
+        eng = self._engine_with_seed()
+        eng._turn_count += 1
+        self.assertIsNone(eng._consume_seed())
+        self.assertEqual(eng._seed_status, "miss")
+
+    def test_consume_single_use(self):
+        eng = self._engine_with_seed()
+        self.assertIsNotNone(eng._consume_seed())
+        self.assertIsNone(eng._consume_seed())
+        self.assertEqual(eng._seed_status, "miss")
+
+    def test_consume_disabled_reports_off(self):
+        eng = self._engine_with_seed()
+        eng.seed_enabled = False
+        self.assertIsNone(eng._consume_seed())
+        self.assertEqual(eng._seed_status, "off")
+
+
+# ---------------------------------------------------------------------------
+# 12g. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
 
 
