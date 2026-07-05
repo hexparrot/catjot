@@ -1359,7 +1359,14 @@ class catjot_graphql(object):
 # START: LLM/MCP FUNCTIONS
 
 
-def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
+def call_llm(
+    messages,
+    tools=None,
+    temperature=0.2,
+    tool_choice="auto",
+    max_tokens=None,
+    on_token=None,
+):
     """Fire a single chat-completion request at the configured LLM endpoint.
 
     Reads credentials and model from environment variables:
@@ -1371,6 +1378,16 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
     fields so the LLM can request function calls.  Some provider implementations
     attach ``tool_calls`` at the choice level rather than inside the message
     dict; this function normalises that quirk before returning.
+
+    *max_tokens* caps the output budget for the call.  Pass it to prevent
+    thinking-heavy models from consuming the full output allowance on internal
+    reasoning before producing any prose or tool call.
+
+    *on_token* switches the request to SSE streaming: it is called with each
+    content delta as it arrives, and the return value is the same message
+    dict shape as the non-streaming path (content accumulated) — callers
+    cannot tell the difference.  Intended for prose-only calls; tool-call
+    deltas are not reassembled in streaming mode.
 
     Returns the ``message`` dict from ``choices[0]``.  Raises
     ``requests.HTTPError`` on a non-2xx response.
@@ -1384,6 +1401,8 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
@@ -1392,6 +1411,36 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
+
+    if on_token is not None:
+        payload["stream"] = True
+        resp = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            stream=True,
+        )
+        resp.raise_for_status()
+        parts = []
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue  # SSE keepalive
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: ") :]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+                delta = chunk["choices"][0].get("delta", {})
+            except (ValueError, KeyError, IndexError):
+                continue  # malformed chunk — skip, don't kill the stream
+            text = delta.get("content")
+            if text:
+                parts.append(text)
+                on_token(text)
+        return {"role": "assistant", "content": "".join(parts)}
 
     resp = requests.post(
         api_url,
