@@ -1,6 +1,9 @@
 # .catjot files
 .catjot.old
 
+# /debug player-concern capture output (EXEC_DEBUG)
+debug/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

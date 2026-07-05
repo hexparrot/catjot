@@ -57,7 +57,7 @@ _SLASH_EXACT = frozenset(
 # /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
 # yomi take a name arg — all prefix-matched by the unknown-command guard.
 _SLASH_PREFIX = (
-    "/objects", "/yomi", "/construct", "/location", "/people", "/stats"
+    "/objects", "/yomi", "/construct", "/location", "/people", "/stats", "/debug"
 )
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
@@ -100,7 +100,8 @@ _HELP_TEXT = (
     "  @name   — shift MC focus to person/object; tail is intent toward it\n"
     "  ^text   — MC inner monologue (can seed backstory)\n"
     "Commands: /quit, /people [full], /location [full], /objects [name], "
-    "/construct <name>, /stats [full], /mood, /attn, /yomi <name>, /prompt [text]"
+    "/construct <name>, /stats [full], /debug <description>, /mood, /attn, "
+    "/yomi <name>, /prompt [text]"
 )
 
 
@@ -952,6 +953,29 @@ def game_loop(engine, seed_summaries=False):
                     step2_messages, step3_messages, avg_pair_toks=_avg_pair_toks()
                 )
             )
+            continue
+
+        if _cmd0 == "/debug":
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                print("Usage: /debug <description of what looked wrong>")
+                continue
+            desc = parts[1].strip()
+            os.makedirs("debug", exist_ok=True)
+            report_text, index_row = engine.build_debug_report(
+                desc,
+                step2_messages,
+                step3_messages,
+                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            report_path = os.path.join("debug", index_row["report_file"])
+            with open(report_path, "w", encoding="utf-8") as fh:
+                fh.write(report_text)
+            with open(
+                os.path.join("debug", "index.jsonl"), "a", encoding="utf-8"
+            ) as fh:
+                fh.write(json.dumps(index_row) + "\n")
+            print(f"[debug report written: {report_path}]")
             continue
 
         if user_input.lower().startswith("/prompt"):

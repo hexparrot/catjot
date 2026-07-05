@@ -184,6 +184,156 @@ register_prefix("[BUDGET]", "budget", "baseline context token measure (soft warn
 
 
 # ---------------------------------------------------------------------------
+# /debug concern-capture forensics (EXEC_DEBUG §3.4-3.5). Deterministic, non-LLM
+# helpers shared by RpjotEngine.build_debug_report: a log-tail scanner that reads
+# the telemetry-prefix registry above (so Phase 3/4 prefixes auto-appear once
+# registered) and a keyword→category router.
+# ---------------------------------------------------------------------------
+
+# The exact run_turn START marker (rpjot.py run_turn: logger.info) — the only
+# reliable per-turn key, since most log lines carry no turn number (EXEC_DEBUG
+# §3.4: block-delimit, do NOT match a per-line turn=).
+_TURN_START_RE = re.compile(r"\[TURN (\d+)\] run_turn: START")
+
+# Keyword → category taxonomy (EXEC_DEBUG §3.5). Ordered: the first category with
+# a lowercased-substring hit wins as the *highlighted* readout; routing never
+# suppresses the others (V5). misattribution precedes classification so the more
+# specific "said that" beats the bare "said".
+_DEBUG_CATEGORY_KEYWORDS: list = [
+    ("memory", ("remember", "forgot", "recall", "lost", "missing")),
+    ("location", ("location", "room", "move", "where", "teleport", "went")),
+    ("misattribution",
+     ("wrong person", "who", "attributed", "mixed up", "confused", "said that")),
+    ("classification", ("tense", "spoke", "spoken", "said", "action", "meant to")),
+    ("prose", ("rewrote", "rewrite", "changed style", "suddenly different")),
+]
+
+# Words stripped when parsing a subject noun from a memory concern (§3.5 memory
+# enrichment). Never guesses past the words the player typed.
+_DEBUG_STOPWORDS = frozenset({
+    "why", "dont", "doesnt", "you", "the", "a", "an", "it", "that", "this",
+    "remember", "forgot", "recall", "lost", "missing", "my", "about", "did",
+    "do", "not", "cant", "never", "keep", "keeps", "to", "of", "is", "was",
+    "i", "your", "our", "she", "he", "they", "them", "her", "his", "why'd",
+})
+
+
+def _route_debug_category(concern: str):
+    """Route a concern to (category, matched_keyword) by lowercased substring.
+
+    Returns ("uncategorized", None) when nothing matches — the caller then shows
+    every readout. Deterministic; the ordered table decides ties.
+    """
+    low = (concern or "").lower()
+    for category, keywords in _DEBUG_CATEGORY_KEYWORDS:
+        for kw in keywords:
+            if kw in low:
+                return category, kw
+    return "uncategorized", None
+
+
+def _parse_debug_subject(concern: str):
+    """Best-effort single subject noun from a memory concern.
+
+    "remember the locket" → "locket". Strips routing keywords + stopwords and
+    returns the last surviving token, or None. Never invents words the player
+    did not type (§3.5 memory enrichment feeds construct_report, which itself
+    never guesses).
+    """
+    tokens = re.findall(r"[a-z0-9-]+", (concern or "").lower())
+    kept = [t for t in tokens if t not in _DEBUG_STOPWORDS]
+    return kept[-1] if kept else None
+
+
+def _interesting_prefix(line: str):
+    """The earliest-positioned telemetry-registry prefix in `line`, else None.
+
+    Reads _PREFIX_REGISTRY (single source of truth): a line is interesting iff a
+    registered prefix appears in it. Earliest position wins so the real mechanism
+    prefix (the first bracket-token of the message) is chosen over any later one;
+    the log level token ("[INFO    ]") and the "[TURN k]" marker are not
+    registered, so they never match.
+    """
+    hit = None
+    hit_pos = None
+    for prefix in _PREFIX_REGISTRY:
+        pos = line.find(prefix)
+        if pos != -1 and (hit_pos is None or pos < hit_pos):
+            hit, hit_pos = prefix, pos
+    return hit
+
+
+def _scan_recent_activity(log_path: str, turns_back: int = 4):
+    """Parse the tail of a per-session debug log into recent mechanism activity.
+
+    Splits the file into per-turn blocks on the `[TURN k] run_turn: START` marker
+    (EXEC_DEBUG §3.4), keeps the last `turns_back + 1` blocks, and within them
+    collects lines whose prefix is a key in _PREFIX_REGISTRY. Block-delimiting
+    (not per-line `turn=` matching) is deliberate: most lines carry no turn
+    number, so block boundaries are the only reliable turn key.
+
+    Returns (entries, condensed_this_turn):
+      - entries: list of {"turn": int|None, "prefix", "category", "text"} in log
+        order, `text` trimmed to start at the prefix (asctime/level stripped).
+      - condensed_this_turn: True iff the newest kept block holds a
+        `[CTX] _condense_context` line.
+
+    Read-only; a missing/unreadable log yields ([], False) (§V2 honesty).
+    """
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            raw_lines = fh.readlines()
+    except (OSError, TypeError):
+        return [], False
+
+    # A leading pre-marker block (turn=None) captures anything before the first
+    # START; it is naturally dropped once enough real blocks exist.
+    blocks: list = [{"turn": None, "lines": []}]
+    for line in raw_lines:
+        m = _TURN_START_RE.search(line)
+        if m:
+            blocks.append({"turn": int(m.group(1)), "lines": []})
+        blocks[-1]["lines"].append(line.rstrip("\n"))
+
+    kept = blocks[-(turns_back + 1):]
+
+    entries: list = []
+    for blk in kept:
+        for line in blk["lines"]:
+            prefix = _interesting_prefix(line)
+            if prefix is None:
+                continue
+            entries.append({
+                "turn": blk["turn"],
+                "prefix": prefix,
+                "category": _PREFIX_REGISTRY[prefix]["category"],
+                "text": line[line.index(prefix):],
+            })
+
+    condensed_this_turn = bool(kept) and any(
+        "[CTX] _condense_context" in line for line in kept[-1]["lines"]
+    )
+    return entries, condensed_this_turn
+
+
+def _messages_have_digest(*message_lists) -> bool:
+    """True iff any history holds a user message beginning "STORY SO FAR:".
+
+    The `_has_digest` idiom (play.py): a "STORY SO FAR:" user turn marks that the
+    oldest exchanges were compacted, so an absent canon detail may have been
+    folded into the digest rather than truly forgotten.
+    """
+    for msgs in message_lists:
+        for m in msgs or []:
+            if (
+                m.get("role") == "user"
+                and str(m.get("content", "")).startswith("STORY SO FAR:")
+            ):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -7112,6 +7262,272 @@ class RPJotEngine:
         )
         lines.append(HDR)
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # /debug — player-concern capture with mechanism-activity forensics
+    # ------------------------------------------------------------------
+
+    def build_debug_report(
+        self,
+        concern: str,
+        step2_messages,
+        step3_messages,
+        timestamp: str = None,
+        log_path: str = None,
+    ):
+        """Deterministic, non-LLM /debug capture (EXEC_DEBUG).
+
+        Binds a felt-but-unnamed misbehavior (`concern`) to the live engine state
+        plus a parsed digest of recent mechanism activity, producing a
+        self-contained markdown report and a machine-readable index row.
+
+        Returns (report_text, index_row). Read-only over the game (V3): reads
+        engine attributes and the debug log only; writes nothing (play.py owns
+        the .md and the JSONL append). Self-contained (V2): the recent-activity
+        digest and full state snapshot are embedded verbatim, so deleting the log
+        afterward does not blank the report. Non-LLM (V1): no section calls the
+        model. Same contract family as scene_debug_report / construct_report.
+        """
+        concern = (concern or "").strip()
+
+        # ── log path: authoritative live handler, never reconstructed (V6) ──
+        if log_path is None:
+            base_file = getattr(_h_file, "baseFilename", None) if _h_file else None
+            log_path = base_file or "debug.log"
+        log_base = log_path.rsplit("/", 1)[-1]
+
+        # ── category routing (highlights, never suppresses — V5) ────────────
+        category, matched_kw = _route_debug_category(concern)
+
+        # ── recent mechanism activity (last ~5 turn blocks, parsed now) ─────
+        entries, condensed_this_turn = _scan_recent_activity(log_path)
+
+        # ── state snapshot from retained per-turn attrs (§3.2) ──────────────
+        sess = self.session
+        turn = self._turn_count
+        people = sorted(sess.people_present)
+        has_digest = _messages_have_digest(step2_messages, step3_messages)
+        cast_warnings = list(self._cast_warnings)
+        loc_warnings = list(self._loc_warnings)
+        tracker = sorted(self.npc_tracker.all(), key=lambda r: r.slug)
+
+        # ── report filename (basename; play.py joins the debug/ dir) ────────
+        stamp = log_base[:-4] if log_base.endswith(".log") else log_base
+        stamp = stamp.removeprefix("debug_") or "session"
+        slug = re.sub(r"[^a-z0-9]+", "-", concern.lower()).strip("-")[:40] or "concern"
+        report_file = f"{stamp}_turn{turn}_{slug}.md"
+
+        def _y(v) -> str:
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            return json.dumps(v)
+
+        def _cat_prefixes(cat: str) -> list:
+            return [p for p, d in _PREFIX_REGISTRY.items() if d["category"] == cat]
+
+        def _grep_re(prefixes: list) -> str:
+            inner = "|".join(p.strip("[]") for p in prefixes)
+            return rf"grep -nE '\[({inner})\]' {log_base}"
+
+        def _last_user(msgs) -> str:
+            for m in reversed(msgs or []):
+                if m.get("role") == "user":
+                    return str(m.get("content", ""))
+            return ""
+
+        # Category → (engine-state readout lines, next-check hints). Rendered for
+        # the matched category first; the full activity breakdown below shows all.
+        def _state_readout(cat: str) -> list:
+            out: list = []
+            if cat == "memory":
+                out.append(f"- has_digest (STORY SO FAR compaction): {has_digest}")
+                out.append(f"- condensed_this_turn ([CTX] this block): {condensed_this_turn}")
+                out.append(f"- seed_status: {self._seed_status}")
+            elif cat == "location":
+                out.append(f"- session.location: {sess.location}")
+                out.append(f"- turn_stationary: {self._turn_stationary}")
+                out.append(
+                    "- loc_warnings: "
+                    + (", ".join(loc_warnings) if loc_warnings else "(none)")
+                )
+            elif cat == "misattribution":
+                out.append(
+                    "- cast_warnings (named-but-absent): "
+                    + (", ".join(cast_warnings) if cast_warnings else "(none)")
+                )
+                out.append(f"- people_present: {', '.join(people) or 'none'}")
+                for rec in tracker:
+                    drift = (
+                        "  ⚠ last-seen ≠ session.location"
+                        if rec.location_last_seen
+                        and rec.location_last_seen != sess.location
+                        else ""
+                    )
+                    out.append(
+                        f"- npc {rec.slug}: last-seen "
+                        f"{rec.location_last_seen or '(unknown)'}{drift}"
+                    )
+            elif cat == "classification":
+                out.append(f"- turn_stationary: {self._turn_stationary}")
+                out.append(f"- classified input (step2 last user):\n    {_last_user(step2_messages)[:300]}")
+            elif cat == "prose":
+                out.append(f"- seed_status: {self._seed_status}")
+                out.append(f"- has_digest: {has_digest}")
+                out.append(f"- condensed_this_turn: {condensed_this_turn}")
+            return out
+
+        _HINTS = {
+            "memory": "Compare the /construct census below (canon total vs "
+                      "as-fed-last-turn) against has_digest/condensed_this_turn: a "
+                      "note may be compacted into the digest, not truly forgotten.",
+            "location": "Cross-check _turn_stationary against the [COMMIT-LOC] "
+                        "source= in the digest — a stationary verdict beside a "
+                        "record_event re-mark is the divergence to explain.",
+            "misattribution": "Compare npc_tracker last-seen vs session.location and "
+                              "[CAST] mentioned-but-absent against the [STEP2] "
+                              "record-tool witnesses for the turn.",
+            "classification": "Inspect the classified step2 input for the no-sigil "
+                              "default ([MC — likely spoken aloud…]) and the "
+                              "[STEP2] stationary nudge outcome.",
+            "prose": "Correlate the symptom turn with a preceding [ENTROPY] refresh "
+                     "or [CTX] _condense_context — a rewrite often trails a "
+                     "context shift by a turn.",
+            "uncategorized": "No keyword matched; scan the full activity digest and "
+                             "state snapshot for the fault directly.",
+        }
+
+        # ── assemble report ─────────────────────────────────────────────────
+        L: list = []
+        cat_label = (
+            f'{category}  (matched keyword: "{matched_kw}")'
+            if matched_kw
+            else f"{category}  (no keyword matched — all readouts shown)"
+        )
+
+        L.append("---")
+        L.append(f"session: {Note.NOTEFILE.rsplit('/', 1)[-1]}")
+        L.append(f"turn: {turn}")
+        L.append(f"timestamp: {timestamp or ''}")
+        L.append(f"concern: {_y(concern)}")
+        L.append(f"category: {category}")
+        L.append(f"matched_keyword: {_y(matched_kw)}")
+        L.append(f"location: {sess.location}")
+        L.append(f"people: {_y(people)}")
+        L.append("flags:")
+        L.append(f"  seed_status: {self._seed_status}")
+        L.append(f"  turn_stationary: {_y(self._turn_stationary)}")
+        L.append(f"  has_digest: {_y(has_digest)}")
+        L.append(f"  condensed_this_turn: {_y(condensed_this_turn)}")
+        L.append(f"  cast_warnings: {_y(cast_warnings)}")
+        L.append(f"  loc_warnings: {_y(loc_warnings)}")
+        L.append(f"log_file: {log_base}")
+        L.append("---")
+
+        L.append("\n## Player concern")
+        L.append(concern or "(empty)")
+
+        L.append(f"\n## Auto-category: {cat_label}")
+
+        L.append(f"\n## State snapshot (turn {turn})")
+        L.append(f"- location: {sess.location}")
+        L.append(f"- people present: {', '.join(people) or 'none'}")
+        L.append(f"- current scene: {sess.current_scene or '(none)'}")
+        L.append(f"- seed_status: {self._seed_status}")
+        L.append(f"- turn_stationary: {self._turn_stationary}")
+        L.append(f"- last_payload_toks: {self._last_payload_toks}")
+        L.append(f"- has_digest: {has_digest}")
+        L.append(f"- condensed_this_turn: {condensed_this_turn}")
+        L.append(f"- cast_warnings: {', '.join(cast_warnings) or '(none)'}")
+        L.append(f"- loc_warnings: {', '.join(loc_warnings) or '(none)'}")
+        L.append("- npc_tracker (last-seen · turn_last_active):")
+        if tracker:
+            for rec in tracker:
+                L.append(
+                    f"    {rec.slug}: {rec.location_last_seen or '(unknown)'} "
+                    f"· turn {rec.turn_last_active}"
+                )
+        else:
+            L.append("    (no NPCs registered)")
+
+        L.append(f"\n## Recent mechanism activity (parsed from {log_base})")
+        if entries:
+            for e in entries:
+                tk = e["turn"] if e["turn"] is not None else "?"
+                L.append(f"- turn {tk}  {e['text']}")
+        else:
+            L.append("- (no interesting telemetry in the last ~5 turn blocks)")
+
+        L.append(f"\n## Failure-mode readout (category: {category})")
+        if category == "uncategorized":
+            L.append("(uncategorized — full activity + state snapshot above)")
+        else:
+            L.append(f"### Matched: {category}")
+            readout = _state_readout(category)
+            L.extend(readout or ["(no category-specific engine state)"])
+            matched_lines = [e for e in entries if e["category"] == category]
+            if matched_lines:
+                L.append(f"\nlog lines for {category}:")
+                for e in matched_lines:
+                    tk = e["turn"] if e["turn"] is not None else "?"
+                    L.append(f"- turn {tk}  {e['text']}")
+            else:
+                L.append(f"\n(no {category} log lines in the scan window)")
+
+        # V5: every other category still shown, grouped, so nothing is hidden.
+        other_cats = sorted({e["category"] for e in entries} - {category})
+        if other_cats:
+            L.append("\n### Other categories present")
+            for oc in other_cats:
+                L.append(f"- {oc}: "
+                         + ", ".join(sorted({e["prefix"] for e in entries
+                                             if e["category"] == oc})))
+
+        # memory enrichment: the /construct census for a parsed subject noun.
+        if category == "memory":
+            subject = _parse_debug_subject(concern)
+            L.append("\n## Subject census (memory enrichment)")
+            if subject:
+                L.append(f"Parsed subject: {subject}\n")
+                L.append("```")
+                L.append(self.construct_report(subject))
+                L.append("```")
+            else:
+                L.append("(no subject noun parsed from the concern; "
+                         "run /construct <name> for a census)")
+
+        L.append("\n## Log links")
+        L.append(f"Path: {log_path}")
+        if category != "uncategorized" and _cat_prefixes(category):
+            L.append(f"  {_grep_re(_cat_prefixes(category))}")
+        all_prefixes = list(_PREFIX_REGISTRY)
+        L.append(f"  {_grep_re(all_prefixes)}")
+        L.append(f"  grep -n 'TURN {turn}' {log_base}")
+
+        L.append("\n## Suggested next checks")
+        L.append(_HINTS.get(category, _HINTS["uncategorized"]))
+
+        report_text = "\n".join(L) + "\n"
+
+        index_row = {
+            "session": Note.NOTEFILE.rsplit("/", 1)[-1],
+            "turn": turn,
+            "timestamp": timestamp or "",
+            "concern": concern,
+            "category": category,
+            "matched_keyword": matched_kw,
+            "location": sess.location,
+            "people": people,
+            "seed_status": self._seed_status,
+            "turn_stationary": self._turn_stationary,
+            "has_digest": has_digest,
+            "condensed_this_turn": condensed_this_turn,
+            "cast_warnings": cast_warnings,
+            "loc_warnings": loc_warnings,
+            "log_file": log_base,
+            "report_file": report_file,
+            "activity_count": len(entries),
+        }
+        return report_text, index_row
 
     def scene_debug_report(self) -> str:
         """Token-budget diagnostic for all entities in the current scene.

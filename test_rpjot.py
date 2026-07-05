@@ -6819,5 +6819,231 @@ class TestConstructReport(unittest.TestCase):
         self.assertIn("note(s)", default)
 
 
+# ---------------------------------------------------------------------------
+# 13. /debug concern-capture forensics (EXEC_DEBUG) — deterministic, non-LLM
+# ---------------------------------------------------------------------------
+
+
+class TestDebugReport(unittest.TestCase):
+    """Deterministic coverage for EXEC_DEBUG: the log-tail scanner, keyword
+    routing, build_debug_report state snapshot + self-containment, and the
+    index.jsonl round-trip. No LLM."""
+
+    def setUp(self):
+        import tempfile
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _engine(self, location="manor/library", people=None):
+        eng = RPJotEngine(
+            location=location,
+            people_present=people if people is not None else {"mc"},
+        )
+        eng.register_all_tools()
+        return eng
+
+    def _write_log(self, text):
+        import tempfile
+
+        fd, p = tempfile.mkstemp(suffix=".log")
+        os.close(fd)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        self.addCleanup(lambda: os.path.exists(p) and os.remove(p))
+        return p
+
+    # A 6-turn log; turn 1 holds an OLD [COMMIT-LOC] that must fall outside the
+    # default 5-block (turns_back=4) window; turn 6 holds a fresh one + condense.
+    _LOG = (
+        "2026-07-05 14:00:00 [INFO    ] r.run_turn: [TURN 1] run_turn: START\n"
+        "2026-07-05 14:00:01 [INFO    ] r.x: [COMMIT-LOC] OLD commit turn 1\n"
+        "2026-07-05 14:00:02 [INFO    ] r.run_turn: [TURN 2] run_turn: START\n"
+        "2026-07-05 14:00:03 [INFO    ] r.x: [CAST] mentioned-but-absent: bob\n"
+        "2026-07-05 14:00:04 [INFO    ] r.run_turn: [TURN 3] run_turn: START\n"
+        "2026-07-05 14:00:05 [INFO    ] r.run_turn: [TURN 4] run_turn: START\n"
+        "2026-07-05 14:00:06 [INFO    ] r.run_turn: [TURN 5] run_turn: START\n"
+        "2026-07-05 14:00:07 [INFO    ] r.run_turn: [TURN 6] run_turn: START\n"
+        "2026-07-05 14:00:08 [DEBUG   ] r.c: [CTX] _condense_context: input=6120 tok\n"
+        "2026-07-05 14:00:09 [INFO    ] r.x: [COMMIT-LOC] NEW turn 6 (source=record_event)\n"
+        "2026-07-05 14:00:10 [INFO    ] r.x: [TURN] step1 done boring not-registered\n"
+    )
+
+    # ── scanner block-splitting ──────────────────────────────────────────
+    def test_scanner_window_and_prefix_filtering(self):
+        from rpjot import _scan_recent_activity
+
+        p = self._write_log(self._LOG)
+        entries, condensed = _scan_recent_activity(p, turns_back=4)
+        texts = [e["text"] for e in entries]
+        turns = {e["turn"] for e in entries}
+        # last 5 blocks = turns 2..6; turn 1's OLD [COMMIT-LOC] excluded.
+        self.assertNotIn(1, turns)
+        self.assertTrue(any("OLD commit turn 1" not in t for t in texts))
+        self.assertFalse(any("OLD commit turn 1" in t for t in texts))
+        # turn 6's NEW [COMMIT-LOC] present; turn 2's [CAST] present.
+        self.assertTrue(any("NEW turn 6" in t for t in texts))
+        self.assertTrue(any("[CAST] mentioned-but-absent" in t for t in texts))
+        # unregistered [TURN] step1 line filtered out; markers not entries.
+        self.assertFalse(any("step1 done" in t for t in texts))
+        self.assertFalse(any("run_turn: START" in t for t in texts))
+        # condense in the newest block → condensed_this_turn True.
+        self.assertTrue(condensed)
+
+    def test_scanner_missing_log_is_honest(self):
+        from rpjot import _scan_recent_activity
+
+        entries, condensed = _scan_recent_activity("/no/such/debug.log")
+        self.assertEqual(entries, [])
+        self.assertFalse(condensed)
+
+    def test_scanner_reads_prefix_registry(self):
+        # A prefix registered at runtime must be picked up with no scanner edit
+        # (guarantees Phase 3/4's [PHASING]/[LOCALE]/[CARTO] auto-appear).
+        from rpjot import _scan_recent_activity, register_prefix, _PREFIX_REGISTRY
+
+        key = "[__PHASETEST__]"
+        try:
+            register_prefix(key, "phasing", "test")
+            p = self._write_log(
+                "2026-07-05 14:00:00 [INFO    ] r.run_turn: [TURN 1] run_turn: START\n"
+                "2026-07-05 14:00:01 [INFO    ] r.x: [__PHASETEST__] hello world\n"
+            )
+            entries, _ = _scan_recent_activity(p)
+            self.assertTrue(any(e["prefix"] == key for e in entries))
+            self.assertEqual(entries[-1]["category"], "phasing")
+        finally:
+            _PREFIX_REGISTRY.pop(key, None)
+
+    # ── keyword routing ──────────────────────────────────────────────────
+    def test_category_routing(self):
+        from rpjot import _route_debug_category
+
+        self.assertEqual(_route_debug_category("remember the locket")[0], "memory")
+        self.assertEqual(
+            _route_debug_category("attributed to the wrong person")[0],
+            "misattribution",
+        )
+        self.assertEqual(
+            _route_debug_category("why did the location change?")[0], "location"
+        )
+        cat, kw = _route_debug_category("the vibe is just off somehow")
+        self.assertEqual(cat, "uncategorized")
+        self.assertIsNone(kw)
+        # "said that" (misattribution) beats bare "said" (classification).
+        self.assertEqual(
+            _route_debug_category("you said that but it was someone else")[0],
+            "misattribution",
+        )
+
+    # ── build_debug_report: snapshot + self-containment ──────────────────
+    def test_build_report_snapshot_and_self_contained(self):
+        p = self._write_log(self._LOG)
+        eng = self._engine(location="manor/library", people={"evie", "bartholomew"})
+        eng._turn_count = 6
+        eng._seed_status = "hit-unchanged"
+        eng._turn_stationary = False
+        eng._loc_warnings = ["filed manor != session manor/library"]
+        text, row = eng.build_debug_report(
+            "why did the location change?",
+            [{"role": "user", "content": "STORY SO FAR:\nrecap"}],
+            [],
+            timestamp="2026-07-05 14:31:07",
+            log_path=p,
+        )
+        # frontmatter + fixed sections present
+        for token in (
+            "category: location",
+            "## State snapshot (turn 6)",
+            "## Recent mechanism activity",
+            "## Failure-mode readout",
+            "seed_status: hit-unchanged",
+        ):
+            self.assertIn(token, text)
+        # self-contained: the parsed activity lines are EMBEDDED, not just linked.
+        self.assertIn("[COMMIT-LOC] NEW turn 6 (source=record_event)", text)
+        self.assertIn("[CTX] _condense_context", text)
+        # snapshot matches engine attributes
+        self.assertEqual(row["category"], "location")
+        self.assertEqual(row["turn"], 6)
+        self.assertEqual(row["location"], "manor/library")
+        self.assertTrue(row["has_digest"])
+        self.assertTrue(row["condensed_this_turn"])
+        self.assertEqual(row["loc_warnings"], ["filed manor != session manor/library"])
+        # delete the log; the already-built report text still holds the digest (V2).
+        os.remove(p)
+        self.assertIn("[COMMIT-LOC] NEW turn 6", text)
+
+    def test_uncategorized_shows_all_and_no_highlight(self):
+        p = self._write_log(self._LOG)
+        eng = self._engine()
+        eng._turn_count = 6
+        text, row = eng.build_debug_report("something feels vaguely amiss", [], [], log_path=p)
+        self.assertEqual(row["category"], "uncategorized")
+        self.assertIsNone(row["matched_keyword"])
+        self.assertIn("no keyword matched", text)
+        # full activity still embedded despite no category highlight (V5).
+        self.assertIn("[CAST] mentioned-but-absent", text)
+
+    def test_memory_category_appends_construct_census(self):
+        Note.append(Note.NOTEFILE, Note.jot(
+            message="A silver locket.", tag="obj:locket", context="canon",
+            pwd="/story/object/locket", now=1000))
+        p = self._write_log(self._LOG)
+        eng = self._engine(people={"mc"})
+        eng._turn_count = 6
+        text, row = eng.build_debug_report(
+            "why don't you remember the locket?", [], [], log_path=p
+        )
+        self.assertEqual(row["category"], "memory")
+        self.assertIn("Subject census", text)
+        self.assertIn("Parsed subject: locket", text)
+        self.assertIn("CONSTRUCT: locket", text)
+
+    # ── index.jsonl round-trip ───────────────────────────────────────────
+    def test_index_rows_are_valid_json_with_distinct_report_file(self):
+        p = self._write_log(self._LOG)
+        eng = self._engine()
+        eng._turn_count = 6
+        _, r1 = eng.build_debug_report("location moved wrong", [], [], log_path=p)
+        eng._turn_count = 7
+        _, r2 = eng.build_debug_report("who said that line?", [], [], log_path=p)
+        # each row survives a JSON round-trip standalone (V4)
+        for row in (r1, r2):
+            self.assertEqual(json.loads(json.dumps(row))["session"], row["session"])
+        self.assertNotEqual(r1["report_file"], r2["report_file"])
+        self.assertTrue(r1["report_file"].endswith(".md"))
+
+    def test_file_write_round_trip(self):
+        import tempfile
+
+        p = self._write_log(self._LOG)
+        eng = self._engine()
+        eng._turn_count = 6
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        idx = os.path.join(d, "index.jsonl")
+        for concern in ("location moved wrong", "forgot the key"):
+            text, row = eng.build_debug_report(concern, [], [], log_path=p)
+            with open(os.path.join(d, row["report_file"]), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            with open(idx, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        with open(idx, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertTrue(os.path.isfile(os.path.join(d, row["report_file"])))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
