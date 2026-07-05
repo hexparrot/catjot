@@ -87,6 +87,84 @@ def _msg_toks(m: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Shared introspection / fixed-width table renderers (SYNTH_OUTPUT §6 Phase 0a,
+# E4). Lifted verbatim from scene_debug_report's nested helpers so /stats,
+# /construct, and /debug render from one source instead of drifting copies.
+# ---------------------------------------------------------------------------
+
+_INTROSPECT_WIDTH = 72  # total line width for introspection tables
+
+
+def _introspect_note_toks(notes: list) -> int:
+    """Token cost of a list of Notes rendered as context+message text.
+
+    Byte-identical to the `_note_toks` helper previously nested in
+    scene_debug_report.
+    """
+    text = "\n\n".join(
+        n.context.strip() + "\n\n" + n.message.strip() for n in notes
+    ).strip()
+    return _tok(text)
+
+
+def _introspect_row(
+    label: str, n_notes: int, toks: int, cap: int, indent: int = 4
+) -> str:
+    """One fixed-width introspection table row: label · notes · tok · % of cap.
+
+    Byte-identical to the `_row` helper previously nested in
+    scene_debug_report; `cap` (formerly a closure variable) is now explicit.
+    """
+    pct = 100.0 * toks / cap if cap else 0.0
+    return (
+        f"{'':>{indent}}{label:<34}"
+        f"  {n_notes:>4} notes"
+        f"  {toks:>6} tok"
+        f"  {pct:>5.1f}%"
+    )
+
+
+def _introspect_rule(char: str = "─", width: int = _INTROSPECT_WIDTH) -> str:
+    """A horizontal rule (the `SEP`='─' / `HDR`='═' idiom lifted to one place)."""
+    return char * width
+
+
+# ---------------------------------------------------------------------------
+# Telemetry-prefix registry (SYNTH_OUTPUT §6 Phase 0c, E2). One source of truth
+# for "what mechanisms announce": maps a log prefix (e.g. "[COMMIT-LOC]") to a
+# {category, meaning} descriptor. Pure scaffolding — EXEC_DEBUG's scanner reads
+# it in a later phase; nothing consumes it yet. MOVEMENT_TREE ([LOCALE]/[CARTO])
+# and PLAYER_PHASING ([PHASING]) self-register in their phases.
+# ---------------------------------------------------------------------------
+
+_PREFIX_REGISTRY: dict[str, dict[str, str]] = {}
+
+
+def register_prefix(prefix: str, category: str, meaning: str) -> None:
+    """Register a telemetry log prefix under a category with a human meaning.
+
+    Idempotent overwrite: re-registering a prefix updates its descriptor.
+    """
+    _PREFIX_REGISTRY[prefix] = {"category": category, "meaning": meaning}
+
+
+# Pre-register the currently-emitted interesting prefixes (all confirmed live in
+# the codebase). Categories: location / misattribution / memory / prose /
+# tooling / budget.
+register_prefix("[COMMIT-LOC]", "location", "session.location committed/re-marked")
+register_prefix("[REMARK]", "location", "per-turn location re-mark verdict")
+register_prefix("[LOCDRIFT]", "location", "filed-vs-session location divergence")
+register_prefix("[CAST]", "misattribution", "narrative names an absent character")
+register_prefix("[CTX]", "memory", "context assembly / render / condensation")
+register_prefix("[ENTROPY]", "prose", "prose entropy / anti-repetition signal")
+register_prefix("[SEED]", "memory", "idle-window step-1 precompute (seed) outcome")
+register_prefix("[STEP2]", "tooling", "step-2 compliance / write-tool activity")
+register_prefix("[TOOLS]", "tooling", "per-turn step-2 tool census")
+register_prefix("[DISPATCH]", "tooling", "tool dispatch routing")
+register_prefix("[BUDGET]", "budget", "baseline context token measure (soft warn)")
+
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -770,7 +848,19 @@ class WorldStateStep:
                 "last-known locations for continuity, not a record of what happened "
                 "this turn):\n" + "\n".join(obj_lines)
             )
-        return "\n".join(parts) + "\n"
+        result = "\n".join(parts) + "\n"
+        # Soft, observational budget measure (SYNTH_OUTPUT §6 Phase 0e): report
+        # the deterministic baseline context size once per full-path turn. No
+        # gate — Phase 4's locale-graph block must keep this delta visible.
+        _cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        _base_toks = _tok(result)
+        logger.info(
+            "[BUDGET] baseline context: %d tok (%.1f%% of cap=%d)",
+            _base_toks,
+            100.0 * _base_toks / _cap if _cap else 0.0,
+            _cap,
+        )
+        return result
 
     @staticmethod
     def _is_unchanged_reply(doc: str) -> bool:
@@ -1441,6 +1531,12 @@ class RPJotEngine:
         # so note timestamps are destroyed at the render boundary — this maps
         # cache key → captured refs, evicted in lockstep with _query_cache.
         self._ref_cache: dict = {}
+        # Rendered-context census (SYNTH_OUTPUT §6 Phase 0b, E1): the `now`
+        # timestamps of every Note actually folded into this turn's assembled
+        # context (via render_context). Reset at run_turn start; read by
+        # /construct's census and /debug's memory forensics ("was X fed?").
+        # Additive capture only — never influences what context is built.
+        self._last_ctx_now: set[int] = set()
         # Cast-drift warnings (T1): NPC slugs named in the turn's text but absent
         # from people_present. Detection only; surfaced in /stats and the next
         # step-1 SCENE STATE header, cleared when the discrepancy resolves.
@@ -2059,6 +2155,8 @@ class RPJotEngine:
         t0 = time.perf_counter()
         # Citation capture is strictly turn-scoped (TS_CITATIONS §3.1).
         self._turn_refs = []
+        # Rendered-context census is likewise turn-scoped (Phase 0b, E1).
+        self._last_ctx_now = set()
 
         # Step 1 — seeded delta when the idle-window precompute is valid.
         seed = self._consume_seed()
@@ -2152,7 +2250,7 @@ class RPJotEngine:
 
         # Cast-drift detection (T1): compare who the turn's text names against
         # who the session thinks is present. Detection only — never mutates cast.
-        self._scan_cast_drift(classified_input, narrative)
+        self._scan_drift("cast", classified_input, narrative)
 
         # Advance turn counter; schedule entropy refresh
         self._turn_count += 1
@@ -2267,6 +2365,20 @@ class RPJotEngine:
             logger.debug("[SEED] stale seed rejected: state snapshot changed")
             return None
         return seed
+
+    def _scan_drift(self, kind: str, classified_input: str, narrative: str) -> list:
+        """Unified drift-scan seam (SYNTH_OUTPUT §6 Phase 0d, E3).
+
+        Generalizes the cast-drift scan so future `kind`s (room via
+        MOVEMENT_TREE, object later) surface `_{kind}_warnings` through the same
+        entry point. Today only "cast" is wired; it dispatches to the unchanged
+        _scan_cast_drift so cast behavior and _cast_warnings are byte-identical.
+        Unknown kinds are a no-op (return []) — no room drift is implemented yet.
+        """
+        if kind == "cast":
+            return self._scan_cast_drift(classified_input, narrative)
+        logger.debug("[CTX] _scan_drift: no scanner for kind=%r (no-op)", kind)
+        return []
 
     def _scan_cast_drift(self, classified_input: str, narrative: str) -> list:
         """Detect NPCs named in the turn's text but absent from people_present.
@@ -3271,6 +3383,10 @@ class RPJotEngine:
         else:
             notes = sorted(bundle, key=lambda n: n.now, reverse=True)
             note_count = len(notes)
+            # Census capture (Phase 0b, E1): every Note that reaches the render
+            # boundary is part of the assembled context fed to the LLM. Additive
+            # — does not change what is rendered or truncated below.
+            self._last_ctx_now.update(n.now for n in notes)
             parts = []
             for n in notes:
                 part = n.context.strip() + "\n\n" + n.message.strip()
@@ -6555,25 +6671,18 @@ class RPJotEngine:
         Returns a formatted multi-section string suitable for printing directly.
         """
         cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
-        W = 72  # total line width
+        W = _INTROSPECT_WIDTH  # total line width
 
+        # Thin delegates to the module-level introspection renderers (Phase 0a,
+        # E4); output is byte-identical to the former nested helpers.
         def _note_toks(notes: list) -> int:
-            text = "\n\n".join(
-                n.context.strip() + "\n\n" + n.message.strip() for n in notes
-            ).strip()
-            return _tok(text)
+            return _introspect_note_toks(notes)
 
         def _row(label: str, n_notes: int, toks: int, indent: int = 4) -> str:
-            pct = 100.0 * toks / cap if cap else 0.0
-            return (
-                f"{'':>{indent}}{label:<34}"
-                f"  {n_notes:>4} notes"
-                f"  {toks:>6} tok"
-                f"  {pct:>5.1f}%"
-            )
+            return _introspect_row(label, n_notes, toks, cap, indent)
 
-        SEP = "─" * W
-        HDR = "═" * W
+        SEP = _introspect_rule("─", W)
+        HDR = _introspect_rule("═", W)
 
         lines: list[str] = []
         grand_n = 0

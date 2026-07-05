@@ -1272,6 +1272,17 @@ class TestRenderContext(unittest.TestCase):
         result = self.engine.render_context(b)
         self.assertLess(result.index("new message"), result.index("old message"))
 
+    def test_last_ctx_now_captures_rendered_note_timestamps(self):
+        # Phase 0b (E1): every Note reaching the render boundary is recorded in
+        # _last_ctx_now, the shared substrate for /construct census and /debug
+        # memory forensics. Deterministic — no LLM (bundle is under soft limit).
+        self.engine._last_ctx_now = set()
+        b = self._bundle(
+            [self._note("a", ts=111_111), self._note("b", ts=222_222)]
+        )
+        self.engine.render_context(b)
+        self.assertEqual(self.engine._last_ctx_now, {111_111, 222_222})
+
     def test_under_soft_limit_no_condensation(self):
         b = self._bundle([self._note("small content")])
         called = []
@@ -1929,6 +1940,75 @@ class TestCastDrift(unittest.TestCase):
         eng.session.people_present.add("evie")
         eng._scan_cast_drift("x", "Evie is still here.")
         self.assertEqual(eng._cast_warnings, [])
+
+    def test_scan_drift_cast_parity(self):
+        # The unified _scan_drift("cast", ...) seam (Phase 0d) must produce the
+        # exact same warnings as the underlying _scan_cast_drift.
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        warnings = eng._scan_drift(
+            "cast", "[MC action]: I look", "Evie beckons from the doorway."
+        )
+        self.assertIn("evie", warnings)
+        self.assertEqual(warnings, eng._cast_warnings)
+
+    def test_scan_drift_unknown_kind_is_noop(self):
+        # No room-drift scanner exists yet; an unknown kind is a harmless no-op
+        # and must not touch _cast_warnings.
+        eng = self._engine({"player"})
+        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng._scan_drift("cast", "x", "Evie appears.")
+        before = list(eng._cast_warnings)
+        self.assertEqual(eng._scan_drift("room", "x", "Evie appears."), [])
+        self.assertEqual(eng._cast_warnings, before)
+
+
+# ---------------------------------------------------------------------------
+# 12c-tris. Telemetry-prefix registry — register_prefix / _PREFIX_REGISTRY (E2)
+# ---------------------------------------------------------------------------
+
+
+class TestPrefixRegistry(unittest.TestCase):
+    """The telemetry-prefix registry (Phase 0c) is the source of truth for
+    'what mechanisms announce'; later phases (EXEC_DEBUG) consume it."""
+
+    def test_preregistered_prefixes_present(self):
+        from rpjot import _PREFIX_REGISTRY
+
+        for prefix, cat in (
+            ("[COMMIT-LOC]", "location"),
+            ("[REMARK]", "location"),
+            ("[LOCDRIFT]", "location"),
+            ("[CAST]", "misattribution"),
+            ("[CTX]", "memory"),
+            ("[ENTROPY]", "prose"),
+            ("[SEED]", "memory"),
+            ("[STEP2]", "tooling"),
+            ("[TOOLS]", "tooling"),
+            ("[DISPATCH]", "tooling"),
+            ("[BUDGET]", "budget"),
+        ):
+            self.assertIn(prefix, _PREFIX_REGISTRY)
+            entry = _PREFIX_REGISTRY[prefix]
+            self.assertEqual(entry["category"], cat)
+            self.assertTrue(entry["meaning"])
+
+    def test_register_prefix_adds_and_overwrites(self):
+        from rpjot import _PREFIX_REGISTRY, register_prefix
+
+        key = "[__TEST_PREFIX__]"
+        self.assertNotIn(key, _PREFIX_REGISTRY)
+        try:
+            register_prefix(key, "testcat", "a test meaning")
+            self.assertEqual(
+                _PREFIX_REGISTRY[key],
+                {"category": "testcat", "meaning": "a test meaning"},
+            )
+            # Idempotent overwrite.
+            register_prefix(key, "testcat2", "updated")
+            self.assertEqual(_PREFIX_REGISTRY[key]["category"], "testcat2")
+        finally:
+            _PREFIX_REGISTRY.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
