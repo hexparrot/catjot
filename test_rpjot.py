@@ -19,6 +19,8 @@ import os
 import threading
 import unittest
 
+import rpjot
+
 from catjot import Note, ContextBundle
 from rpjot import (
     RPJotEngine,
@@ -2290,6 +2292,87 @@ class TestTimingTelemetry(unittest.TestCase):
         finally:
             mod.call_llm = original
         self.assertEqual(eng._compliance_step.last_rounds, 4)
+
+    # -- PLAYER_PHASING Phase 3: [PHASING] readout + EXPECTED_READ_S + prefix --
+
+    def test_phasing_prefix_registered(self):
+        self.assertIn("[PHASING]", rpjot._PREFIX_REGISTRY)
+        self.assertEqual(rpjot._PREFIX_REGISTRY["[PHASING]"]["category"], "phasing")
+
+    def test_expected_read_s_positive_float(self):
+        self.assertIsInstance(rpjot.EXPECTED_READ_S, float)
+        self.assertGreater(rpjot.EXPECTED_READ_S, 0.0)
+
+    def test_phasing_line_math_headroom_and_hidden(self):
+        # rw fits the budget, no overflow → hidden 100%, positive headroom.
+        line = rpjot._phasing_line(
+            turn=4,
+            wait_s=0.0,
+            step1_s=1.2,
+            step2_s=2.1,
+            step3_s=1.0,
+            rw_s=6.1,
+            budget_s=8.0,
+        )
+        # ps = 0.0 + 1.2 + 2.1 + 1.0 = 4.3; headroom = 8.0 - 6.1 = 1.9
+        self.assertEqual(
+            line,
+            "[PHASING] turn=4 ps=4.3s (wait=0.0 s1=1.2 s2=2.1 s3=1.0) | "
+            "rw=6.1s/budget=8.0s headroom=1.9s hidden=100%",
+        )
+
+    def test_phasing_line_overflow_reduces_hidden(self):
+        # Half the background work overflowed as wait_s → hidden 50%.
+        line = rpjot._phasing_line(
+            turn=2,
+            wait_s=3.0,
+            step1_s=0.0,
+            step2_s=0.0,
+            step3_s=0.0,
+            rw_s=6.0,
+            budget_s=4.0,
+        )
+        self.assertIn("hidden=50%", line)
+        self.assertIn("headroom=-2.0s", line)  # rw exceeds budget → negative
+        self.assertIn("ps=3.0s", line)  # wait_s alone dominates PS here
+
+    def test_phasing_line_no_background_is_fully_hidden(self):
+        # rw == 0 → nothing could overflow → hidden defined as 100%.
+        line = rpjot._phasing_line(
+            turn=1,
+            wait_s=0.0,
+            step1_s=1.0,
+            step2_s=1.0,
+            step3_s=1.0,
+            rw_s=0.0,
+        )
+        self.assertIn("hidden=100%", line)
+        self.assertIn("rw=0.0s", line)
+
+    def test_phasing_line_emitted_per_turn(self):
+        rounds = [
+            {"content": "WORLD STATE — the room"},
+            {"content": "nothing canonical"},
+            {"content": "The room stays quiet."},
+        ]
+        mod, original, eng, _ = self._patched(rounds)
+        try:
+            with self.assertLogs("rpjot_engine", level="INFO") as cm:
+                eng.run_turn(
+                    "[MC attention] I glance around the room",
+                    [{"role": "system", "content": "rules"}],
+                    [{"role": "system", "content": "prose"}],
+                )
+        finally:
+            mod.call_llm = original
+        phasing = [m for m in cm.output if "[PHASING]" in m]
+        self.assertEqual(len(phasing), 1)
+        self.assertRegex(
+            phasing[0],
+            r"\[PHASING\] turn=1 ps=\d+\.\ds "
+            r"\(wait=\d+\.\d s1=\d+\.\d s2=\d+\.\d s3=\d+\.\d\) \| "
+            r"rw=\d+\.\ds/budget=\d+\.\ds headroom=-?\d+\.\ds hidden=\d+%",
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -181,6 +181,11 @@ register_prefix("[STEP2]", "tooling", "step-2 compliance / write-tool activity")
 register_prefix("[TOOLS]", "tooling", "per-turn step-2 tool census")
 register_prefix("[DISPATCH]", "tooling", "tool dispatch routing")
 register_prefix("[BUDGET]", "budget", "baseline context token measure (soft warn)")
+register_prefix(
+    "[PHASING]",
+    "phasing",
+    "per-turn work reframed by phase (RW read-window vs PS felt latency)",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +541,58 @@ CONTEXT_HARD_LIMIT_TOKS = (
 # to protect every call_llm invocation from overflow.
 MODEL_CONTEXT_LIMIT_TOKS = 30_000
 _RESPONSE_RESERVE_TOKS = 2_000  # headroom reserved for the model's reply
+
+# PLAYER_PHASING §4: the reading-window budget (seconds) every RW/background unit
+# must fit inside to stay "free". This is a HUMAN tuning target, calibrated from
+# the [PHASING] readout's observed values — NOT an auto-governor. Nothing skips or
+# defers work based on it; it is the constant `headroom`/`hidden%` are measured
+# against so the operator can hand-tune the RPJOT_BG_* flags. Bump it to reflect
+# how long you actually take reading a turn of narrative.
+EXPECTED_READ_S = 20.0
+
+
+def _phasing_line(
+    turn: int,
+    wait_s: float,
+    step1_s: float,
+    step2_s: float,
+    step3_s: float,
+    rw_s: float,
+    budget_s: float = EXPECTED_READ_S,
+) -> str:
+    """Build the [PHASING] readout (PLAYER_PHASING §4), reframing the SAME values
+    [TIMING] already measured by PHASE. Pure/observational — no re-measurement.
+
+    - PS (post-submit, felt latency) = wait_s + step1 + step2 + step3.
+    - RW (reading window / background) = rw_s (idle worker spec_s + refresh_s).
+    - headroom = budget − rw: positive ⇒ room to move more work into RW.
+    - hidden%  = 1 − wait_s/rw: fraction of background work absorbed by the
+      reading window (100% = every background second was free). When there is no
+      background work (rw==0) nothing could overflow, so hidden is 100%.
+
+    PD (post-display housekeeping: compact_history, jots) runs after display on
+    the play loop's main thread, not inside run_turn, so it is NOT measured here
+    and is intentionally omitted rather than reported dishonestly.
+    """
+    ps_s = wait_s + step1_s + step2_s + step3_s
+    headroom_s = budget_s - rw_s
+    hidden_pct = (1.0 - wait_s / rw_s) * 100.0 if rw_s > 0 else 100.0
+    return (
+        "[PHASING] turn=%d ps=%.1fs (wait=%.1f s1=%.1f s2=%.1f s3=%.1f) | "
+        "rw=%.1fs/budget=%.1fs headroom=%.1fs hidden=%.0f%%"
+        % (
+            turn,
+            ps_s,
+            wait_s,
+            step1_s,
+            step2_s,
+            step3_s,
+            rw_s,
+            budget_s,
+            headroom_s,
+            hidden_pct,
+        )
+    )
 NARRATIVE_TEMPERATURE = (
     0.75  # temperature for final prose; higher than tool-dispatch calls
 )
@@ -2415,6 +2472,20 @@ class RPJotEngine:
             self._seed_status,
             bg_stats.get("spec_s", 0.0) + bg_stats.get("refresh_s", 0.0),
             bg_stats.get("wait_s", 0.0),
+        )
+        # [PHASING] companion (PLAYER_PHASING §4): reframe the SAME measured
+        # values by phase — RW background vs PS felt latency — against the
+        # EXPECTED_READ_S budget. Purely observational; re-measures nothing.
+        logger.info(
+            "%s",
+            _phasing_line(
+                self._turn_count + 1,
+                bg_stats.get("wait_s", 0.0),
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                bg_stats.get("spec_s", 0.0) + bg_stats.get("refresh_s", 0.0),
+            ),
         )
 
         # Cast-drift detection (T1): compare who the turn's text names against
