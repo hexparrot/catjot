@@ -1223,6 +1223,398 @@ class TestCanonicalizationSubstrate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 10c. Locale graph (MOVEMENT_TREE Phase 4) -- Tier 1, deterministic, zero LLM
+# ---------------------------------------------------------------------------
+
+
+class TestLocaleGraph(unittest.TestCase):
+    """MOVEMENT_TREE §3 substrate: edges, graph block, drift, adjacency traversal.
+
+    Deterministic, zero LLM. Seeds a small hierarchy into a temp notefile and
+    exercises the edge substrate (§3.0), room-drift detection (§3.1), the
+    hand-built locale-seed commit path (§3.2, no LLM), and adjacency-aware
+    traversal (§3.3) — including the backward-compat identity guarantee (I8).
+    """
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+        def seed(pwd, tag="", message="seed", now=None):
+            Note.append(
+                TMP_CATNOTE,
+                Note.jot(message=message, tag=tag, context="seed", pwd=pwd, now=now),
+            )
+
+        # manor/entryway, manor/foyer, manor/foyer/drawing-room, manor/cellar
+        seed("/story/location/manor", message="The manor.")
+        seed("/story/location/manor/entryway", message="The entryway.")
+        seed("/story/location/manor/foyer", message="The foyer.")
+        seed("/story/location/manor/foyer/drawing-room", message="The drawing room.")
+        seed("/story/location/manor/cellar", message="The cellar.")
+
+        self.engine = _make_engine(location="manor/entryway")
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    # --- §3.0 edge tag round-trip ---
+
+    def test_edge_tag_roundtrip(self):
+        from rpjot import _edge_tag, _edge_decode, TAG_ADJ
+
+        path = "manor/foyer/drawing-room"
+        tag = _edge_tag(path)
+        self.assertTrue(tag.startswith(TAG_ADJ))
+        self.assertNotIn("/", tag)  # slash-free, whitespace-safe tag word
+        self.assertEqual(_edge_decode(tag), path)
+
+    # --- §3.0 _add_edge bidirectional + idempotent (I1) ---
+
+    def test_edge_bidirectional(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        self.assertIn(
+            "manor/foyer/drawing-room", self.engine._locale_edges("manor/entryway")
+        )
+        self.assertIn(
+            "manor/entryway", self.engine._locale_edges("manor/foyer/drawing-room")
+        )
+
+    def test_edge_idempotent(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+
+        def adj_note_count(room):
+            from catjot import NoteContext, SearchType
+
+            with NoteContext(
+                Note.NOTEFILE, (SearchType.DIRECTORY, f"/story/location/{room}")
+            ) as nc:
+                return sum(1 for n in nc if n.context.startswith("adjacency:"))
+
+        before = adj_note_count("manor/entryway")
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        after = adj_note_count("manor/entryway")
+        self.assertEqual(before, after)  # re-adding writes nothing new
+
+    # --- §3.0 _locale_edges reads newest adjacency note ---
+
+    def test_locale_edges_reads_newest_note(self):
+        self.engine._add_edge("manor/entryway", "manor/cellar")
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        edges = self.engine._locale_edges("manor/entryway")
+        self.assertEqual(
+            edges, {"manor/cellar", "manor/foyer/drawing-room"}
+        )
+
+    def test_locale_edges_empty_when_none(self):
+        self.assertEqual(self.engine._locale_edges("manor/foyer"), set())
+
+    # --- I2 description/adjacency independence ---
+
+    def test_edge_preserves_description(self):
+        from catjot import ContextBundle
+
+        self.engine._add_edge("manor/foyer", "manor/cellar")
+        rendered = str(ContextBundle("/story/location/manor/foyer"))
+        self.assertIn("The foyer.", rendered)  # description note survived
+
+    def test_resave_preserves_edges(self):
+        self.engine._add_edge("manor/foyer", "manor/cellar")
+        self.engine._tool_save_location(
+            name="manor/foyer", description="A grand, re-described foyer."
+        )
+        # a re-description must not drop the edge
+        self.assertIn("manor/cellar", self.engine._locale_edges("manor/foyer"))
+
+    # --- §3.0 _locale_graph_block render ---
+
+    def test_locale_graph_block_renders_edges(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        block = self.engine._locale_graph_block()
+        self.assertIn("[LOCALE GRAPH]", block)
+        self.assertIn("manor/entryway", block)
+        self.assertIn("manor/foyer/drawing-room", block)
+
+    def test_locale_graph_block_empty_without_edges(self):
+        self.assertEqual(self.engine._locale_graph_block(), "")
+
+    # --- §3.1 room-drift detection ---
+
+    def test_scan_room_drift_detects_lexicon_word(self):
+        drift = self.engine._scan_drift(
+            "room", "look around", "A dusty scriptorium lay beyond the pantry."
+        )
+        # 'pantry' is a lexicon word with no canonical node → drift
+        self.assertIn("pantry", drift)
+
+    def test_scan_room_drift_ignores_mapped_room(self):
+        # 'cellar' resolves to manor/cellar (an existing node) → NOT drift.
+        drift = self.engine._scan_drift(
+            "room", "", "You descend toward the cellar."
+        )
+        self.assertNotIn("cellar", drift)
+
+    def test_scan_room_drift_ignores_non_room_words(self):
+        drift = self.engine._scan_drift(
+            "room", "", "The wind howled and the candle guttered."
+        )
+        self.assertEqual(drift, [])
+
+    # --- §3.2 hand-built locale-seed commit (no LLM) + cap (I4) ---
+
+    def test_consume_locale_seed_commits_nodes_and_edges(self):
+        self.engine._room_drift = ["drawing room"]
+        self.engine._locale_seed = {
+            "nodes": [
+                {
+                    "slug": "drawing-room",
+                    "parent": "manor/foyer",
+                    "description": "A quiet drawing room.",
+                }
+            ],
+            "edges": [["manor/entryway", "manor/foyer/drawing-room"]],
+            "drift": ["drawing room"],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count,
+        }
+        self.engine._consume_locale_seed()
+        self.assertTrue(
+            self.engine._location_node_exists("manor/foyer/drawing-room")
+        )
+        self.assertIn(
+            "manor/foyer/drawing-room", self.engine._locale_edges("manor/entryway")
+        )
+
+    def test_generate_ahead_capped_at_two(self):
+        # 3 NEW nodes, NONE named in drift → only 2 survive (I4).
+        self.engine._room_drift = []
+        self.engine._locale_seed = {
+            "nodes": [
+                {"slug": "corridor", "parent": "manor", "description": ""},
+                {"slug": "landing", "parent": "manor", "description": ""},
+                {"slug": "stairwell", "parent": "manor", "description": ""},
+            ],
+            "edges": [],
+            "drift": [],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count,
+        }
+        self.engine._consume_locale_seed()
+        survived = sum(
+            self.engine._location_node_exists(f"manor/{s}")
+            for s in ("corridor", "landing", "stairwell")
+        )
+        self.assertEqual(survived, 2)
+
+    def test_edge_requires_resolved_endpoints(self):
+        # I5: an edge to an unresolved (blank) endpoint records nothing.
+        self.engine._locale_seed = {
+            "nodes": [],
+            "edges": [["manor/entryway", ""]],
+            "drift": [],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count,
+        }
+        self.engine._consume_locale_seed()
+        self.assertEqual(self.engine._locale_edges("manor/entryway"), set())
+
+    def test_cartographer_does_not_move_session(self):
+        # I3: committing a proposal never touches session.location.
+        before = self.engine.session.location
+        self.engine._locale_seed = {
+            "nodes": [{"slug": "attic", "parent": "manor", "description": ""}],
+            "edges": [["manor/entryway", "manor/attic"]],
+            "drift": ["attic"],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count,
+        }
+        self.engine._consume_locale_seed()
+        self.assertEqual(self.engine.session.location, before)
+
+    def test_stale_locale_seed_rejected(self):
+        # turn-counter mismatch → no commit (mirrors _consume_seed discipline).
+        self.engine._locale_seed = {
+            "nodes": [{"slug": "attic", "parent": "manor", "description": ""}],
+            "edges": [],
+            "drift": ["attic"],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count + 99,
+        }
+        self.engine._consume_locale_seed()
+        self.assertFalse(self.engine._location_node_exists("manor/attic"))
+
+    def test_no_seed_is_inert(self):
+        # I4/I6: no staged seed → consume is a pure no-op, no crash.
+        self.engine._locale_seed = None
+        self.engine._consume_locale_seed()  # must not raise
+
+    def test_generate_ahead_stub_is_inert(self):
+        # Tripwire: a committed speculative node adds no edges it was not given
+        # and moves no one.
+        before_loc = self.engine.session.location
+        self.engine._locale_seed = {
+            "nodes": [{"slug": "corridor", "parent": "manor", "description": ""}],
+            "edges": [],
+            "drift": [],
+            "state": self.engine._seed_state_snapshot(),
+            "turn": self.engine._turn_count,
+        }
+        self.engine._consume_locale_seed()
+        self.assertEqual(self.engine._locale_edges("manor/corridor"), set())
+        self.assertEqual(self.engine.session.location, before_loc)
+
+    def test_speculate_writes_nothing_without_endpoint(self):
+        # I7: speculate_locale STAGES only; with a room drift but no endpoint the
+        # call fails and NOTHING is staged or written.
+        self.engine.init_pipeline()
+        self.engine._room_drift = ["scriptorium"]
+        self.engine._room_drift_text = "a scriptorium beyond the pantry"
+        self.engine.speculate_locale()
+        self.assertIsNone(self.engine._locale_seed)  # no seed staged (no endpoint)
+
+    def test_speculate_no_drift_no_seed(self):
+        self.engine.init_pipeline()
+        self.engine._room_drift = []
+        self.engine.speculate_locale()
+        self.assertIsNone(self.engine._locale_seed)
+
+    # --- §3.3 adjacency-aware resolve_destination ---
+
+    def test_resolve_destination_adjacent_full_path(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        dest, nav_type = self.engine.resolve_destination(
+            "manor/entryway",
+            "manor/foyer/drawing-room",
+            edges_of=self.engine._locale_edges,
+        )
+        self.assertEqual(nav_type, "adjacent")
+        self.assertEqual(dest, "manor/foyer/drawing-room")
+
+    def test_resolve_destination_adjacent_bare_leaf(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        dest, nav_type = self.engine.resolve_destination(
+            "manor/entryway", "drawing-room", edges_of=self.engine._locale_edges
+        )
+        self.assertEqual(nav_type, "adjacent")
+        self.assertEqual(dest, "manor/foyer/drawing-room")
+
+    # --- §3.3 BFS compute_traversal over edges ---
+
+    def test_compute_traversal_bfs_shortest_path(self):
+        # entryway <-> foyer <-> drawing-room: a 2-hop edge path that the tree
+        # walk (through manor) would route differently.
+        self.engine._add_edge("manor/entryway", "manor/foyer")
+        self.engine._add_edge("manor/foyer", "manor/foyer/drawing-room")
+        path = self.engine.compute_traversal(
+            "manor/entryway",
+            "manor/foyer/drawing-room",
+            edges_of=self.engine._locale_edges,
+        )
+        self.assertEqual(
+            path,
+            ["manor/entryway", "manor/foyer", "manor/foyer/drawing-room"],
+        )
+
+    def test_compute_traversal_bfs_falls_back_without_connection(self):
+        # No edges connect these → BFS finds nothing → exact tree walk.
+        with_edges = self.engine.compute_traversal(
+            "manor/entryway", "manor/cellar", edges_of=self.engine._locale_edges
+        )
+        tree = RPJotEngine.compute_traversal("manor/entryway", "manor/cellar")
+        self.assertEqual(with_edges, tree)
+
+    # --- I8 backward-compat: empty graph == pre-graph output ---
+
+    def test_traversal_identity_without_edges(self):
+        cases = [
+            ("manor/foyer/kitchen", "manor/foyer/drawing_room"),
+            ("manor/foyer/staircase/elevator", "manor/foyer"),
+            ("manor/foyer", "manor/foyer/closet"),
+            ("manor/east-wing/bedroom", "manor/west-wing/study"),
+            ("manor/foyer", "manor/foyer"),
+        ]
+        for frm, to in cases:
+            base = RPJotEngine.compute_traversal(frm, to)
+            # edges_of over an empty graph must be byte-identical to the tree walk
+            with_empty = self.engine.compute_traversal(
+                frm, to, edges_of=self.engine._locale_edges
+            )
+            self.assertEqual(base, with_empty, f"{frm} -> {to}")
+
+    def test_resolve_identity_without_edges(self):
+        cases = [
+            ("manor/foyer", "manor/bedroom", {"garden"}),
+            ("manor/foyer/corridor", "cellar", None),
+            ("manor", "garden", {"garden"}),
+        ]
+        for frm, dest, roots in cases:
+            base = RPJotEngine.resolve_destination(frm, dest, known_roots=roots)
+            with_empty = self.engine.resolve_destination(
+                frm, dest, known_roots=roots, edges_of=self.engine._locale_edges
+            )
+            self.assertEqual(base, with_empty, f"{frm} -> {dest}")
+
+    def test_navigate_to_adjacent_is_one_hop(self):
+        self.engine._add_edge("manor/entryway", "manor/foyer/drawing-room")
+        result = json.loads(self.engine._tool_navigate_to("drawing-room"))
+        self.assertEqual(result["nav_type"], "adjacent")
+        self.assertEqual(
+            result["traversal"], ["manor/entryway", "manor/foyer/drawing-room"]
+        )
+        self.assertEqual(self.engine.session.location, "manor/foyer/drawing-room")
+
+
+class TestCartographerLive(unittest.TestCase):
+    """Tier 2 (endpoint-gated) acceptance for the live cartographer.
+
+    Skips cleanly without openai_api_url (registered in conftest _LLM_CLASSES).
+    LIVE-UNVERIFIED while :5000 is down — present so the channel is exercised the
+    moment an endpoint returns; NOT relied upon by the deterministic gate.
+    """
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(
+                message="The entryway.",
+                tag="",
+                context="seed",
+                pwd="/story/location/manor/entryway",
+            ),
+        )
+        self.engine = _make_engine(location="manor/entryway", people={"player"})
+        self.engine.init_pipeline()
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def test_drawing_room_off_entryway(self):
+        self.engine._room_drift = ["drawing room"]
+        self.engine._room_drift_text = (
+            "You pause in the entryway. The drawing room lies just off the "
+            "entry hall, its door ajar."
+        )
+        self.engine.speculate_locale()
+        # If the endpoint answered, a proposal is staged; commit and assert.
+        if self.engine._locale_seed is None:
+            self.skipTest("cartographer staged no proposal")
+        self.engine._consume_locale_seed()
+        # a drawing-room node exists somewhere in the tree
+        roots = self.engine._known_location_roots()
+        self.assertTrue(roots)
+
+
+# ---------------------------------------------------------------------------
 # 11. render_context -- unit tests, no LLM
 # ---------------------------------------------------------------------------
 

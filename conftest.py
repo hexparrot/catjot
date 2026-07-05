@@ -29,6 +29,7 @@ _LLM_CLASSES = {
     "TestRecordKnowledgeLive",
     "TestProductionActivation",
     "TestObjectActivationLive",
+    "TestCartographerLive",
 }
 
 _LLM_PREFIXES = ("test_examine_location",)

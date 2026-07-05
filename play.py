@@ -562,6 +562,13 @@ def _idle_worker(engine, step2_messages):
             t = time.perf_counter()
             engine.speculate_step1()
             stats["spec_s"] = time.perf_counter() - t
+            # MOVEMENT_TREE §3.2: the cartographer rides the same idle window,
+            # after the step-1 seed. It only fires when the turn named an unmapped
+            # room, only STAGES (zero disk writes, I7), and is inert without an
+            # endpoint (a call failure stages nothing).
+            t = time.perf_counter()
+            engine.speculate_locale()
+            stats["carto_s"] = time.perf_counter() - t
     except Exception as exc:
         logger.warning("[BG] idle worker failed: %s", exc)
     engine._bg_stats = stats

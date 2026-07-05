@@ -186,6 +186,9 @@ register_prefix(
     "phasing",
     "per-turn work reframed by phase (RW read-window vs PS felt latency)",
 )
+# MOVEMENT_TREE Phase 4 (§3.0/§3.2): the locale-graph cartographer's telemetry.
+register_prefix("[LOCALE]", "location", "room edge / mentioned-unmapped locale signal")
+register_prefix("[CARTO]", "location", "background cartographer stage/commit outcome")
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +393,7 @@ TAG_KNOW = "know:"  # know:alice     (private knowledge)
 TAG_SCENE = "scene:"  # scene:escort-to-bedroom
 TAG_CONS = "cons:"  # cons:aversion-to-water
 TAG_OBJ = "obj:"  # obj:iron-key    (object identity; OBJECT_TOOLING §2)
+TAG_ADJ = "adj:"  # adj:manor.foyer.drawing-room  (MOVEMENT_TREE §3.0: room edge)
 
 PWD_RULES = "/system/rules"
 PWD_WORLD = "/story/location"
@@ -419,6 +423,47 @@ TAG_REF = "ref:"
 _REF_CAP_PER_LOOKUP = 3
 _REF_CAP_PER_NOTE = 6
 _REF_DEREF_CAP = 12
+
+# MOVEMENT_TREE §3.0 — locale-graph edge encoding. An edge endpoint is a full
+# canonical room path; the tag value is that path with "/"→"." so it is a single
+# whitespace-safe, "/"-free tag word (catjot tags split on whitespace).
+def _edge_tag(path: str) -> str:
+    """Encode a canonical room path as an adj: tag word (manor/foyer → adj:manor.foyer)."""
+    return TAG_ADJ + path.replace("/", ".")
+
+
+def _edge_decode(tag: str) -> str:
+    """Decode an adj: tag word back to a canonical room path (inverse of _edge_tag)."""
+    return tag[len(TAG_ADJ):].replace(".", "/")
+
+
+# MOVEMENT_TREE §3.1 — curated place-word lexicon. A cheap gate that decides
+# whether a turn *mentioned a room* worth waking the cartographer for; NOT an
+# authority (a missed word costs one turn of lag, never a wrong node). Matched
+# word-boundary, case-insensitive against classified_input + narrative.
+_ROOM_LEXICON = frozenset({
+    "hall", "hallway", "foyer", "entryway", "entrance", "vestibule", "lobby",
+    "cellar", "basement", "kitchen", "pantry", "scullery", "larder",
+    "library", "study", "office", "den", "parlor", "parlour", "salon",
+    "garden", "courtyard", "greenhouse", "conservatory", "orchard",
+    "chamber", "bedroom", "bedchamber", "boudoir", "nursery", "quarters",
+    "corridor", "passage", "passageway", "gallery", "landing", "stairwell",
+    "staircase", "stairway", "attic", "loft", "garret", "crypt", "vault",
+    "dungeon", "oubliette", "tower", "turret", "belfry", "chapel", "shrine",
+    "dining room", "drawing room", "sitting room", "throne room", "ballroom",
+    "bathroom", "washroom", "closet", "cloakroom", "armory", "armoury",
+    "stable", "barn", "shed", "workshop", "forge", "smithy", "mill",
+    "tavern", "inn", "cabin", "cottage", "hut", "chamber", "solar",
+    "veranda", "porch", "balcony", "terrace", "cloister", "atrium",
+})
+# Precompiled disjunction, longest-first so multi-word phrases win over their
+# single-word parts. Word-boundary anchored.
+_ROOM_LEXICON_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(w) for w in sorted(_ROOM_LEXICON, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
 
 # LOCATION_MARKING §3.1 — the gated lexical fallback for a led/passive move.
 # A passive-arrival cue = a _LED_VERBS word co-occurring with a directional
@@ -642,6 +687,26 @@ _STEP1_SYSTEM = (
 _SPECULATIVE_INPUT = (
     "[no player input yet — speculative pre-turn lookup: assemble the WORLD "
     "STATE for the scene exactly as it stands; do not invent new events]"
+)
+
+# MOVEMENT_TREE §3.2 — the cartographer. A single-purpose, tool-less LLM call
+# (the refresh_system_message pattern) that reads the current room, recent
+# narrative, and the known locale graph, and returns JSON describing the rooms
+# that now provably exist and how they connect. LIVE-UNVERIFIED (endpoint down):
+# the wiring is complete and inert without an endpoint (call failure → no seed).
+_CARTOGRAPHER_SYSTEM = (
+    "You are the cartographer for a text RPG. Given the current room, the recent "
+    "narrative, and the known locale graph, return ONLY a JSON object describing "
+    "the rooms that now provably exist and how they connect. For each NEW room "
+    "give a kebab-case `slug`, a `parent` canonical path (from the locale graph "
+    "when possible), and a one-line `description`. List `edges` as pairs of "
+    "canonical paths that share a direct door or passage. You MAY add at most 2 "
+    "strongly-implied connective rooms (a corridor, a landing, a stair) needed to "
+    "join what was described — never invent distant or unmentioned places, and "
+    "never move the player. Reuse exact slugs from the locale graph when a room "
+    "already exists. Output schema (no prose, no code fence):\n"
+    '{ "nodes": [ { "slug": "...", "parent": "...", "description": "..." } ], '
+    '"edges": [ [ "manor/foyer", "manor/foyer/drawing-room" ] ] }'
 )
 
 # System prompt for Step 3: Narrative Prose
@@ -973,7 +1038,9 @@ class WorldStateStep:
         # instruction are what let a short delta still emit a usable room
         # signal (the live sessions' [REMARK] silence).
         rooms_vocab = self._rooms_vocab_block()
-        rooms_block = f"{rooms_vocab}\n\n" if rooms_vocab else ""
+        locale_graph = self.engine._locale_graph_block()
+        rooms_parts = [b for b in (rooms_vocab, locale_graph) if b]
+        rooms_block = ("\n\n".join(rooms_parts) + "\n\n") if rooms_parts else ""
 
         return (
             f"SCENE STATE:\n"
@@ -1027,6 +1094,13 @@ class WorldStateStep:
         rooms_vocab = self._rooms_vocab_block()
         if rooms_vocab:
             parts.append("\n" + rooms_vocab)
+
+        # [LOCALE GRAPH] — the adj: edges of the neighborhood (MOVEMENT_TREE §3.1),
+        # beside the flat rooms vocabulary so step-1 and the cartographer see the
+        # same canonical graph. Grows the baseline; the [BUDGET] line measures it.
+        locale_graph = self.engine._locale_graph_block()
+        if locale_graph:
+            parts.append("\n" + locale_graph)
 
         # [EVENTS IN THIS ROOM & SUB-ROOMS] — down-walk recall (LM §3.6),
         # complementing the ancestor up-walk in [LOCATION & SHARED LORE].
@@ -1793,6 +1867,15 @@ class RPJotEngine:
         self._seed: dict | None = None
         self._seed_status: str = "off"
         self._bg_stats: dict | None = None
+        # MOVEMENT_TREE §3.1/§3.2 — locale-graph state. _room_drift: place-words
+        # this turn's text named that are not yet canonical (the cartographer's
+        # wake gate); _room_drift_text: the scanned text the cartographer reads;
+        # _locale_seed: the background-staged {nodes, edges, drift, state, turn}
+        # proposal, committed in the foreground by _consume_locale_seed. All
+        # inert without an endpoint (the cartographer never stages a seed).
+        self._room_drift: list = []
+        self._room_drift_text: str = ""
+        self._locale_seed: dict | None = None
         # Prose streaming (RPJOT_STREAM): the play loop sets prose_stream_cb
         # to a str-consuming printer; ProseStep streams the step-3 call
         # through a _StreamThinkGate into it. _prose_streamed tells the play
@@ -2384,6 +2467,12 @@ class RPJotEngine:
         # Rendered-context census is likewise turn-scoped (Phase 0b, E1).
         self._last_ctx_now = set()
 
+        # MOVEMENT_TREE §3.2: commit any staged locale proposal in the foreground
+        # BEFORE the step-1 graph block is built, so this turn's [LOCALE GRAPH]
+        # reflects the new nodes/edges. Inert when nothing was staged (endpoint
+        # down) — never moves the session (I3).
+        self._consume_locale_seed()
+
         # Step 1 — seeded delta when the idle-window precompute is valid.
         seed = self._consume_seed()
         world_doc = self._world_state_step.run(
@@ -2491,6 +2580,12 @@ class RPJotEngine:
         # Cast-drift detection (T1): compare who the turn's text names against
         # who the session thinks is present. Detection only — never mutates cast.
         self._scan_drift("cast", classified_input, narrative)
+
+        # Room-drift detection (MOVEMENT_TREE §3.1): place-words named this turn
+        # that are not yet canonical rooms. Detection only — it never writes; it
+        # decides whether the idle-window cartographer wakes. Stashed on
+        # self._room_drift / self._room_drift_text for speculate_locale.
+        self._scan_drift("room", classified_input, narrative)
 
         # Advance turn counter; schedule entropy refresh
         self._turn_count += 1
@@ -2606,6 +2701,184 @@ class RPJotEngine:
             return None
         return seed
 
+    # -----------------------------------------------------------------
+    # MOVEMENT_TREE §3.2 — the cartographer (background-staged,
+    # foreground-committed). speculate_locale STAGES; _consume_locale_seed
+    # COMMITS. LIVE-UNVERIFIED (endpoint down): inert without a working
+    # endpoint — a call failure stages no seed, and consume is a no-op.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict | None:
+        """Best-effort parse of the first top-level JSON object in `text`.
+
+        Tolerates code fences / surrounding prose (the cartographer is asked for
+        bare JSON, but models leak fences). Returns None on any failure — the
+        caller treats that as "no proposal".
+        """
+        if not text:
+            return None
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            obj = json.loads(text[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+        return obj if isinstance(obj, dict) else None
+
+    def speculate_locale(self) -> None:
+        """Idle-window cartographer: STAGE a locale proposal on self._locale_seed.
+
+        Scheduled by the play loop's background worker after speculate_step1, and
+        only when this turn named an unmapped room (self._room_drift non-empty).
+        Builds a single tool-less LLM call (current room + recent narrative +
+        locale graph), parses/validates the JSON, and stages
+        {nodes, edges, drift, state, turn}. Writes NOTHING to disk — preserving
+        the idle worker's zero-write contract (I7); the foreground
+        _consume_locale_seed commits next turn. Never raises: on any failure the
+        seed is simply absent (graceful degradation, I6).
+        """
+        self._locale_seed = None
+        if not self._room_drift:
+            return  # nothing new was mentioned — no reason to wake the cartographer
+        if not hasattr(self, "_world_state_step"):
+            # pipeline not initialized (e.g. bare unit context) — nothing to do
+            return
+        try:
+            graph_block = self._locale_graph_block()
+            prompt = (
+                f"CURRENT ROOM: {self.session.location}\n\n"
+                f"KNOWN LOCALE GRAPH:\n{graph_block or '(none recorded yet)'}\n\n"
+                f"MENTIONED-BUT-UNMAPPED place references this turn: "
+                f"{', '.join(self._room_drift)}\n\n"
+                f"RECENT NARRATIVE:\n{self._room_drift_text.strip()}"
+            )
+            response = call_llm(
+                [
+                    {"role": "system", "content": _CARTOGRAPHER_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=1_024,
+            )
+        except Exception as exc:
+            # call_llm can raise (endpoint down, JSON decode, etc.); a background
+            # failure must never surface — the seed is simply absent.
+            logger.warning("[CARTO] speculative cartographer failed: %s", exc)
+            return
+
+        obj = self._extract_json_object(response.get("content", ""))
+        if obj is None:
+            logger.debug("[CARTO] no usable JSON in cartographer reply; discarded")
+            return
+        nodes = obj.get("nodes") if isinstance(obj.get("nodes"), list) else []
+        edges = obj.get("edges") if isinstance(obj.get("edges"), list) else []
+        if not nodes and not edges:
+            logger.debug("[CARTO] empty proposal; nothing staged")
+            return
+
+        self._locale_seed = {
+            "nodes": nodes,
+            "edges": edges,
+            "drift": list(self._room_drift),
+            "state": self._seed_state_snapshot(),
+            "turn": self._turn_count,
+        }
+        logger.info(
+            "[CARTO] locale proposal staged (%d nodes, %d edges)",
+            len(nodes),
+            len(edges),
+        )
+
+    _SPEC_NODE_CAP = 2  # generate-ahead bound (I4): ≤2 nodes beyond the mention set
+
+    def _consume_locale_seed(self) -> None:
+        """Pop and COMMIT the staged locale proposal in the foreground (§3.2).
+
+        Single writer. Validates the seed with the exact _consume_seed discipline
+        (turn counter matches, state snapshot still holds), then commits each
+        canonicalized node (save_location) and each edge (_add_edge). Enforces the
+        generate-ahead cap: at most _SPEC_NODE_CAP nodes NOT named in that turn's
+        drift list survive; overflow (and edges to an unresolved endpoint) are
+        logged and dropped (I4/I5). Inert when no seed is staged (endpoint down).
+        """
+        seed, self._locale_seed = self._locale_seed, None
+        if not seed:
+            return
+        if seed.get("turn") != self._turn_count:
+            logger.debug("[CARTO] stale locale seed rejected: turn mismatch")
+            return
+        if seed.get("state") != self._seed_state_snapshot():
+            logger.debug("[CARTO] stale locale seed rejected: state snapshot changed")
+            return
+
+        current = self.session.location
+        # The mention set: canonical leaves of this turn's drifted place-words.
+        mentioned_leaves = set()
+        for phrase in seed.get("drift", []):
+            canon = self._canonicalize_room(phrase, current)
+            if canon:
+                mentioned_leaves.add(canon.rsplit("/", 1)[-1])
+
+        committed_paths: set = set()
+        speculative = 0
+        dropped = 0
+        for node in seed.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            slug = str(node.get("slug", "")).strip()
+            if not slug:
+                continue
+            parent = str(node.get("parent", "")).strip().strip("/")
+            raw = f"{parent}/{slug}" if parent else slug
+            canon = self._canonicalize_room(raw, current)
+            if not canon:
+                continue
+            leaf = canon.rsplit("/", 1)[-1]
+            is_new = not self._location_node_exists(canon)
+            # Bound generate-ahead: a NEW node not named this turn is speculative.
+            if is_new and leaf not in mentioned_leaves:
+                if speculative >= self._SPEC_NODE_CAP:
+                    dropped += 1
+                    continue
+                speculative += 1
+            self._tool_save_location(
+                name=canon,
+                description=str(node.get("description", "")).strip()
+                or f"{leaf.capitalize()}.",
+            )
+            committed_paths.add(canon)
+
+        if dropped:
+            logger.info("[CARTO] dropped %d speculative nodes (over cap)", dropped)
+
+        # Edges: both endpoints must resolve to an existing OR just-committed node
+        # (I5 never-guess; also keeps a dropped speculative node from re-appearing).
+        edges_added = 0
+        for pair in seed.get("edges", []):
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            a = self._canonicalize_room(str(pair[0]).strip(), current)
+            b = self._canonicalize_room(str(pair[1]).strip(), current)
+            if not a or not b or a == b:
+                continue
+
+            def _resolved(p):
+                return p in committed_paths or self._location_node_exists(p)
+
+            if not (_resolved(a) and _resolved(b)):
+                logger.debug("[CARTO] edge %s<->%s dropped: unresolved endpoint", a, b)
+                continue
+            self._add_edge(a, b)
+            edges_added += 1
+
+        if committed_paths or edges_added:
+            logger.info(
+                "[CARTO] committed %d nodes, %d edges", len(committed_paths), edges_added
+            )
+
     def _scan_drift(self, kind: str, classified_input: str, narrative: str) -> list:
         """Unified drift-scan seam (SYNTH_OUTPUT §6 Phase 0d, E3).
 
@@ -2617,6 +2890,8 @@ class RPJotEngine:
         """
         if kind == "cast":
             return self._scan_cast_drift(classified_input, narrative)
+        if kind == "room":
+            return self._scan_room_drift(classified_input, narrative)
         logger.debug("[CTX] _scan_drift: no scanner for kind=%r (no-op)", kind)
         return []
 
@@ -2655,6 +2930,49 @@ class RPJotEngine:
                 "[CAST] mentioned-but-absent: %s", ", ".join(self._cast_warnings)
             )
         return self._cast_warnings
+
+    def _scan_room_drift(self, classified_input: str, narrative: str) -> list:
+        """Detect place references not yet canonical (MOVEMENT_TREE §3.1).
+
+        The inverse of _scan_cast_drift: cast-drift searches for KNOWN names that
+        are absent; room-drift searches for PLACE references that are not yet
+        canonical rooms. A cheap _ROOM_LEXICON regex scans classified_input +
+        narrative; each matched place-word that does NOT resolve via
+        _canonicalize_room to an EXISTING node is collected. Detection only — it
+        never writes and never guesses a slug; it only decides whether to wake the
+        cartographer. Results replace self._room_drift; the scanned text is stashed
+        on self._room_drift_text so the idle-window cartographer has the narrative
+        without a separate handle. Returns the drift list.
+        """
+        text = f"{classified_input}\n{narrative}"
+        current = self.session.location
+        unmapped: list = []
+        seen = set()
+        for m in _ROOM_LEXICON_RE.finditer(text):
+            phrase = m.group(0).lower()
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            # Does this place-word already resolve to an EXISTING canonical node?
+            canon = self._canonicalize_room(phrase, current)
+            if canon and self._location_node_exists(canon):
+                continue  # already mapped — no drift
+            unmapped.append(phrase)
+        self._room_drift = unmapped
+        self._room_drift_text = text
+        if unmapped:
+            logger.info("[LOCALE] mentioned-unmapped: %s", ", ".join(unmapped))
+        return unmapped
+
+    @staticmethod
+    def _location_node_exists(path: str) -> bool:
+        """True iff a canonical /story/location/{path} node exists (DIRECTORY-exact)."""
+        if not path:
+            return False
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{path}")
+        ) as nc:
+            return len(nc) > 0
 
     def _cast_warning_line(self) -> str:
         """One-line cast-drift warning for headers/reports, or '' if none."""
@@ -2896,11 +3214,46 @@ class RPJotEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def compute_traversal(from_path: str, to_path: str) -> list[str]:
+    def _bfs_edge_path(from_path: str, to_path: str, edges_of) -> list:
+        """Shortest path over the adj: graph, or [] if unconnected (§3.3).
+
+        `edges_of` maps a room path → set of directly-connected room paths.
+        Deterministic: neighbors are explored in sorted order, so a tie between
+        equal-length paths always resolves the same way.
+        """
+        if from_path == to_path:
+            return [from_path]
+        if not edges_of(from_path):
+            return []
+        from collections import deque
+
+        prev = {from_path: None}
+        queue = deque([from_path])
+        while queue:
+            node = queue.popleft()
+            if node == to_path:
+                path = []
+                while node is not None:
+                    path.append(node)
+                    node = prev[node]
+                return list(reversed(path))
+            for nb in sorted(edges_of(node)):
+                if nb not in prev:
+                    prev[nb] = node
+                    queue.append(nb)
+        return []
+
+    @staticmethod
+    def compute_traversal(from_path: str, to_path: str, edges_of=None) -> list[str]:
         """Return the ordered list of locations traversed from from_path to to_path.
 
         Walks up to the nearest common ancestor then down to the destination.
         Assumes both paths share at least one common prefix component.
+
+        MOVEMENT_TREE §3.3: when `edges_of` is supplied and a BFS over the recorded
+        adj: graph connects the endpoints, that shortest edge path is returned
+        instead. With no edges (edges_of=None, or an empty graph) the BFS finds
+        nothing and the output is byte-identical to the pre-graph tree walk (I8).
 
         Examples:
             "manor/foyer/kitchen" → "manor/foyer/drawing_room"
@@ -2914,6 +3267,11 @@ class RPJotEngine:
         """
         if from_path == to_path:
             return [to_path]
+
+        if edges_of is not None:
+            edge_path = RPJotEngine._bfs_edge_path(from_path, to_path, edges_of)
+            if edge_path:
+                return edge_path
 
         from_parts = from_path.split("/")
         to_parts = to_path.split("/")
@@ -2937,7 +3295,7 @@ class RPJotEngine:
 
     @staticmethod
     def resolve_destination(
-        from_path: str, destination: str, known_roots=None
+        from_path: str, destination: str, known_roots=None, edges_of=None
     ) -> tuple[str, str]:
         """Resolve a raw destination string into a full hierarchical path.
 
@@ -2948,14 +3306,32 @@ class RPJotEngine:
                 of being nested. When None (pure unit-test callers) the safe default
                 nests a bare single-component destination as a child (the G4 fix) —
                 never a detached top-level location that breaks location_ancestors.
+            edges_of: optional room-path → connected-paths map (MOVEMENT_TREE §3.3).
+                When supplied and the destination is a direct neighbor of from_path,
+                the move is "adjacent" (a 1-hop through a recorded door). None (unit-
+                test callers, or an empty graph) skips the leg → byte-identical to
+                the pre-graph engine (I8).
 
         Returns:
             (resolved_path, nav_type) where nav_type is one of:
+            "adjacent"     — destination is a recorded adj: neighbor (1-hop door)
             "hierarchical" — shared ancestor found, compute_traversal applies
             "inferred"     — bare name resolved as sibling under current root, or
                              nested as a child of the current location (G4)
             "direct"       — no shared ancestry, different top-level locations
         """
+        # MOVEMENT_TREE §3.3 — adjacency leg, ahead of the hierarchical checks.
+        if edges_of is not None:
+            neighbors = edges_of(from_path)
+            if destination in neighbors:
+                return destination, "adjacent"
+            if "/" not in destination:
+                leaf_hits = [
+                    n for n in neighbors if n.rsplit("/", 1)[-1] == destination
+                ]
+                if len(leaf_hits) == 1:
+                    return leaf_hits[0], "adjacent"
+
         dest_parts = destination.split("/")
         from_parts = from_path.split("/")
 
@@ -3130,6 +3506,111 @@ class RPJotEngine:
             ),
         )
         return True
+
+    # -----------------------------------------------------------------
+    # MOVEMENT_TREE §3.0 — locale-graph edge substrate (adj: tags)
+    # -----------------------------------------------------------------
+
+    def _locale_edges(self, room: str) -> set:
+        """The set of canonical room paths directly connected to `room` (§3.0).
+
+        Reads the NEWEST adjacency note at PWD_WORLD/{room} (DIRECTORY-exact),
+        parses its adj: tags, and _edge_decode's each. Edges live on a dedicated
+        newest-wins "adjacency note" (context="adjacency: {room}", message empty),
+        kept SEPARATE from description notes so an edge write never clobbers a
+        save_location description and a re-description never drops edges (the
+        OBJECT_TOOLING canonical-vs-sighting discipline applied to rooms). Returns
+        an empty set when the room has no adjacency note.
+        """
+        if not room:
+            return set()
+        newest_tags = None
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{room}")
+        ) as nc:
+            for note in nc:  # append order (oldest→newest); last match wins
+                if note.context.startswith("adjacency:"):
+                    newest_tags = note.tag
+        if not newest_tags:
+            return set()
+        edges = set()
+        for word in newest_tags.split():
+            if word.startswith(TAG_ADJ):
+                decoded = _edge_decode(word)
+                if decoded:
+                    edges.add(decoded)
+        return edges
+
+    def _add_edge(self, a: str, b: str) -> None:
+        """Record a bidirectional, idempotent room connection a <-> b (§3.0).
+
+        Ensures both endpoints exist as nodes (an edge implies both rooms), then,
+        for each endpoint, appends a fresh adjacency note whose tag set is the
+        existing edges ∪ {the other endpoint}. Re-adding an existing edge writes
+        nothing (union unchanged → skip). A self-edge is a no-op.
+        """
+        if not a or not b or a == b:
+            return
+        self._ensure_location_node(a)
+        self._ensure_location_node(b)
+        for room, other in ((a, b), (b, a)):
+            existing = self._locale_edges(room)
+            if other in existing:
+                continue  # idempotent: union unchanged, no write
+            union = existing | {other}
+            tag = " ".join(sorted(_edge_tag(p) for p in union))
+            Note.append(
+                Note.NOTEFILE,
+                Note.jot(
+                    # catjot forbids an empty message; a terse marker keeps the
+                    # adjacency note distinct from (and harmless beside) the
+                    # description note. Reads key off context/tags, not this text.
+                    message=f"Adjacency edges for {room}.",
+                    tag=tag,
+                    context=f"adjacency: {room}",
+                    pwd=f"{PWD_WORLD}/{room}",
+                ),
+            )
+        logger.info("[LOCALE] edge %s <-> %s", a, b)
+
+    def _locale_graph_block(self) -> str:
+        """[LOCALE GRAPH] — canonical rooms near the session and how they connect.
+
+        Extends _rooms_vocab_block (the flat child/sibling vocabulary) with the
+        recorded adj: edges. Renders the NEIGHBORHOOD of session.location —
+        ancestors, children, siblings — plus each room's edges, compact enough to
+        reuse verbatim. Returns '' when nothing is known (parity with
+        _rooms_vocab_block). Read surface only; never writes.
+        """
+        sess = self.session
+        try:
+            loc = sess.location
+            neighborhood = list(sess.location_ancestors)  # ancestors incl. self
+            for child in self._child_room_slugs(loc):
+                neighborhood.append(f"{loc}/{child}")
+            for sib in self._sibling_room_slugs(loc):
+                parent = loc.rsplit("/", 1)[0]
+                neighborhood.append(f"{parent}/{sib}")
+        except Exception as exc:  # pragma: no cover - defensive parity
+            logger.warning("[LOCALE] graph-block build failed: %s", exc)
+            return ""
+
+        seen = set()
+        lines = []
+        for room in neighborhood:
+            if not room or room in seen:
+                continue
+            seen.add(room)
+            edges = self._locale_edges(room)
+            if edges:
+                lines.append(f"  {room}  <->  {', '.join(sorted(edges))}")
+        if not lines:
+            return ""
+        return (
+            "[LOCALE GRAPH] (canonical rooms near you and how they connect — "
+            "reuse these exact slugs; a listed edge is a 1-hop move):\n"
+            + "\n".join(lines)
+        )
 
     def _ensure_object_node(self, slug: str) -> bool:
         """Idempotently ensure a canonical /story/object/{slug} node exists (OT §3.4).
@@ -4060,14 +4541,22 @@ class RPJotEngine:
         from_loc = self.session.location
 
         resolved_dest, nav_type = self.resolve_destination(
-            from_loc, raw_dest, known_roots=self._known_location_roots()
+            from_loc,
+            raw_dest,
+            known_roots=self._known_location_roots(),
+            edges_of=self._locale_edges,  # MOVEMENT_TREE §3.3: adjacency-aware
         )
         to_loc = resolved_dest
 
-        if nav_type == "direct":
+        # "adjacent" (a recorded door) and "direct" (no shared ancestry) are both
+        # 1-hop; "hierarchical"/"inferred" get the edge-aware tree walk (BFS over
+        # known adj: edges, else the exact ascend/descend — I8 when no edges).
+        if nav_type in ("direct", "adjacent"):
             traversal = [from_loc, to_loc]
         else:
-            traversal = self.compute_traversal(from_loc, to_loc)
+            traversal = self.compute_traversal(
+                from_loc, to_loc, edges_of=self._locale_edges
+            )
 
         logger.info(
             "NAVIGATION [%s]: %s → %s | path: %s",
@@ -4112,7 +4601,14 @@ class RPJotEngine:
         )
         Note.append(Note.NOTEFILE, note)
 
-        if nav_type == "direct":
+        if nav_type == "adjacent":
+            followup = (
+                "Narrate stepping directly through the connecting door or passage "
+                "from the previous room into the destination — a single adjacent "
+                "move, not a journey through other rooms. Do not teleport the "
+                "player; the door between them is the path."
+            )
+        elif nav_type == "direct":
             followup = (
                 "Narrate the transition to the new location. Since there is no shared "
                 "path with the previous location, briefly note the nature of the "
