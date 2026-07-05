@@ -6627,5 +6627,197 @@ class TestObjectActivationLive(unittest.TestCase):
         self.assertTrue(self._passes(captured))
 
 
+class TestConstructReport(unittest.TestCase):
+    """Deterministic (non-LLM) coverage for construct_report + the /-trim helpers.
+
+    Seeds a scratch notefile with known notes across distinct now values and
+    asserts census math, witness-bar scaling, recency, the miss path, and the
+    /location full-vs-default distinction — all without touching the LLM.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._path = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._path
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def _jot(self, **kw):
+        Note.append(Note.NOTEFILE, Note.jot(**kw))
+
+    def _engine(self, location="hall", people=None):
+        eng = RPJotEngine(
+            location=location,
+            people_present=people if people is not None else {"mc", "evie"},
+        )
+        eng.register_all_tools()
+        return eng
+
+    # ── census math ──────────────────────────────────────────────────────
+    def test_person_census_total_dedups_by_identity(self):
+        # profile (also carries char:evie) + a conscience note (also char:evie)
+        # + a know note + one exp note. The conscience note is returned by BOTH
+        # the char:evie source and the conscience source but must count ONCE in
+        # the deduped total.
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=1000)
+        self._jot(message="Fears water.", tag="cons:water char:evie", context="c",
+                  pwd="/story/conscience/evie", now=1100)
+        self._jot(message="Knows the code.", tag="know:evie", context="k",
+                  pwd="/story/character/evie", now=1200)
+        self._jot(message="A shared beat.", tag="exp:evie exp:mara", context="e",
+                  pwd="/story/events/hall", now=1300)
+        eng = self._engine()
+        out = eng.construct_report("evie")
+        # 4 distinct notes; the conscience note is shared across two sources.
+        self.assertIn("canon entries (total)", out)
+        self.assertRegex(out, r"canon entries \(total\)\s+4\b")
+
+    def test_as_fed_is_census_intersect_last_ctx_now(self):
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=2000)
+        self._jot(message="A beat.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=2100)
+        self._jot(message="Another beat.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=2200)
+        eng = self._engine()
+        # Simulate "fed last turn": two of the three census nows were fed.
+        eng._last_ctx_now = {2000, 2200, 99999}  # 99999 is not in the census
+        out = eng.construct_report("evie")
+        # as-fed counts census notes whose now is in _last_ctx_now → 2 of 3.
+        self.assertRegex(out, r"active — as fed last turn\s+2\b")
+        # never exceeds total (V2)
+        self.assertRegex(out, r"canon entries \(total\)\s+3\b")
+
+    def test_no_turn_yet_marker(self):
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=3000)
+        eng = self._engine()
+        out = eng.construct_report("evie")
+        self.assertIn("(no turn yet)", out)
+
+    def test_fresh_recompute_stable_across_repeats(self):
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=4000)
+        self._jot(message="A beat.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=4100)
+        eng = self._engine()
+        a = eng.construct_report("evie")
+        b = eng.construct_report("evie")
+        self.assertEqual(a, b)  # V1: deterministic, no clock/LLM dependence
+        # and construct_report must NOT mutate the as-fed census (V3)
+        self.assertEqual(eng._last_ctx_now, set())
+
+    # ── witness bars ─────────────────────────────────────────────────────
+    def test_witness_bar_counts_and_scaling(self):
+        # evie=4, mara=2, bob=1 co-occurrences across the subject's exp: notes.
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=4999)
+        self._jot(message="b1.", tag="exp:evie exp:mara exp:bob", context="e",
+                  pwd="/story/events/hall", now=5000)
+        self._jot(message="b2.", tag="exp:evie exp:mara", context="e",
+                  pwd="/story/events/hall", now=5100)
+        self._jot(message="b3.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=5200)
+        self._jot(message="b4.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=5300)
+        eng = self._engine()
+        out = eng.construct_report("evie")
+        wlines = [l for l in out.splitlines() if l.strip().startswith(("evie", "mara", "bob"))]
+        # order desc by count, with correct integer counts in the count column
+        joined = "\n".join(wlines)
+        self.assertRegex(joined, r"evie\s+█+\s+4\b")
+        self.assertRegex(joined, r"mara\s+█+\s+2\b")
+        self.assertRegex(joined, r"bob\s+█+\s+1\b")
+        # top witness (max count) fills the fixed 24-cell bar; lesser are shorter
+        def blocks(name):
+            line = next(l for l in wlines if l.strip().startswith(name))
+            return line.count("█")
+        self.assertEqual(blocks("evie"), 24)
+        self.assertLess(blocks("mara"), blocks("evie"))
+        self.assertLess(blocks("bob"), blocks("mara"))
+
+    # ── recency / turns-ago ──────────────────────────────────────────────
+    def test_newest_oldest_turns_ago_from_summary_clock(self):
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=6000)  # oldest
+        self._jot(message="A beat.", tag="exp:evie", context="e",
+                  pwd="/story/events/hall", now=6500)  # newest
+        # summary notes = the per-turn clock: two turns after 6500, three after 6000.
+        for t in (6100, 6600, 6700):
+            self._jot(message="turn.", tag="summary", context="t",
+                      pwd="/summaries", now=t)
+        eng = self._engine()
+        out = eng.construct_report("evie")
+        # newest (6500): 2 stamps strictly greater (6600, 6700)
+        self.assertRegex(out, r"newest entry\s+2 turns ago")
+        # oldest (6000): 3 stamps strictly greater
+        self.assertRegex(out, r"oldest entry\s+3 turns ago")
+
+    # ── name resolution / precedence / miss ──────────────────────────────
+    def test_object_resolution_and_detail(self):
+        self._jot(message="Iron key.", tag="obj:iron-key", context="canon",
+                  pwd="/story/object/iron-key", now=7000)
+        self._jot(message="In the cellar.", tag="obj:iron-key", context="s",
+                  pwd="/story/location/cellar", now=7100)
+        eng = self._engine(people={"mc"})
+        out = eng.construct_report("the iron key")  # word-overlap canonicalizes
+        self.assertIn("CONSTRUCT: iron-key   (object", out)
+        self.assertIn("OBJECT DETAIL", out)
+        self.assertIn("canonical description: present", out)
+
+    def test_place_resolution_and_detail(self):
+        self._jot(message="The hall.", tag="", context="loc",
+                  pwd="/story/location/manor/hall", now=8000)
+        self._jot(message="A sub-room.", tag="", context="loc",
+                  pwd="/story/location/manor/hall/alcove", now=8100)
+        eng = self._engine(location="manor/hall", people={"mc"})
+        out = eng.construct_report("manor/hall")
+        self.assertIn("CONSTRUCT: manor/hall   (place", out)
+        self.assertIn("PLACE DETAIL", out)
+        self.assertIn("alcove", out)
+
+    def test_miss_prints_roster_no_traceback(self):
+        self._jot(message="Iron key.", tag="obj:iron-key", context="canon",
+                  pwd="/story/object/iron-key", now=9000)
+        self._jot(message="Evie.", tag="char:evie", context="p",
+                  pwd="/story/character/evie", now=9100)
+        eng = self._engine(people={"mc"})
+        out = eng.construct_report("nonexistent-thing-xyz")
+        self.assertIn("[no subject matching 'nonexistent-thing-xyz']", out)
+        self.assertIn("known objects", out)
+        self.assertIn("iron-key", out)
+        self.assertIn("known characters", out)
+        self.assertIn("evie", out)
+
+    # ── /location full vs default (play.py trim) ─────────────────────────
+    def test_location_full_vs_default_distinction(self):
+        import play
+
+        # A location with a chunky note body so the full dump is clearly longer.
+        big = "The hall is vast. " * 40
+        self._jot(message=big, tag="", context="loc",
+                  pwd="/story/location/hall", now=10000)
+        self._jot(message="An event.", tag="", context="ev",
+                  pwd="/story/events/hall", now=10100)
+        eng = self._engine(location="hall", people={"mc"})
+        default = play.summarize_location(eng)
+        full = play.query_location_context(eng)
+        # default is materially shorter and never dumps the full body
+        self.assertLess(len(default), len(full))
+        self.assertNotIn(big.strip(), default)
+        self.assertIn(big.strip(), full)
+        # default still conveys sufficiency: a count line
+        self.assertIn("note(s)", default)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

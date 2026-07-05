@@ -129,6 +129,25 @@ def _introspect_rule(char: str = "─", width: int = _INTROSPECT_WIDTH) -> str:
     return char * width
 
 
+def _wallclock_age(seconds: int) -> str:
+    """Human-readable wall-clock age from a second delta (SLASH_IMPROVEMENT §3.8).
+
+    Coarse single-unit rendering ("47s"/"12m"/"3h"/"2d") — recency is a glance,
+    not a stopwatch. Negative deltas (a note stamped in the future, or clock
+    skew) clamp to 0.
+    """
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 # ---------------------------------------------------------------------------
 # Telemetry-prefix registry (SYNTH_OUTPUT §6 Phase 0c, E2). One source of truth
 # for "what mechanisms announce": maps a log prefix (e.g. "[COMMIT-LOC]") to a
@@ -6658,6 +6677,441 @@ class RPJotEngine:
     # ------------------------------------------------------------------
     # Scene debug report
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Subject-focused recall page (SLASH_IMPROVEMENT)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _note_identity(n) -> tuple:
+        """Content identity for census dedup (mirrors Note.__eq__ fields).
+
+        Notes are unhashable (Note defines __eq__ without __hash__), and the
+        same underlying note is returned as distinct objects by different
+        ContextBundle queries, so dedup keys on content, not object id.
+        """
+        return (n.now, n.pwd, n.message.strip(), n.context.strip(), n.tag)
+
+    @staticmethod
+    def _tree_notes(prefix: str) -> list:
+        """Boundary-filtered TREE recall for `prefix` (the '/'-boundary rule).
+
+        SearchType.TREE is a raw pwd.startswith with no path boundary, so
+        `/story/location/garden` would pull `garden-east`; post-filter to the
+        node itself plus strictly-deeper descendants.
+        """
+        if not prefix:
+            return []
+        with NoteContext(Note.NOTEFILE, (SearchType.TREE, prefix)) as nc:
+            return [
+                n for n in nc if n.pwd == prefix or n.pwd.startswith(prefix + "/")
+            ]
+
+    def _turn_stamps(self) -> list:
+        """Per-turn epoch timeline from /summaries notes (one appended per turn).
+
+        The only existing turn↔timestamp source (SLASH_IMPROVEMENT §3.8): play.py
+        appends one `summary` note per completed turn, so the sorted `now` values
+        of PWD_SUMMARIES notes are a monotonic turn clock. Returns [] before any
+        turn has been recorded (fresh scratch notefiles), in which case recency
+        degrades honestly to wall-clock-only.
+        """
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, PWD_SUMMARIES)
+        ) as nc:
+            stamps = sorted(n.now for n in nc)
+        return stamps
+
+    @staticmethod
+    def _turns_ago(ts: int, stamps: list):
+        """Turns elapsed since epoch `ts` = count of turn stamps strictly newer.
+
+        Deterministic and exact given the /summaries turn clock. Returns None
+        when no turn stamps exist (recency then shows wall-clock age only,
+        never a faked turn count — §3.8's honesty rule).
+        """
+        if not stamps:
+            return None
+        return sum(1 for s in stamps if s > ts)
+
+    def _truncation_survivors(self, notes: list) -> list:
+        """Notes surviving render_context's deterministic size cap, newest-first.
+
+        Reproduces render_context's newest-first ordering and hard-limit cutoff
+        WITHOUT calling it — render_context mutates self._last_ctx_now and may
+        invoke the LLM condenser, both of which would violate the read-only /
+        non-LLM invariants (V1/V3). Keeps at least the newest note. The soft
+        (condense) tier is note-lossless in prose but not note-countable, so
+        anything under the hard ceiling is treated as fully surviving.
+        """
+        ordered = sorted(notes, key=lambda n: n.now, reverse=True)
+        kept: list = []
+        running = ""
+        for n in ordered:
+            piece = n.context.strip() + "\n\n" + n.message.strip()
+            candidate = (running + "\n\n" + piece).strip() if running else piece
+            if kept and _tok(candidate) > CONTEXT_HARD_LIMIT_TOKS:
+                break
+            kept.append(n)
+            running = candidate
+        return kept
+
+    def construct_report(self, name: str) -> str:
+        """Deterministic, non-LLM, truncation-safe recall page for one subject.
+
+        Resolves `name` to a single object → place → person (never-guess, reusing
+        the engine's canonicalizers) and prints a fixed-width page: header, a
+        RECALL CENSUS block (canon total vs two active counts — as-fed-last-turn
+        and fresh-POV-recompute — plus newest/oldest recency), a WITNESSED-BY
+        ASCII-bar block from exp: co-occurrence, and a subject-type detail block.
+
+        Read-only (V3): writes no notes, mutates no session state, and never
+        touches self._last_ctx_now (which only the assembly path fills). Returns
+        a preformatted multi-section string, same contract as scene_debug_report.
+        """
+        cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+        W = _INTROSPECT_WIDTH
+        SEP = _introspect_rule("─", W)
+        HDR = _introspect_rule("═", W)
+        BAR_WIDTH = 24
+        raw = (name or "").strip()
+
+        # ── name resolution: object → place → person (never guess) ──────────
+        subj_type = None
+        subject = None
+        header_extra = ""
+        sources: list = []  # (label, [notes]) — per-source, may double-count
+        selection: list = []  # notes a fresh feed would select (pre-intersect)
+
+        registry = self._object_registry()
+
+        # 1. Object.
+        obj_slug = self._canonicalize_object(raw)
+        obj_canon = list(ContextBundle([f"{PWD_OBJECTS}/{obj_slug}"])) if obj_slug else []
+        if obj_slug and (obj_slug in registry or obj_canon):
+            subj_type = "object"
+            subject = obj_slug
+            sightings = self._object_sightings(obj_slug)
+            sources = [
+                ("canonical (/story/object)", obj_canon),
+                ("sightings (obj:)", sightings),
+            ]
+            selection = obj_canon + sightings
+            entry = registry.get(obj_slug) or {}
+            res = entry.get("residence") or {}
+            if res.get("held_by"):
+                header_extra = f"held by {res['held_by']}"
+            elif res.get("room"):
+                header_extra = f"in {res['room']}"
+            else:
+                header_extra = "residence unknown"
+
+        # 2. Place.
+        if subj_type is None:
+            room = self._canonicalize_room(raw, self.session.location)
+            room_exists = False
+            if room:
+                with NoteContext(
+                    Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_WORLD}/{room}")
+                ) as nc:
+                    room_exists = len(nc) > 0
+            if room and room_exists:
+                subj_type = "place"
+                subject = room
+                subtree = self._tree_notes(f"{PWD_WORLD}/{room}")
+                events = self._tree_notes(f"{PWD_EVENTS}/{room}")
+                loc_tagged = list(ContextBundle([f"loc:{room}"]))
+                sources = [
+                    ("location subtree (/story/location)", subtree),
+                    ("events (/story/events)", events),
+                    ("loc: tagged", loc_tagged),
+                ]
+                ancestor_dirs = [
+                    f"{PWD_WORLD}/{a}" for a in self.session.location_ancestors
+                ]
+                selection = (
+                    list(ContextBundle(ancestor_dirs + [PWD_WORLD])) + events
+                )
+                cur = self.session.location
+                if room == cur:
+                    header_extra = "current room"
+                elif room in self._child_room_slugs(cur) or room.startswith(cur + "/"):
+                    header_extra = "sub-room of current"
+                elif room in [
+                    (cur.rsplit("/", 1)[0] + "/" + s) if "/" in cur else s
+                    for s in self._sibling_room_slugs(cur)
+                ]:
+                    header_extra = "sibling of current room"
+                else:
+                    header_extra = "elsewhere"
+
+        # 3. Person.
+        if subj_type is None:
+            pslug = re.sub(r"[^a-z0-9-]+", "-", raw.strip().lower()).strip("-")
+            char_notes = (
+                list(ContextBundle([f"{TAG_CHAR}{pslug}"])) if pslug else []
+            )
+            if pslug and char_notes:
+                subj_type = "person"
+                subject = pslug
+                profile = list(ContextBundle([f"{PWD_CHARS}/{pslug}"]))
+                conscience = list(ContextBundle([f"{PWD_CONSCIENCE}/{pslug}"]))
+                interior = list(ContextBundle([f"{PWD_INTERIOR}/{pslug}"]))
+                private = list(ContextBundle([f"{TAG_KNOW}{pslug}"]))
+                shared = list(ContextBundle([f"{TAG_EXP}{pslug}"]))
+                yomi = list(ContextBundle([f"{PWD_YOMI}/{pslug}"]))
+                rel_notes = [
+                    n
+                    for n in self._tree_notes(PWD_REL)
+                    if f"{TAG_CHAR}{pslug}" in n.tag.split()
+                ]
+                sources = [
+                    (f"profile (char:{pslug})", profile),
+                    ("conscience (cons:)", conscience),
+                    ("interior (int:)", interior),
+                    ("private knowledge (know:)", private),
+                    ("shared experience (exp:)", shared),
+                    ("yomi", yomi),
+                    ("relationship pairs (rel:)", rel_notes),
+                ]
+                # POV recompute mirrors what the model would actually see.
+                selection = list(self.gather_pov_context(pslug))
+                present = pslug in self.session.people_present
+                header_extra = "in scene" if present else "not in scene"
+
+        # ── miss: never-guess roster (mirrors /objects miss path) ───────────
+        if subj_type is None:
+            known_chars: set = set()
+            with NoteContext(Note.NOTEFILE, (SearchType.ALL, "")) as nc:
+                for note in nc:
+                    for word in note.tag.split():
+                        if word.startswith(TAG_CHAR):
+                            known_chars.add(word[len(TAG_CHAR):])
+            roster_obj = ", ".join(sorted(registry)) or "(none)"
+            roster_char = ", ".join(sorted(known_chars)) or "(none)"
+            roster_room = ", ".join(sorted(self._known_location_roots())) or "(none)"
+            return "\n".join(
+                [
+                    f"[no subject matching {raw!r}]",
+                    f"  known objects   : {roster_obj}",
+                    f"  known characters: {roster_char}",
+                    f"  known rooms     : {roster_room}",
+                ]
+            )
+
+        # ── census: dedup union (total) + per-source (may double-count) ─────
+        census: list = []
+        seen: set = set()
+        for _label, notes in sources:
+            for n in notes:
+                key = self._note_identity(n)
+                if key not in seen:
+                    seen.add(key)
+                    census.append(n)
+        total = len(census)
+        census_nows = {n.now for n in census}
+        census_keys = seen  # already the identity set of census
+
+        # active — as fed last turn: census ∩ _last_ctx_now (by note.now, §3.5)
+        fed_by_now = self._last_ctx_now
+        as_fed = sum(1 for n in census if n.now in fed_by_now)
+
+        # active — fresh POV recompute: survivors of selection ∩ census
+        survivor_keys = {
+            self._note_identity(n) for n in self._truncation_survivors(selection)
+        }
+        fresh = sum(1 for k in census_keys if k in survivor_keys)
+
+        stamps = self._turn_stamps()
+
+        def _recency(ts) -> str:
+            age = _wallclock_age(int(time.time()) - ts)
+            ta = self._turns_ago(ts, stamps)
+            if ta is None:
+                return f"age {age}  (no turn clock yet)"
+            unit = "turn" if ta == 1 else "turns"
+            return f"{ta} {unit} ago  ·  age {age}"
+
+        def _pct(x) -> str:
+            return f"{100.0 * x / total:>5.1f}%" if total else "  0.0%"
+
+        lines: list[str] = []
+        lines.append(HDR)
+        lines.append(f"  CONSTRUCT: {subject}   ({subj_type} · {header_extra})")
+        lines.append(HDR)
+
+        lines.append("\nRECALL CENSUS")
+        lines.append(f"    {'canon entries (total)':<34}  {total:>6}")
+        if fed_by_now:
+            lines.append(
+                f"    {'active — as fed last turn':<34}  {as_fed:>6}  {_pct(as_fed)}"
+            )
+        else:
+            lines.append(
+                f"    {'active — as fed last turn':<34}  {'—':>6}  (no turn yet)"
+            )
+        lines.append(
+            f"    {'active — fresh POV recompute':<34}  {fresh:>6}  {_pct(fresh)}"
+        )
+        if census:
+            newest = self._newest_by_now(census)
+            oldest = min(census, key=lambda n: n.now)
+            lines.append(f"    {'newest entry':<34}  {_recency(newest.now)}")
+            lines.append(f"    {'oldest entry':<34}  {_recency(oldest.now)}")
+        else:
+            lines.append(f"    {'(no entries on file)':<34}")
+
+        # ── per-source breakdown (category rows may double-count, V6) ───────
+        lines.append(f"\n{SEP}")
+        lines.append("\nCENSUS SOURCES  (per-tag; a note with two tags counts twice)")
+        for label, notes in sources:
+            lines.append(
+                _introspect_row(label, len(notes), _introspect_note_toks(notes), cap)
+            )
+
+        # ── WITNESSED BY (exp: co-occurrence + last-seen) ───────────────────
+        witness_count: dict = {}
+        witness_last: dict = {}
+        for n in census:
+            for word in n.tag.split():
+                if not word.startswith(TAG_EXP):
+                    continue
+                body = word[len(TAG_EXP):]
+                for w in body.split("+"):
+                    if not w:
+                        continue
+                    witness_count[w] = witness_count.get(w, 0) + 1
+                    if n.now > witness_last.get(w, 0):
+                        witness_last[w] = n.now
+        lines.append(f"\n{SEP}")
+        lines.append("\nWITNESSED BY  (exp: co-occurrence)")
+        if witness_count:
+            max_c = max(witness_count.values())
+            for w, c in sorted(
+                witness_count.items(), key=lambda kv: (-kv[1], kv[0])
+            ):
+                blocks = max(1, round(BAR_WIDTH * c / max_c))
+                bar = "█" * blocks
+                lines.append(
+                    f"    {w:<16}{bar:<{BAR_WIDTH}}  {c:>4}"
+                    f"   · last {_recency(witness_last[w])}"
+                )
+        else:
+            lines.append("    (no exp: witnesses on file)")
+
+        # ── subject-type detail ─────────────────────────────────────────────
+        lines.append(f"\n{SEP}")
+        if subj_type == "person":
+            lines.append("\nPERSON DETAIL")
+            yomi_notes = dict(sources)["yomi"]
+            if yomi_notes:
+                fresh_yomi = self._newest_by_now(yomi_notes)
+                lines.append(
+                    f"    yomi: {len(yomi_notes)} note(s)"
+                    f"  · freshest {_recency(fresh_yomi.now)}"
+                )
+            else:
+                lines.append("    yomi: (none)")
+            # per-partner relationship arcs
+            rel_notes = dict(sources)["relationship pairs (rel:)"]
+            partners: dict = {}
+            for n in rel_notes:
+                chars = [
+                    w[len(TAG_CHAR):]
+                    for w in n.tag.split()
+                    if w.startswith(TAG_CHAR)
+                ]
+                kinds = [
+                    w[len(TAG_REL):]
+                    for w in n.tag.split()
+                    if w.startswith(TAG_REL)
+                ]
+                for partner in [c for c in chars if c != subject]:
+                    p = partners.setdefault(
+                        partner, {"kinds": {}, "newest": None}
+                    )
+                    for k in kinds:
+                        p["kinds"][k] = p["kinds"].get(k, 0) + 1
+                    if p["newest"] is None or n.now >= p["newest"].now:
+                        p["newest"] = n
+            if partners:
+                lines.append("    relationships:")
+                for partner in sorted(partners):
+                    p = partners[partner]
+                    kind_str = ", ".join(
+                        f"{k}×{v}" for k, v in sorted(p["kinds"].items())
+                    ) or "(untyped)"
+                    cur_kinds = [
+                        w[len(TAG_REL):]
+                        for w in (p["newest"].tag.split() if p["newest"] else [])
+                        if w.startswith(TAG_REL)
+                    ]
+                    cur = cur_kinds[0] if cur_kinds else "?"
+                    lines.append(
+                        f"      {partner:<16} {kind_str}   · current: {cur}"
+                    )
+            else:
+                lines.append("    relationships: (none)")
+            # profile / conscience / know / exp four-row block
+            smap = dict(sources)
+            lines.append("    knowledge:")
+            for label, key in (
+                (f"profile (char:{subject})", f"profile (char:{subject})"),
+                ("conscience (cons:)", "conscience (cons:)"),
+                ("private knowledge (know:)", "private knowledge (know:)"),
+                ("shared experience (exp:)", "shared experience (exp:)"),
+            ):
+                notes = smap.get(key, [])
+                lines.append(
+                    _introspect_row(
+                        label, len(notes), _introspect_note_toks(notes), cap, indent=6
+                    )
+                )
+        elif subj_type == "place":
+            lines.append("\nPLACE DETAIL")
+            smap = dict(sources)
+            subtree = smap["location subtree (/story/location)"]
+            events = smap["events (/story/events)"]
+            obj_notes = [
+                n for n in subtree if any(t.startswith(TAG_OBJ) for t in n.tag.split())
+            ]
+            desc_notes = [n for n in subtree if n not in obj_notes]
+            depth = len(subject.split("/"))
+            lines.append(f"    hierarchy depth: {depth}")
+            lines.append(
+                f"    description notes: {len(desc_notes)}"
+                f"   · object (obj:) notes: {len(obj_notes)}"
+            )
+            lines.append(f"    events here & below: {len(events)}")
+            children = self._child_room_slugs(subject)
+            siblings = self._sibling_room_slugs(subject)
+            lines.append(
+                f"    child rooms:   {', '.join(children) or '(none)'}"
+            )
+            lines.append(
+                f"    sibling rooms: {', '.join(siblings) or '(none)'}"
+            )
+        else:  # object
+            lines.append("\nOBJECT DETAIL")
+            smap = dict(sources)
+            canon = smap["canonical (/story/object)"]
+            sight = smap["sightings (obj:)"]
+            lines.append(
+                f"    canonical description: {'present' if canon else 'ABSENT'}"
+            )
+            lines.append(f"    residence: {header_extra}")
+            lines.append(f"    sighting-timeline depth: {len(sight)}")
+            lines.append(
+                f"    canonical notes: {len(canon)}   · sighting notes: {len(sight)}"
+            )
+
+        lines.append(f"\n{HDR}")
+        lines.append(
+            "  census total dedups by note identity; CENSUS SOURCES rows may "
+            "double-count."
+        )
+        lines.append(HDR)
+        return "\n".join(lines)
 
     def scene_debug_report(self) -> str:
         """Token-budget diagnostic for all entities in the current scene.

@@ -20,6 +20,8 @@ from rpjot import (
     PWD_EVENTS,
     PWD_SCENES,
     PWD_WORLD,
+    PWD_CHARS,
+    PWD_CONSCIENCE,
     PWD_YOMI,
     PWD_REL,
     PWD_INTERIOR,
@@ -50,9 +52,13 @@ logger = logging.getLogger("play")
 # ---------------------------------------------------------------------------
 
 _SLASH_EXACT = frozenset(
-    ["/quit", "/people", "/location", "/stats", "/mood", "/attn", "/prompt"]
+    ["/quit", "/mood", "/attn", "/prompt"]
 )
-_SLASH_PREFIX = ("/objects", "/yomi")
+# /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
+# yomi take a name arg — all prefix-matched by the unknown-command guard.
+_SLASH_PREFIX = (
+    "/objects", "/yomi", "/construct", "/location", "/people", "/stats"
+)
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
 
@@ -93,8 +99,8 @@ _HELP_TEXT = (
     "  *text   — MC performs an action\n"
     "  @name   — shift MC focus to person/object; tail is intent toward it\n"
     "  ^text   — MC inner monologue (can seed backstory)\n"
-    "Commands: /quit, /people, /location, /objects [name], "
-    "/stats, /mood, /attn, /yomi <name>, /prompt [text]"
+    "Commands: /quit, /people [full], /location [full], /objects [name], "
+    "/construct <name>, /stats [full], /mood, /attn, /yomi <name>, /prompt [text]"
 )
 
 
@@ -166,6 +172,86 @@ def query_location_context(engine):
         "\n\n".join(parts)
         or f"[no location notes found for: {engine.session.location}]"
     )
+
+
+def _one_line(note) -> str:
+    """First non-empty line of a note's message, hard-clipped for a summary row."""
+    msg = " ".join((note.message or "").split())
+    return (msg[:68] + "…") if len(msg) > 68 else msg
+
+
+def _summarize_bundle(sections) -> str:
+    """Dense count + newest-one-line summary per entity (SLASH_IMPROVEMENT §4).
+
+    `sections` is a list of (label, [notes]). Shared by the default (non-`full`)
+    /location and /people views: never dumps note bodies — just counts, a total,
+    and the single newest snippet per entity — so the reader sees sufficiency at
+    a glance and reaches for `full` only when they want the whole dump.
+    """
+    lines = []
+    grand = 0
+    for label, notes in sections:
+        n = len(notes)
+        grand += n
+        if n:
+            newest = max(notes, key=lambda x: x.now)
+            lines.append(
+                f"  {label:<26} {n:>3} note(s)  · newest: {_one_line(newest)}"
+            )
+        else:
+            lines.append(f"  {label:<26} {n:>3} note(s)")
+    lines.append(f"  {'TOTAL':<26} {grand:>3} note(s)   (append 'full' for bodies)")
+    return "\n".join(lines)
+
+
+def summarize_location(engine) -> str:
+    """Default /location: per-ancestor + events counts, no note bodies."""
+    sections = []
+    for a in engine.session.location_ancestors:
+        sections.append((a, list(ContextBundle([f"{PWD_WORLD}/{a}"]))))
+    sections.append(
+        ("events (room & below)", engine._tree_notes(f"{PWD_EVENTS}/{engine.session.location}"))
+    )
+    return _summarize_bundle(sections)
+
+
+def summarize_people(engine) -> str:
+    """Default /people: per-present-character note counts, no note bodies."""
+    people = sorted(engine.session.people_present)
+    if not people:
+        return "[no characters in scene]"
+    sections = [
+        (c, list(ContextBundle([f"{PWD_CHARS}/{c}"]))) for c in people
+    ]
+    return _summarize_bundle(sections)
+
+
+def summarize_stats(engine) -> str:
+    """Default /stats body: per-present-character note + token totals.
+
+    The dense counterpart to scene_debug_report's CHARACTERS IN SCENE block —
+    one line per character (profile+conscience+know+exp), no per-note breakdown
+    and no OTHER-KNOWN-CHARACTERS section. `/stats full` restores the complete
+    report. Rendered alongside the top-line token budget by the dispatcher.
+    """
+    from rpjot import _introspect_note_toks
+
+    cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
+    people = sorted(engine.session.people_present)
+    lines = [f"PER-CHARACTER TOTALS  ({len(people)} present)"]
+    if not people:
+        lines.append("  (no characters in scene)")
+    for c in people:
+        notes = []
+        notes += list(ContextBundle([f"{PWD_CHARS}/{c}"]))
+        notes += list(ContextBundle([f"{PWD_CONSCIENCE}/{c}"]))
+        notes += list(ContextBundle([f"know:{c}"]))
+        notes += list(ContextBundle([f"exp:{c}"]))
+        toks = _introspect_note_toks(notes)
+        pct = 100.0 * toks / cap if cap else 0.0
+        lines.append(f"  {c:<20} {len(notes):>4} notes  {toks:>6} tok  {pct:>5.1f}%")
+    lines.append("  (append 'full' for the complete scene debug report)")
+    return "\n".join(lines)
 
 
 def query_object_context(engine, object_name=None):
@@ -826,12 +912,27 @@ def game_loop(engine, seed_summaries=False):
             print("Farewell.")
             break
 
-        if user_input.lower() == "/people":
-            print(query_people_context(engine))
+        _cmd0 = user_input.lower().split()[0] if user_input else ""
+        _cmd_args = user_input.split()[1:]
+        _is_full = bool(_cmd_args) and _cmd_args[0].lower() == "full"
+
+        if _cmd0 == "/people":
+            print(query_people_context(engine) if _is_full else summarize_people(engine))
             continue
 
-        if user_input.lower() == "/location":
-            print(query_location_context(engine))
+        if _cmd0 == "/location":
+            print(
+                query_location_context(engine)
+                if _is_full
+                else summarize_location(engine)
+            )
+            continue
+
+        if _cmd0 == "/construct":
+            if _cmd_args:
+                print(engine.construct_report(user_input.split(maxsplit=1)[1].strip()))
+            else:
+                print("Usage: /construct <person | place | object name>")
             continue
 
         if user_input.lower().startswith("/objects"):
@@ -840,8 +941,11 @@ def game_loop(engine, seed_summaries=False):
             print(query_object_context(engine, object_name=obj))
             continue
 
-        if user_input.lower() == "/stats":
-            print(engine.scene_debug_report())
+        if _cmd0 == "/stats":
+            if _is_full:
+                print(engine.scene_debug_report())
+            else:
+                print(summarize_stats(engine))
             print()
             print(
                 engine.history_report(
