@@ -3788,12 +3788,14 @@ class TestCompactSchemaKeepList(unittest.TestCase):
                     "description", pdef, f"{tool}.{k} kept a description"
                 )
 
-    def test_hidden_legacy_tools_absent_from_compact_menu(self):
-        # U1: the 19 fine-grained rel/int tools leave the LLM-facing menu but
-        # stay registered and dispatchable (safety net for old histories).
-        for name in self.engine._COMPACT_HIDDEN_TOOLS:
+    def test_granular_tools_fully_deregistered(self):
+        # FEATURE_TOGGLES Inc 4: the 19 fine-grained rel/int writers are NOT
+        # registered by default (RPJOT_GRANULAR off) — absent from the compact
+        # menu AND from dispatch. The record_relationship/record_interior
+        # wrappers cover the taxonomy and delegate to the methods directly.
+        for name in self.engine._GRANULAR_TOOLS:
             self.assertNotIn(name, self.compact)
-            self.assertIn(name, self.engine._step2_handlers)
+            self.assertNotIn(name, self.engine._step2_handlers)
 
     def test_merged_tools_present_with_kind_enums(self):
         rel_kind = self._props("record_relationship")["kind"]
@@ -3920,14 +3922,14 @@ class TestConsolidatedDispatch(unittest.TestCase):
             },
         )
         merged = self._last_note()
-        self._dispatch(
-            "record_bond",
-            {
-                "char_a": "evie",
-                "char_b": "sam",
-                "bond_type": "old-friends",
-                "description": "grew up together in the manor",
-            },
+        # The granular writer is deregistered (Inc 4) but still exists as a
+        # method — the wrapper delegates to it directly, so a direct call is the
+        # byte-compatibility oracle.
+        self.engine._tool_record_bond(
+            char_a="evie",
+            char_b="sam",
+            bond_type="old-friends",
+            description="grew up together in the manor",
         )
         legacy = self._last_note()
         self.assertEqual(merged.tag, legacy.tag)
@@ -3946,14 +3948,13 @@ class TestConsolidatedDispatch(unittest.TestCase):
             },
         )
         merged = self._last_note()
-        self._dispatch(
-            "record_subtext",
-            {
-                "speaker": "evie",
-                "statement": "Lovely weather for a walk.",
-                "actual_meaning": "come with me, away from the others",
-                "audience": "sam",
-            },
+        # Direct method call — the granular writer is deregistered (Inc 4) but
+        # remains the wrapper's delegate; see test_merged_bond_matches_legacy.
+        self.engine._tool_record_subtext(
+            speaker="evie",
+            statement="Lovely weather for a walk.",
+            actual_meaning="come with me, away from the others",
+            audience="sam",
         )
         legacy = self._last_note()
         self.assertEqual(merged.tag, legacy.tag)
@@ -3980,6 +3981,136 @@ class TestConsolidatedDispatch(unittest.TestCase):
         note = self._last_note()
         self.assertIn("int:longing", note.tag.split())
         self.assertTrue(note.message.strip())
+
+
+# ---------------------------------------------------------------------------
+# 12e-3b. Feature families + per-tool cost instrumentation (FEATURE_TOGGLES /
+# TOOL_TIMING Inc 0-4). Relative/structural assertions only — the _tok fallback
+# (len//4 without `regex`) changes absolute counts.
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureFamilies(unittest.TestCase):
+    """Family tagging + the registration gate (Inc 1/2/4)."""
+
+    def test_default_registers_all_families_except_granular(self):
+        e = _make_engine(people={"player"})
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        # Family wrappers + query tools present by default.
+        for expected in ("save_yomi", "record_relationship", "record_interior",
+                         "record_conscience", "get_social_map"):
+            self.assertIn(expected, names)
+        # Granular writers deregistered by default (Inc 4).
+        for name in e._GRANULAR_TOOLS:
+            self.assertNotIn(name, names)
+
+    def test_core_tools_never_disablable(self):
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        # Even a bogus disable of "core" leaves the 12 pinned tools registered.
+        e.disabled_families = {"core", "yomi", "relationships", "interiority"}
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        for pinned in ("record_event", "get_people_present", "examine_location",
+                       "navigate_to", "set_people_present", "save_character",
+                       "save_location", "save_object", "get_character",
+                       "search_world", "prepare_context", "record_knowledge"):
+            self.assertIn(pinned, names)
+
+    def test_disable_family_drops_exactly_its_tools(self):
+        full = _make_engine(people={"player"})
+        full_names = {s["function"]["name"] for s in full._tool_schemas}
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.disabled_families = {"yomi"}
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        dropped = full_names - names
+        self.assertEqual(dropped, e._FAMILY_TOOLS["yomi"])
+        self.assertFalse(e.family_enabled("yomi"))
+        self.assertTrue(e.family_enabled("core"))
+
+    def test_granular_flag_restores_writers(self):
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.granular_enabled = True
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        for name in e._GRANULAR_TOOLS:
+            self.assertIn(name, names)
+
+    def test_disabled_families_gate_pov_reads(self):
+        # Inc 2: conscience/interiority reads are family-gated. With both off the
+        # flags flip and gather_pov_context still builds a bundle (smaller POV).
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.disabled_families = {"interiority", "conscience"}
+        e.register_all_tools()
+        self.assertFalse(e.family_enabled("interiority"))
+        self.assertFalse(e.family_enabled("conscience"))
+        self.assertIsNotNone(e.gather_pov_context("player"))
+
+
+class TestToolTiming(unittest.TestCase):
+    """Per-tool token map + dispatch instrumentation + timing_report (Inc 0)."""
+
+    def setUp(self):
+        self.engine = _make_engine(people={"player"})
+
+    def test_tok_map_covers_all_registered_tools(self):
+        names = {s["function"]["name"] for s in self.engine._tool_schemas}
+        self.assertEqual(set(self.engine._tool_tok_map), names)
+
+    def test_tok_map_sums_near_cached_aggregates(self):
+        m = self.engine._tool_tok_map
+        n = len(m)
+        full_sum = sum(v["full"] for v in m.values())
+        compact_sum = sum(v["compact"] for v in m.values())
+        # Per-entry tokenization drifts from the whole-list aggregate by ≤ ~1
+        # tok/tool (the list delimiters); allow n+2 slack in either direction.
+        self.assertLessEqual(
+            abs(full_sum - self.engine._cached_schema_toks), n + 2
+        )
+        self.assertLessEqual(
+            abs(compact_sum - self.engine._cached_compact_step2_schema_toks), n + 2
+        )
+
+    def test_dispatch_records_event_and_session_stat(self):
+        # Read-only step-1 tool — avoids appending event notes to the fixture.
+        self.engine._dispatch("get_people_present", "{}")
+        self.assertTrue(self.engine._turn_tool_events)
+        ev = self.engine._turn_tool_events[-1]
+        self.assertEqual(ev["name"], "get_people_present")
+        self.assertTrue(ev["ok"])
+        self.assertGreaterEqual(ev["ms"], 0.0)
+        self.assertGreater(ev["result_toks"], 0)
+        self.assertEqual(
+            self.engine._session_tool_stats["get_people_present"]["calls"], 1
+        )
+
+    def test_unknown_tool_records_error_with_unchanged_json(self):
+        result = self.engine._dispatch("nonexistent_tool", "{}")
+        self.assertIn("error", json.loads(result))
+        self.assertFalse(self.engine._turn_tool_events[-1]["ok"])
+        self.assertEqual(
+            self.engine._session_tool_stats["nonexistent_tool"]["errors"], 1
+        )
+
+    def test_timing_report_renders_without_turn(self):
+        report = self.engine.timing_report()
+        self.assertIn("STANDING COST", report)
+        self.assertIn("no turn yet", report)
+        self.assertTrue(report.strip())
+
+    def test_timing_report_renders_after_snapshot(self):
+        self.engine._dispatch("get_people_present", "{}")
+        self.engine._last_turn_report = {
+            "turn": 1,
+            "events": list(self.engine._turn_tool_events),
+            "iters": {"step1": 1, "step2": 1, "step3": 1},
+            "step_s": {"step1": 1.0, "step2": 1.0, "step3": 1.0, "total": 3.0},
+            "seed": "off",
+            "usage": [],
+        }
+        report = self.engine.timing_report()
+        self.assertIn("EXECUTED THIS TURN", report)
+        self.assertIn("get_people_present", report)
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ logger = logging.getLogger("play")
 # ---------------------------------------------------------------------------
 
 _SLASH_EXACT = frozenset(
-    ["/quit", "/mood", "/attn", "/prompt"]
+    ["/quit", "/mood", "/attn", "/prompt", "/timing"]
 )
 # /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
 # yomi take a name arg — all prefix-matched by the unknown-command guard.
@@ -78,6 +78,23 @@ _MC_ALIASES = frozenset(
 # Stream step-3 prose to the console token-by-token (perceived latency:
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
+# Feature-family toggles (FEATURE_TOGGLES). RPJOT_DISABLE is a comma-separated
+# denylist of families to drop (e.g. "yomi,relationships"); empty = all on.
+# RPJOT_GRANULAR=1 restores the fine-grained rel/int writers for A/B. The engine
+# never reads env — the play loop pushes these on before register_all_tools.
+_DISABLED_FAMILIES = frozenset(
+    f.strip().lower()
+    for f in os.environ.get("RPJOT_DISABLE", "").split(",")
+    if f.strip()
+)
+_GRANULAR = os.environ.get("RPJOT_GRANULAR", "") == "1"
+
+
+def _apply_family_config(engine):
+    """Push RPJOT_DISABLE / RPJOT_GRANULAR onto the engine before tool
+    registration (the engine never reads env)."""
+    engine.disabled_families = set(_DISABLED_FAMILIES)
+    engine.granular_enabled = _GRANULAR
 
 _PARAPHRASE_INSTRUCTION = (
     "You are a narrator-briefing editor. "
@@ -100,8 +117,8 @@ _HELP_TEXT = (
     "  @name   — shift MC focus to person/object; tail is intent toward it\n"
     "  ^text   — MC inner monologue (can seed backstory)\n"
     "Commands: /quit, /people [full], /location [full], /objects [name], "
-    "/construct <name>, /stats [full], /debug <description>, /mood, /attn, "
-    "/yomi <name>, /prompt [text]"
+    "/construct <name>, /stats [full], /timing, /debug <description>, /mood, "
+    "/attn, /yomi <name>, /prompt [text]"
 )
 
 
@@ -962,6 +979,10 @@ def game_loop(engine, seed_summaries=False):
             )
             continue
 
+        if _cmd0 == "/timing":
+            print(engine.timing_report())
+            continue
+
         if _cmd0 == "/debug":
             parts = user_input.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
@@ -1032,6 +1053,9 @@ def game_loop(engine, seed_summaries=False):
             continue
 
         if user_input.lower().startswith("/yomi"):
+            if not engine.family_enabled("yomi"):
+                print("[feature disabled: yomi (RPJOT_DISABLE)]")
+                continue
             parts = user_input.split(maxsplit=1)
             if len(parts) > 1:
                 char_name = parts[1].strip()
@@ -1166,6 +1190,7 @@ def _resume_engine():
         location=det_location or "ravenwood-manor",
         people_present={"mc"},
     )
+    _apply_family_config(engine)
     engine.register_all_tools()
     engine.init_pipeline()
 
@@ -1239,6 +1264,7 @@ def main():
             location="ravenwood-manor",
             people_present={"mc"},
         )
+        _apply_family_config(engine)
         engine.register_all_tools()
         engine.init_pipeline()
         # Bootstrap the opening scene so current_scene is never empty from turn one.

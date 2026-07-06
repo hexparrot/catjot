@@ -24,6 +24,7 @@ import time
 import requests
 from dataclasses import dataclass, field as _dc_field
 
+import catjot
 from catjot import (
     Note,
     NoteContext,
@@ -180,6 +181,7 @@ register_prefix("[SEED]", "memory", "idle-window step-1 precompute (seed) outcom
 register_prefix("[STEP2]", "tooling", "step-2 compliance / write-tool activity")
 register_prefix("[TOOLS]", "tooling", "per-turn step-2 tool census")
 register_prefix("[DISPATCH]", "tooling", "tool dispatch routing")
+register_prefix("[FAMILY]", "tooling", "per-family tool count + schema token weight")
 register_prefix("[BUDGET]", "budget", "baseline context token measure (soft warn)")
 register_prefix(
     "[PHASING]",
@@ -1282,6 +1284,7 @@ class WorldStateStep:
             logger.debug(
                 "[TIMING] step1 call %d: %.1fs", i + 1, time.perf_counter() - t_call
             )
+            engine._capture_usage("step1", i + 1)
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
@@ -1538,6 +1541,7 @@ class ComplianceStep:
             logger.debug(
                 "[TIMING] step2 call %d: %.1fs", i + 1, time.perf_counter() - t_call
             )
+            engine._capture_usage("step2", i + 1)
 
             tool_calls = response_msg.get("tool_calls")
             if not tool_calls:
@@ -1722,6 +1726,14 @@ class ProseStep:
         )
         attn_text = engine._gather_attn_for_scene()
         mood_text = engine._gather_mood_for_scene()
+        # YOMI repair (FEATURE_TOGGLES Inc 3): the read half was never wired — the
+        # gather existed but had zero callers, so saved yomi never reached the
+        # narrator. Inject it here alongside attn/mood, behind the family flag.
+        yomi_text = (
+            engine._gather_yomi_for_scene()
+            if engine.family_enabled("yomi")
+            else ""
+        )
 
         injection_parts = [
             "PROSE PHASE — write the narrative response now. "
@@ -1735,6 +1747,8 @@ class ProseStep:
             injection_parts.append(attn_text)
         if mood_text:
             injection_parts.append(mood_text)
+        if yomi_text:
+            injection_parts.append(yomi_text)
         if synthesis:
             injection_parts.append(synthesis)
         injection_parts.append(classified_input)
@@ -1787,6 +1801,9 @@ class ProseStep:
         content = response_msg.get("content", "")
         _, narrative = engine.strip_think_tags(content)
         logger.info("[STEP3] prose: %d tok", _tok(narrative))
+        # Streaming step-3 reports no usage (no stream_options); _capture_usage
+        # records that honestly (None → a "streaming" marker in timing_report).
+        engine._capture_usage("step3", 1)
         return narrative.strip()
 
 
@@ -1821,6 +1838,29 @@ class RPJotEngine:
         self._cached_bare_schema_toks: int = 0
         self._cached_step1_schema_toks: int = 0
         self._cached_compact_step2_schema_toks: int = 0
+        # Feature families (FEATURE_TOGGLES Inc 1/2). disabled_families is a
+        # denylist the play loop sets from RPJOT_DISABLE BEFORE register_all_tools
+        # (the engine never reads env); "core" is never disablable. granular_enabled
+        # (RPJOT_GRANULAR) restores the fine-grained rel/int writers for A/B.
+        # _tool_families maps each REGISTERED tool → its family (populated during
+        # registration; read by /timing's family column + the per-family log).
+        self.disabled_families: set = set()
+        self.granular_enabled: bool = False
+        self._tool_families: dict = {}
+        # Per-tool schema token map (TOOL_TIMING Inc 0): name → {step1, compact,
+        # bare, full} token cost in each schema variant. Built after registration;
+        # 0 means the tool is absent from that variant. Read by timing_report.
+        self._tool_tok_map: dict = {}
+        # Per-tool EXECUTION accounting (TOOL_TIMING Inc 0). _turn_tool_events is a
+        # working buffer reset each turn; _session_tool_stats accumulates for the
+        # whole session; _last_turn_report is the finished snapshot /timing reads
+        # for the last turn; _turn_usage collects per-iteration API usage;
+        # _in_bg_speculation flags dispatches made off the critical path.
+        self._turn_tool_events: list = []
+        self._session_tool_stats: dict = {}
+        self._last_turn_report: dict | None = None
+        self._turn_usage: list = []
+        self._in_bg_speculation: bool = False
         self._system_refresh_pending: bool = False
         self._turn_count: int = 0
         # Citation capture (TS_CITATIONS §3.1): `now` timestamps of notes
@@ -1992,14 +2032,41 @@ class RPJotEngine:
         ("place_object", "room"),
     ]
 
-    # Legacy fine-grained rel:/int: tools hidden from the LLM-facing compact
-    # menu (TOOL_UNIFY U1). They stay registered and dispatchable — an old
-    # resumed history or a habituated model can still call them by name — but
-    # the model's step-2 menu offers record_relationship / record_interior
-    # instead. Census basis: across all real sessions the rel:* tags fired
-    # zero times and int:* once, while these 19 schemas cost 56% of the
-    # compact step-2 budget and diluted every selection with distractors.
-    _COMPACT_HIDDEN_TOOLS = frozenset({
+    # Feature-family tags (FEATURE_TOGGLES Inc 1). ONE greppable source of truth
+    # for which tools belong to a disablable family; any tool not listed here is
+    # "core" — the always-on baseline RPJOT_DISABLE can never remove (the 12
+    # test-pinned tools all fall here). To act on a family: grep its frozenset.
+    _FAMILY_TOOLS: dict = {
+        "yomi": frozenset({"save_yomi", "get_yomi"}),
+        "conscience": frozenset({"record_conscience", "get_conscience"}),
+        "relationships": frozenset({
+            "record_relationship", "get_relationship_arc", "get_social_map",
+            "record_bond", "record_history", "record_dynamic",
+            "record_power_dynamic", "record_wound", "record_promise",
+            "record_debt", "record_lie", "record_leverage", "record_impression",
+        }),
+        "interiority": frozenset({
+            "record_interior",
+            "record_secret", "record_desire", "record_longing", "record_jealousy",
+            "record_mask", "record_subtext", "record_reputation", "record_trigger",
+            "record_unspoken",
+        }),
+    }
+    # Reverse index name → family, built once at class-body eval. Unlisted = core.
+    _TOOL_FAMILY: dict = {
+        name: fam for fam, names in _FAMILY_TOOLS.items() for name in names
+    }
+
+    # Fine-grained rel:/int: writers (FEATURE_TOGGLES Inc 4, replaces the former
+    # _COMPACT_HIDDEN_TOOLS). NOT registered by default: the record_relationship
+    # /record_interior wrappers cover the whole taxonomy via a kind enum, and the
+    # wrappers delegate to these methods DIRECTLY (not through the registry), so
+    # deregistering them drops them from every schema variant AND from dispatch
+    # in one seam while leaving delegation intact. Set RPJOT_GRANULAR=1 to
+    # re-register them for A/B or an old-history safety net. Census basis: across
+    # all real sessions rel:* fired zero times and int:* once, while these 19
+    # schemas cost 56% of the compact step-2 budget and diluted every selection.
+    _GRANULAR_TOOLS = frozenset({
         "record_bond", "record_history", "record_dynamic",
         "record_power_dynamic", "record_wound", "record_promise",
         "record_debt", "record_lie", "record_leverage", "record_impression",
@@ -2096,9 +2163,6 @@ class RPJotEngine:
         for s in self._step2_schemas:
             fn = s["function"]
             name = fn["name"]
-            # Hidden legacy tools stay dispatchable but leave the menu (U1).
-            if name in self._COMPACT_HIDDEN_TOOLS:
-                continue
             params = fn.get("parameters", {})
             stripped_props = {}
             for k, pdef in params.get("properties", {}).items():
@@ -2175,13 +2239,57 @@ class RPJotEngine:
     def _safe_dispatch(self, handlers: dict, name: str, args_json) -> str:
         """Dispatch a tool call defensively — a bad call must never crash the turn.
 
+        Thin timed shell over _dispatch_guarded (TOOL_TIMING Inc 0): times the
+        handler with perf_counter and records a per-tool event (latency, result
+        tokens, ok flag). The guarded body's error-JSON strings are byte-identical
+        to the pre-instrumentation contract — the model's self-correction loop
+        and the dispatch tests depend on their exact shape.
+        """
+        t0 = time.perf_counter()
+        result, ok = self._dispatch_guarded(handlers, name, args_json)
+        self._record_tool_event(
+            name,
+            ms=(time.perf_counter() - t0) * 1000.0,
+            result_toks=_tok(result if isinstance(result, str) else str(result)),
+            ok=ok,
+        )
+        return result
+
+    def _record_tool_event(
+        self, name: str, *, ms: float, result_toks: int, ok: bool
+    ) -> None:
+        """Log one tool dispatch into the turn buffer + the session accumulator."""
+        self._turn_tool_events.append(
+            {
+                "name": name,
+                "ms": ms,
+                "result_toks": result_toks,
+                "ok": ok,
+                "bg": self._in_bg_speculation,
+            }
+        )
+        s = self._session_tool_stats.setdefault(
+            name,
+            {"calls": 0, "errors": 0, "ms": 0.0, "result_toks": 0, "bg_calls": 0},
+        )
+        s["calls"] += 1
+        s["ms"] += ms
+        s["result_toks"] += result_toks
+        if not ok:
+            s["errors"] += 1
+        if self._in_bg_speculation:
+            s["bg_calls"] += 1
+
+    def _dispatch_guarded(self, handlers: dict, name: str, args_json) -> tuple:
+        """Defensive dispatch body. Returns (result_text, ok).
+
         Unknown tool names, non-JSON arguments, missing required keys, and any
         exception raised by the handler are all converted to an error-JSON
-        string (logged at WARNING) instead of propagating. The model receives
-        the error inside its tool loop and can self-correct on the next round.
+        string (logged at WARNING) instead of propagating, with ok=False. The
+        model receives the error inside its tool loop and can self-correct.
         """
         if name not in handlers:
-            return json.dumps({"error": f"unknown tool: {name}"})
+            return json.dumps({"error": f"unknown tool: {name}"}), False
 
         try:
             args = (
@@ -2194,7 +2302,7 @@ class RPJotEngine:
                     "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
                     "hint": "check argument names and types against the tool schema",
                 }
-            )
+            ), False
 
         if not isinstance(args, dict):
             logger.warning("[DISPATCH] %s: arguments are not an object: %r", name, args)
@@ -2203,7 +2311,7 @@ class RPJotEngine:
                     "error": f"tool {name} failed: arguments must be a JSON object",
                     "hint": "check argument names and types against the tool schema",
                 }
-            )
+            ), False
 
         missing = [k for k in self._required_params(name) if k not in args]
         if missing:
@@ -2218,10 +2326,10 @@ class RPJotEngine:
                     ),
                     "hint": "check argument names and types against the tool schema",
                 }
-            )
+            ), False
 
         try:
-            return handlers[name](**args)
+            return handlers[name](**args), True
         except Exception as exc:
             logger.warning(
                 "[DISPATCH] %s raised %s: %s",
@@ -2235,7 +2343,7 @@ class RPJotEngine:
                     "error": f"tool {name} failed: {type(exc).__name__}: {exc}",
                     "hint": "check argument names and types against the tool schema",
                 }
-            )
+            ), False
 
     def _dispatch(self, name: str, args_json) -> str:
         """Dispatch a tool call by name across step1 + step2 handlers."""
@@ -2263,11 +2371,22 @@ class RPJotEngine:
             fn = getattr(self.__class__, attr_name)
             if callable(fn) and hasattr(fn, "_rp_tool_meta"):
                 description, parameters, step = fn._rp_tool_meta
-                bound = getattr(self, attr_name)
                 tool_name = attr_name.removeprefix("_tool_")
+                # Family gate (Inc 1): a disabled family drops both its schema and
+                # its handler here — the single registration choke point — so no
+                # downstream filtering is ever needed. core is never disablable.
+                family = self._family_of(tool_name)
+                if not self.family_enabled(family):
+                    continue
+                # Granular gate (Inc 4): the fine-grained rel/int writers stay out
+                # of the registry unless RPJOT_GRANULAR restored them.
+                if tool_name in self._GRANULAR_TOOLS and not self.granular_enabled:
+                    continue
+                bound = getattr(self, attr_name)
                 self._register_tool(
                     tool_name, description, parameters, bound, step=step
                 )
+                self._tool_families[tool_name] = family
 
         self._cached_schema_toks = _tok(json.dumps(self._tool_schemas))
         self._cached_bare_schema_toks = _tok(json.dumps(self._bare_tool_schemas))
@@ -2275,6 +2394,7 @@ class RPJotEngine:
         self._cached_compact_step2_schema_toks = _tok(
             json.dumps(self._compact_step2_schemas)
         )
+        self._compute_tool_token_map()
         logger.info(
             "registered step1=%d step2=%d tools | "
             "schema overhead: step1=%d tok, step2_compact=%d tok (full=%d), bare=%d tok",
@@ -2285,6 +2405,229 @@ class RPJotEngine:
             self._cached_schema_toks,
             self._cached_bare_schema_toks,
         )
+        self._log_family_weights()
+
+    def _family_of(self, tool_name: str) -> str:
+        """The feature family a tool belongs to (default 'core')."""
+        return self._TOOL_FAMILY.get(tool_name, "core")
+
+    def family_enabled(self, family: str) -> bool:
+        """True if `family` is active this session. 'core' is always active."""
+        return family == "core" or family not in self.disabled_families
+
+    def _compute_tool_token_map(self) -> None:
+        """Per-tool schema token cost in each variant (TOOL_TIMING Inc 0).
+
+        Must run AFTER registration: the compact/bare schemas are properties over
+        the finished step-2 list. Each entry is tokenized individually, so the
+        per-tool sums drift from the cached whole-list aggregates by ~1 tok per
+        tool (the list `[`, `]`, `, ` delimiters); the aggregates stay the
+        authoritative per-call figures — this map is for attribution only.
+        """
+        self._tool_tok_map = {}
+
+        def _fold(schemas: list, key: str) -> None:
+            for s in schemas:
+                name = s["function"]["name"]
+                slot = self._tool_tok_map.setdefault(
+                    name, {"step1": 0, "compact": 0, "bare": 0, "full": 0}
+                )
+                slot[key] = _tok(json.dumps(s))
+
+        _fold(self._step1_schemas, "step1")
+        _fold(self._compact_step2_schemas, "compact")
+        _fold(self._bare_tool_schemas, "bare")
+        _fold(self._tool_schemas, "full")
+
+    def _log_family_weights(self) -> None:
+        """One [FAMILY] log line per family: tool count + token cost by variant."""
+        rollup: dict = {}
+        for name, fam in self._tool_families.items():
+            toks = self._tool_tok_map.get(name, {})
+            agg = rollup.setdefault(
+                fam, {"tools": 0, "step1": 0, "compact": 0, "bare": 0}
+            )
+            agg["tools"] += 1
+            for k in ("step1", "compact", "bare"):
+                agg[k] += toks.get(k, 0)
+        for fam in sorted(rollup):
+            a = rollup[fam]
+            state = "off" if not self.family_enabled(fam) else "on"
+            logger.info(
+                "[FAMILY] %s (%s): %d tools | step1=%d compact=%d bare=%d tok",
+                fam, state, a["tools"], a["step1"], a["compact"], a["bare"],
+            )
+
+    def _capture_usage(self, step: str, i: int) -> None:
+        """Record the last LLM call's API token usage for /timing (Inc 0).
+
+        Skipped during background speculation so idle-window calls never pollute
+        the turn view. A streaming call reports no usage (catjot.LAST_USAGE is
+        None) — recorded as a marker so the report says so instead of omitting.
+        """
+        if self._in_bg_speculation:
+            return
+        usage = catjot.LAST_USAGE
+        self._turn_usage.append(
+            {
+                "step": step,
+                "i": i,
+                "prompt_tokens": (usage or {}).get("prompt_tokens"),
+                "completion_tokens": (usage or {}).get("completion_tokens"),
+                "streaming": usage is None,
+            }
+        )
+
+    def timing_report(self) -> str:
+        """Deterministic /timing readout: per-tool existence + execution cost.
+
+        Existence cost = per-tool schema tok in the variant actually sent ×
+        the LLM iterations that shipped it. Execution cost = handler wall-clock
+        + result tokens fed back into context. No LLM, no locks — reads only the
+        finished snapshots (_last_turn_report, _session_tool_stats, _tool_tok_map).
+        """
+        HDR = _introspect_rule("═")
+        SEP = _introspect_rule("─")
+        rep = self._last_turn_report
+        lines = [HDR]
+
+        # --- Header + per-step timing -------------------------------------
+        if rep is None:
+            lines.append("TIMING — no turn yet")
+            lines.append(
+                "  [execution stats appear after the first turn; "
+                "standing costs below]"
+            )
+            iters = {"step1": None, "step2": None, "step3": None}
+        else:
+            ss, iters = rep["step_s"], rep["iters"]
+            lines.append(f"TIMING — turn {rep['turn']}   total {ss['total']:.1f}s")
+            lines.append(
+                f"  step1 {ss['step1']:.1f}s/{iters['step1']}it · "
+                f"step2 {ss['step2']:.1f}s/{iters['step2']}it · "
+                f"step3 {ss['step3']:.1f}s · seed={rep['seed']}"
+            )
+
+        # --- EXECUTED THIS TURN -------------------------------------------
+        if rep is not None:
+            lines.append(SEP)
+            lines.append(
+                f"  {'EXECUTED THIS TURN':<28}{'calls':>7}{'ms':>9}{'result tok':>13}"
+            )
+            by_tool: dict = {}
+            for ev in rep["events"]:
+                t = by_tool.setdefault(
+                    ev["name"],
+                    {"calls": 0, "ms": 0.0, "rtok": 0, "err": 0, "bg": False},
+                )
+                t["calls"] += 1
+                t["ms"] += ev["ms"]
+                t["rtok"] += ev["result_toks"]
+                if not ev["ok"]:
+                    t["err"] += 1
+                if ev["bg"]:
+                    t["bg"] = True
+            if not by_tool:
+                lines.append("  (no tools executed this turn)")
+            tot_calls = tot_ms = tot_rtok = 0
+            for name in sorted(by_tool, key=lambda n: -by_tool[n]["ms"]):
+                t = by_tool[name]
+                label = name
+                if t["bg"]:
+                    label = "[bg] " + label
+                if t["err"]:
+                    label += f" ({t['err']} err)"
+                lines.append(
+                    f"  {label:<28}{t['calls']:>7}{t['ms']:>9.1f}{t['rtok']:>13}"
+                )
+                tot_calls += t["calls"]
+                tot_ms += t["ms"]
+                tot_rtok += t["rtok"]
+            if by_tool:
+                lines.append(f"  {'─'*26}")
+                lines.append(
+                    f"  {'total':<28}{tot_calls:>7}{tot_ms:>9.1f}{tot_rtok:>13}"
+                )
+            lines.append(
+                "  note: LLM latency is per-iteration-batch, not per-tool — the "
+                "tools in\n  one round share that call's latency; ms above is "
+                "handler wall-clock only."
+            )
+
+        # --- STANDING COST THIS TURN --------------------------------------
+        lines.append(SEP)
+        lines.append(
+            "STANDING COST  (schema tok in the sent variant × iterations)"
+        )
+        lines.append(
+            f"  {'variant':<20}{'per-call tok':>14}{'iters':>8}{'turn tok':>12}"
+        )
+        variants = [
+            ("step1 (full)", self._cached_step1_schema_toks, iters["step1"]),
+            ("step2 (compact)", self._cached_compact_step2_schema_toks, iters["step2"]),
+            ("step3 (bare)", self._cached_bare_schema_toks, iters["step3"]),
+        ]
+        for label, per_call, n in variants:
+            n_str = "—" if n is None else str(n)
+            turn_tok = "—" if n is None else str(per_call * n)
+            lines.append(
+                f"  {label:<20}{per_call:>14}{n_str:>8}{turn_tok:>12}"
+            )
+        # Top tools by standing footprint, with family + per-variant costs.
+        lines.append(
+            f"  {'top tools':<20} {'fam':>12} {'s1':>5}{'cmp':>6}{'bare':>6}"
+        )
+        ranked = sorted(
+            self._tool_tok_map.items(),
+            key=lambda kv: -(kv[1]["step1"] + kv[1]["compact"] + kv[1]["bare"]),
+        )
+        for name, tk in ranked[:10]:
+            fam = self._tool_families.get(name, "core")
+            lines.append(
+                f"  {name[:20]:<20} {fam[:12]:>12} {tk['step1']:>5}"
+                f"{tk['compact']:>6}{tk['bare']:>6}"
+            )
+        lines.append(
+            "  per-call figures are the cached aggregates; per-tool rows sum to\n"
+            "  within ~1 tok/tool of them (list-delimiter drift)."
+        )
+
+        # --- SESSION ------------------------------------------------------
+        if self._session_tool_stats:
+            lines.append(SEP)
+            lines.append(
+                f"  {'SESSION (cumulative)':<28}{'calls':>7}{'errs':>6}"
+                f"{'ms':>9}{'result tok':>11}"
+            )
+            ranked_s = sorted(
+                self._session_tool_stats.items(),
+                key=lambda kv: -kv[1]["result_toks"],
+            )
+            for name, s in ranked_s[:12]:
+                lines.append(
+                    f"  {name:<28}{s['calls']:>7}{s['errors']:>6}"
+                    f"{s['ms']:>9.1f}{s['result_toks']:>11}"
+                )
+
+        # --- API USAGE ----------------------------------------------------
+        if rep is not None and rep["usage"]:
+            lines.append(SEP)
+            lines.append("API USAGE (this turn, from the endpoint)")
+            for u in rep["usage"]:
+                if u["streaming"]:
+                    lines.append(
+                        f"  {u['step']}#{u['i']}: streaming — usage not reported"
+                    )
+                elif u["prompt_tokens"] is None:
+                    lines.append(f"  {u['step']}#{u['i']}: usage unavailable")
+                else:
+                    lines.append(
+                        f"  {u['step']}#{u['i']}: prompt={u['prompt_tokens']} "
+                        f"out={u['completion_tokens']}"
+                    )
+
+        lines.append(HDR)
+        return "\n".join(lines)
 
     def _has_led_cue(self, text: str) -> bool:
         """True when `text` carries a passive-arrival cue (LM §3.1 fallback gate).
@@ -2466,6 +2809,9 @@ class RPJotEngine:
         self._turn_refs = []
         # Rendered-context census is likewise turn-scoped (Phase 0b, E1).
         self._last_ctx_now = set()
+        # Per-tool execution accounting is turn-scoped too (TOOL_TIMING Inc 0).
+        self._turn_tool_events = []
+        self._turn_usage = []
 
         # MOVEMENT_TREE §3.2: commit any staged locale proposal in the foreground
         # BEFORE the step-1 graph block is built, so this turn's [LOCALE GRAPH]
@@ -2494,6 +2840,9 @@ class RPJotEngine:
             self._turn_refs = seed["refs"] + [
                 t for t in self._turn_refs if t not in seed["refs"]
             ]
+            # The speculative dispatches produced the doc this turn actually uses,
+            # so surface them in /timing (already flagged bg=True). (TOOL_TIMING)
+            self._turn_tool_events = seed.get("tool_events", []) + self._turn_tool_events
         elif seed:
             self._seed_status = "miss"
         logger.info("[TURN] step1 done: world_doc=%d tok", _tok(world_doc))
@@ -2548,6 +2897,27 @@ class RPJotEngine:
         # path; wait = seconds the player actually stalled at the join.
         bg_stats = self._bg_stats if isinstance(self._bg_stats, dict) else {}
         self._bg_stats = None
+        # Finished per-turn snapshot for /timing (TOOL_TIMING Inc 0). `iters`
+        # counts each step's LLM calls — every one shipped that step's schemas,
+        # so it is exactly the existence-cost multiplier. Adopted speculative
+        # dispatches (bg=True) are already in _turn_tool_events on a seed hit.
+        self._last_turn_report = {
+            "turn": self._turn_count + 1,
+            "events": list(self._turn_tool_events),
+            "iters": {
+                "step1": self._world_state_step.last_rounds,
+                "step2": self._compliance_step.last_rounds,
+                "step3": 1,
+            },
+            "step_s": {
+                "step1": t1 - t0,
+                "step2": t2 - t1,
+                "step3": t3 - t2,
+                "total": t3 - t0,
+            },
+            "seed": self._seed_status,
+            "usage": list(self._turn_usage),
+        }
         logger.info(
             "[TIMING] turn=%d step1=%.1fs/%dit step2=%.1fs/%dit step3=%.1fs "
             "total=%.1fs seed=%s bg=%.1fs wait=%.1fs",
@@ -2632,6 +3002,13 @@ class RPJotEngine:
         # the seed and are adopted by run_turn only on a seed hit.
         saved_refs = self._turn_refs
         self._turn_refs = []
+        # Tool-event isolation (TOOL_TIMING Inc 0), mirroring the refs precedent:
+        # speculative dispatches must not land in the just-completed turn's view.
+        # They travel with the seed and are adopted (flagged bg=True) only on a
+        # hit; the _in_bg_speculation flag stamps them and gates usage capture.
+        saved_events = self._turn_tool_events
+        self._turn_tool_events = []
+        self._in_bg_speculation = True
         t0 = time.perf_counter()
         try:
             doc = self._world_state_step.run(_SPECULATIVE_INPUT)
@@ -2639,10 +3016,15 @@ class RPJotEngine:
             # call_llm can raise beyond RequestException (JSON decode etc.);
             # a background failure must never surface.
             logger.warning("[SEED] speculative step-1 failed: %s", exc)
+            self._turn_tool_events = saved_events
+            self._in_bg_speculation = False
             return
         finally:
             refs = self._turn_refs
             self._turn_refs = saved_refs
+        spec_events = self._turn_tool_events
+        self._turn_tool_events = saved_events
+        self._in_bg_speculation = False
 
         if not self._world_state_step.last_ok or not doc.strip():
             # Exhaustion/exception produced a fallback doc — seeding with it
@@ -2658,6 +3040,7 @@ class RPJotEngine:
         self._seed = {
             "doc": doc,
             "refs": refs,
+            "tool_events": spec_events,
             "state": state,
             "turn": self._turn_count,
             "rounds": self._world_state_step.last_rounds,
@@ -3925,10 +4308,15 @@ class RPJotEngine:
         for ancestor in self.session.location_ancestors:
             terms.append(f"{PWD_WORLD}/{ancestor}")
         terms.append(f"{PWD_CHARS}/{char_name}")
-        terms.append(f"{PWD_CONSCIENCE}/{char_name}")
+        # Family-gated context reads (FEATURE_TOGGLES Inc 2): a disabled family
+        # just yields smaller POV context; old notes for it are silently ignored
+        # (zero-backward-compat stance). core paths (profile/know/exp) always run.
+        if self.family_enabled("conscience"):
+            terms.append(f"{PWD_CONSCIENCE}/{char_name}")
         terms.append(f"{TAG_KNOW}{char_name}")
         terms.append(f"{TAG_EXP}{char_name}")
-        terms.append(f"{PWD_INTERIOR}/{char_name}")
+        if self.family_enabled("interiority"):
+            terms.append(f"{PWD_INTERIOR}/{char_name}")
         if self.session.current_scene:
             terms.append(f"{TAG_SCENE}{self.session.current_scene}")
         logger.debug(
