@@ -317,7 +317,9 @@ class TestRpjot(unittest.TestCase):
             str(ctx),
             """Cottage House at Ravenwood Manor
 
-In the far depths of Ravenwood Manors backyard, there exists a tiny, detached cottage complete with living necessities like a bedroom, kitchenette, and bathroom. There is a single door entry way at the front. The cottage house is surrounded by well-kept flower walls and a tidy picket fence. It is cozy and remote""",
+In the far depths of Ravenwood Manors backyard, there exists a tiny, detached cottage complete with living necessities like a bedroom, kitchenette, and bathroom. There is a single door entry way at the front. The cottage house is surrounded by well-kept flower walls and a tidy picket fence. It is cozy and remote.
+
+Low afternoon light comes through small mullioned windows and lies in warm squares across worn floorboards; the air inside is close and sweet with beeswax, cut flowers, and woodsmoke from the little hearth. The cottage is far enough from the main house that the manor's noise never reaches it—only birdsong, the drone of bees in the flower walls, and the occasional creak of the settling timber. The single front door opens onto the picket fence and the blooms beyond, and the whole place has the hushed, self-contained feel of somewhere a person could disappear into and not be found unless they wished to be.""",
         )
 
         ctx += 1726008604
@@ -325,7 +327,9 @@ In the far depths of Ravenwood Manors backyard, there exists a tiny, detached co
             str(ctx),
             """Cottage House at Ravenwood Manor
 
-In the far depths of Ravenwood Manors backyard, there exists a tiny, detached cottage complete with living necessities like a bedroom, kitchenette, and bathroom. There is a single door entry way at the front. The cottage house is surrounded by well-kept flower walls and a tidy picket fence. It is cozy and remote
+In the far depths of Ravenwood Manors backyard, there exists a tiny, detached cottage complete with living necessities like a bedroom, kitchenette, and bathroom. There is a single door entry way at the front. The cottage house is surrounded by well-kept flower walls and a tidy picket fence. It is cozy and remote.
+
+Low afternoon light comes through small mullioned windows and lies in warm squares across worn floorboards; the air inside is close and sweet with beeswax, cut flowers, and woodsmoke from the little hearth. The cottage is far enough from the main house that the manor's noise never reaches it—only birdsong, the drone of bees in the flower walls, and the occasional creak of the settling timber. The single front door opens onto the picket fence and the blooms beyond, and the whole place has the hushed, self-contained feel of somewhere a person could disappear into and not be found unless they wished to be.
 
 Waitstaff, resident mechanics, and other servants, like butlers and drivers are all women.
 
