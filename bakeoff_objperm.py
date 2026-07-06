@@ -151,7 +151,7 @@ def is_correct(cell, phrase):
     fallback: place_object fired OR record_event fired with an obj: tag word
     (the layered-mitigation contract)."""
     if phrase["bucket"] == "fallback":
-        return cell["place"] + cell["event_obj"] > 0
+        return cell["fb_ok"]  # per-round count of (place OR event_obj) firing
     if phrase["expects_place"]:
         return cell["place"]
     return cell["real"] - cell["place"]  # mention-negative: correct == not fired
@@ -294,8 +294,12 @@ def main():
                          people_present={"player", "evie"})
     engine.register_all_tools()
 
-    # res[model][arm][phrase_id] = {"place": n, "event_obj": n, "real": n, "err": n}
-    res = {m: {a: {p["id"]: {"place": 0, "event_obj": 0, "real": 0, "err": 0}
+    # res[model][arm][phrase_id] = {"place": n, "event_obj": n, "fb_ok": n,
+    #                               "real": n, "err": n}
+    # fb_ok counts rounds where (place OR event_obj) fired — the per-round
+    # fallback contract, unreconstructable from the place/event_obj sums alone.
+    res = {m: {a: {p["id"]: {"place": 0, "event_obj": 0, "fb_ok": 0,
+                             "real": 0, "err": 0}
                    for p in CORPUS} for a in ARMS} for m in models}
     secs = {m: 0.0 for m in models}
     down = {}
@@ -324,6 +328,7 @@ def main():
                     place, event_obj = _tallies(calls)
                     cell["place"] += place
                     cell["event_obj"] += event_obj
+                    cell["fb_ok"] += (place or event_obj)
             # per-(model,arm) correctness split by bucket group
             pos = [0, 0]   # pickup/handover/drop/state-change
             neg = [0, 0]   # mention-negative
