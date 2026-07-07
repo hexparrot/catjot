@@ -88,6 +88,10 @@ _DISABLED_FAMILIES = frozenset(
     if f.strip()
 )
 _GRANULAR = os.environ.get("RPJOT_GRANULAR", "") == "1"
+# SCENE_MOVER deterministic scene-advance backstop. Default ON; set
+# RPJOT_SCENE_MOVER=0 to silence both the staleness suggestion and the hard
+# auto-advance (e.g. for the legacy-control arm of bakeoff_agency.py).
+_SCENE_MOVER = os.environ.get("RPJOT_SCENE_MOVER", "1") == "1"
 
 
 def _apply_family_config(engine):
@@ -886,6 +890,11 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
     # --- Scene: re-enter without a new scene-header note. --------------------
     if det_scene:
         sess.current_scene = det_scene
+    # SCENE_MOVER: resume is the 4th path that sets current_scene directly (not
+    # via _tool_begin_scene), so baseline staleness here — otherwise a resumed
+    # scene would look stale from turn 1 and could hard-advance mid-play.
+    engine._scene_start_turn = engine._turn_count
+    engine._scene_stale_streak = 0
 
     # First turn must rebuild the system doc for the restored scene/location.
     engine._system_refresh_pending = True
@@ -907,6 +916,7 @@ def game_loop(engine, seed_summaries=False):
     pair_sizes: deque = deque(maxlen=5)
     # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
     engine.seed_enabled = _BG_SEED
+    engine.scene_mover_enabled = _SCENE_MOVER
     engine.mc_aliases = engine.mc_aliases | _MC_ALIASES
     # rpjot's logger, not play's: the alias set must land in the session
     # debug file so an under-firing gate is diagnosable from the log alone.

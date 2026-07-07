@@ -426,11 +426,24 @@ class TestToolHandlerOutput(unittest.TestCase):
         self.assertIsInstance(result, str)
 
     def test_record_event_result_starts_with_prefix(self):
-        result = self.engine._tool_record_event(
-            description="Bob lit the torch.",
-            tags="bob torch",
-        )
-        self.assertTrue(result.startswith("Event recorded:"))
+        # Isolate from the shared fixture: SCENE_MOVER dedup makes record_event
+        # idempotent, and the committed bellvue.jot already contains this beat
+        # many times over — a fresh notefile guarantees a first, non-dup write.
+        import tempfile
+
+        saved = Note.NOTEFILE
+        fd, tmp = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = tmp
+        try:
+            result = self.engine._tool_record_event(
+                description="Bob lit the torch.",
+                tags="bob torch",
+            )
+            self.assertTrue(result.startswith("Event recorded:"))
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(tmp)
 
     def test_record_event_with_location_kwarg(self):
         result = self.engine._tool_record_event(
@@ -4822,8 +4835,11 @@ class TestThirdPersonMovement(unittest.TestCase):
         )
         self.assertNotIn("DIRECTOR NOTE", moved)
 
-    def test_nudge_still_fires_for_npc_invitation(self):
-        # the swept neg_navto shape: an invitation is not movement.
+    def test_npc_invitation_no_longer_nudged(self):
+        # SCENE_MOVER (symmetric agency): the PC-centric stationary nudge that
+        # once fired here ("an invitation is not movement") is RETIRED — an NPC's
+        # invitation is now allowed to lead the scene, so no DIRECTOR NOTE is
+        # injected and the symmetric AGENCY RULE is present instead.
         eng = _make_engine(location="ravenwood-manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
@@ -4831,7 +4847,9 @@ class TestThirdPersonMovement(unittest.TestCase):
         invited = step._compose_step2_user_content(
             '[MC speaks aloud]: "Show me the gallery sometime."', "WORLD STATE: x"
         )
-        self.assertIn("DIRECTOR NOTE", invited)
+        self.assertNotIn("DIRECTOR NOTE", invited)
+        self.assertNotIn("has not moved themselves", invited)
+        self.assertIn("Agency is shared", invited)
 
 
 # ---------------------------------------------------------------------------
@@ -6527,8 +6545,14 @@ class TestLocationPrecision(unittest.TestCase):
             "exp:bartholomew exp:evie",
             location="garage",
         )
+        # SCENE_MOVER: an MC-tagged move is now DEFERRED (decoupled from the
+        # stationary verdict) and committed by reconcile when navigate_to did
+        # not fire — never immediately, so it can't collide with a real
+        # navigate_to traversal on any turn.
+        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        eng._reconcile_loc_hint([])
         self.assertEqual(eng.session.location, "ravenwood-manor/garage")
-        # NPC last-seen follows the move (the gap plain remark used to have)
+        # NPC last-seen follows the committed move.
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
         self.assertEqual(rec.location_last_seen, "ravenwood-manor/garage")
         # subsequent bare record_event files in the new room
@@ -6542,6 +6566,9 @@ class TestLocationPrecision(unittest.TestCase):
             "exp:bartholomew+evie",
             location="cottage",
         )
+        # Compound exp tag detects MC → move deferred, committed at reconcile.
+        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/cottage")
+        eng._reconcile_loc_hint([])
         self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
 
     def test_record_event_non_mc_divergent_warns_only(self):
@@ -7649,6 +7676,191 @@ class TestDebugReport(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         for row in rows:
             self.assertTrue(os.path.isfile(os.path.join(d, row["report_file"])))
+
+
+class TestSceneMover(unittest.TestCase):
+    """SCENE_MOVER: symmetric agency directives + deterministic scene backstop.
+
+    Fully deterministic — no live LLM. Writes route to a per-test temp notefile
+    so tests/bellvue.jot is never mutated.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._tmp = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._tmp
+        self.engine = _make_engine(location="manor/library", people={"mc", "evie"})
+        self.cs = rpjot.ComplianceStep(self.engine)
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._tmp)
+        except OSError:
+            pass
+
+    # --- Symmetric-agency directive changes ---
+
+    def test_agency_rule_replaces_narrator_rule(self):
+        self.assertTrue(hasattr(self.engine, "_AGENCY_RULE"))
+        self.assertFalse(hasattr(self.engine, "_NARRATOR_RULE"))
+        self.assertIn("Agency is shared", self.engine._AGENCY_RULE)
+
+    def test_build_user_message_uses_agency_rule(self):
+        msg = self.engine.build_user_message("I wait.")
+        self.assertIn("Agency is shared", msg["content"])
+
+    def test_stationary_nudge_not_injected(self):
+        # An inner-monologue turn classifies stationary; the retired PC-centric
+        # nudge must NOT appear in the composed step-2 message.
+        stationary = "[MC inner monologue — private, unspoken]: I wonder."
+        self.assertTrue(
+            rpjot.ComplianceStep._is_stationary_turn(stationary, self.engine.mc_aliases)
+        )
+        content = self.cs._compose_step2_user_content(stationary, "world doc")
+        self.assertNotIn("has not moved themselves", content)
+        self.assertIn("AGENCY RULE", content)
+
+    # --- _should_suggest_scene_advance ---
+
+    def test_suggest_false_without_scene(self):
+        self.engine.session.current_scene = ""
+        self.engine._turn_count = 99
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+
+    def test_suggest_false_when_disabled(self):
+        self.engine.scene_mover_enabled = False
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS + 5
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+
+    def test_suggest_threshold(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS - 1
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS
+        self.assertTrue(self.engine._should_suggest_scene_advance())
+
+    # --- _auto_scene_slug ---
+
+    def test_auto_scene_slug_deterministic_and_shaped(self):
+        self.engine._turn_count = 12
+        slug1, desc1 = self.engine._auto_scene_slug()
+        slug2, desc2 = self.engine._auto_scene_slug()
+        self.assertEqual(slug1, slug2)  # deterministic
+        self.assertTrue(slug1.startswith("library-t13-"))  # last loc segment + turn
+        self.assertRegex(slug1, r"^[a-z0-9\-]+$")  # kebab / opaque key
+        self.assertIn("evie", desc1)  # cast named in the surfaced description
+
+    # --- _maybe_hard_advance_scene ---
+
+    def _prime_stale(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS + 1
+        self.engine._scene_stale_streak = 0
+
+    def test_hard_advance_needs_shown_suggestion(self):
+        self._prime_stale()
+        # Suggestion NOT shown this turn → streak must not accrue.
+        self.engine._scene_advance_shown = False
+        self.engine._maybe_hard_advance_scene([])
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    def test_hard_advance_resets_on_motion(self):
+        self._prime_stale()
+        self.engine._scene_stale_streak = 2
+        self.engine._scene_advance_shown = True
+        # A location change this turn means the scene is moving → streak resets.
+        self.engine._maybe_hard_advance_scene([("navigate_to", "moved")])
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    def test_hard_advance_fires_after_streak(self):
+        self._prime_stale()
+        results = []
+        for _ in range(rpjot.SCENE_HARD_ADVANCE_STREAK):
+            self.engine._scene_advance_shown = True
+            self.engine._maybe_hard_advance_scene(results)
+        # Forced rotation: scene changed, a begin_scene landed in results, and
+        # the streak + start-turn were reset by _tool_begin_scene.
+        self.assertNotEqual(self.engine.session.current_scene, "opening")
+        self.assertTrue(any(fn == "begin_scene" for fn, _ in results))
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine._scene_start_turn, self.engine._turn_count)
+
+    def test_hard_advance_noop_when_disabled(self):
+        self._prime_stale()
+        self.engine.scene_mover_enabled = False
+        for _ in range(rpjot.SCENE_HARD_ADVANCE_STREAK + 2):
+            self.engine._scene_advance_shown = True
+            self.engine._maybe_hard_advance_scene([])
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    # --- record_event dedup ---
+
+    def test_dedup_skips_near_duplicate(self):
+        self.engine.session.current_scene = "opening"
+        desc = "Bartholomew provokes Samantha in the library about her mask."
+        first = self.engine._tool_record_event(description=desc, tags="exp:evie")
+        self.assertTrue(first.startswith("Event recorded:"))
+        # Near-identical (one word changed) → skipped, original returned.
+        near = "Bartholomew provokes Samantha in the library about her veil."
+        second = self.engine._tool_record_event(description=near, tags="exp:evie")
+        self.assertTrue(second.startswith(rpjot._DEDUP_SKIP_PREFIX))
+
+    def test_dedup_allows_distinct_event(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._tool_record_event(
+            description="Evie leads the MC down the cellar stairs.", tags="exp:evie"
+        )
+        distinct = self.engine._tool_record_event(
+            description="Samantha lights a candle and studies the ledger.",
+            tags="exp:samantha",
+        )
+        self.assertTrue(distinct.startswith("Event recorded:"))
+
+    def test_dedup_skip_filtered_from_synthesis(self):
+        skip = f"{rpjot._DEDUP_SKIP_PREFIX}already canon (not re-recorded): X"
+        synth = self.engine._build_narrative_synthesis(
+            [], [("record_event", skip)]
+        )
+        self.assertNotIn("CANONICAL FACTS", synth)
+        real = self.engine._build_narrative_synthesis(
+            [], [("record_event", "Event recorded: Evie opens the door...")]
+        )
+        self.assertIn("CANONICAL FACTS", real)
+
+    # --- record_event MC-tag move decoupled from _turn_stationary ---
+
+    def test_mc_tag_move_deferred_regardless_of_stationary(self):
+        for stationary in (True, False):
+            with self.subTest(stationary=stationary):
+                self.engine._turn_stationary = stationary
+                self.engine._pending_loc_hint = None
+                self.engine._tool_record_event(
+                    description="Evie ushers the MC into the cellar.",
+                    tags="exp:mc exp:evie",
+                    location="cellar",
+                )
+                # Move is DEFERRED (not immediate) regardless of the stationary
+                # verdict; the hint carries the canonicalized destination.
+                self.assertIsNotNone(self.engine._pending_loc_hint)
+                self.assertTrue(self.engine._pending_loc_hint.endswith("cellar"))
+                self.assertNotEqual(
+                    self.engine._pending_loc_hint, self.engine.session.location
+                )
+
+    def test_reconcile_commits_when_no_navigate(self):
+        self.engine._pending_loc_hint = "cellar"
+        self.engine._reconcile_loc_hint([("record_event", "ok")])
+        self.assertEqual(self.engine.session.location, "cellar")
 
 
 if __name__ == "__main__":

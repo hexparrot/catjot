@@ -15,6 +15,7 @@ __version__ = "0.2.0"
 # Imports
 # ---------------------------------------------------------------------------
 
+import difflib
 import json
 import logging
 import re
@@ -663,6 +664,18 @@ MAX_TOKENS_NARRATIVE = 2_048  # final prose generation
 # SYSTEM_REFRESH_INTERVAL provides a fallback so the system message is
 # paraphrased at least every N player turns even if the scene never changes.
 SYSTEM_REFRESH_INTERVAL = 8
+
+# ---------------------------------------------------------------------------
+# SCENE_MOVER: deterministic scene-advance backstop + record_event dedup
+# ---------------------------------------------------------------------------
+# Under symmetric agency, NPC-led movement is the primary way scenes advance.
+# These constants drive the deterministic safety net for a genuinely stuck
+# scene (no movement, no new beat) and the near-duplicate event guard.
+SCENE_STALE_TURNS = 6  # elapsed turns in one scene → inject an advance suggestion
+SCENE_HARD_ADVANCE_STREAK = 3  # consecutive SHOWN-and-ignored suggestions → engine forces begin_scene
+RECORD_EVENT_DEDUP_RATIO = 0.90  # skip a record_event ≥ this similar to a recent same-scene/loc event
+RECORD_EVENT_DEDUP_WINDOW = 8  # compare against at most this many recent same-loc notes
+_DEDUP_SKIP_PREFIX = "[dedup-skip] "  # marks a near-duplicate record_event that was NOT written
 
 # System prompt for Step 1: World State Resolution
 _STEP1_SYSTEM = (
@@ -1363,14 +1376,16 @@ class ComplianceStep:
         "[MC — likely spoken aloud",
     )
 
-    # Turn-scoped DIRECTOR NOTE injected on stationary turns to stop navigate_to
-    # over-firing on an NPC's invitation or a merely-mentioned place (the
-    # neg_navto 0/18 miss). Kept CONDITIONAL — appears only on stationary turns —
-    # so it stays salient instead of habituating like an always-on rule would.
-    # The escape hatch ("physically carry the MC") is load-bearing: forced
-    # movement (dragged/carried/moving vehicle) classifies stationary yet must
-    # still move, which a hard tool-gate cannot express. Wording = the winning
-    # `nudge_positive_v2` arm from bakeoff_navnudge.py.
+    # RETIRED by SCENE_MOVER (symmetric agency): this PC-centric nudge told the
+    # model an NPC's invitation "is not movement". That is exactly the behavior
+    # we now want to ALLOW, so _compose_step2_user_content no longer injects it.
+    # The string is retained only as the legacy control arm for bakeoff_agency.py
+    # (which inverts the old bakeoff_navnudge.py objective).
+    #
+    # Historical rationale (why it once shipped): turn-scoped DIRECTOR NOTE to
+    # stop navigate_to over-firing on an NPC's invitation or a merely-mentioned
+    # place (the neg_navto 0/18 miss); wording = the winning `nudge_positive_v2`
+    # arm from bakeoff_navnudge.py.
     _STATIONARY_NUDGE = (
         "DIRECTOR NOTE (this turn): the MC has not moved themselves this turn. "
         "An NPC's invitation, or a place merely spoken or thought about, is not "
@@ -1467,29 +1482,46 @@ class ComplianceStep:
     ) -> str:
         """Build the step-2 user message exactly as production sends it.
 
-        Order (recency-favored): WORLD STATE BRIEFING → NARRATOR RULE →
-        classified_input → [conditional] DIRECTOR NOTE. The stationary nudge is
-        the LAST block so it sits in the strongest attention position, after the
-        player input it qualifies. Shared by ComplianceStep.run and the
-        production-shape selection tests so both exercise the same composition.
+        Order (recency-favored): WORLD STATE BRIEFING → AGENCY RULE →
+        classified_input → [conditional] DIRECTOR NOTE.  A scene-rotation hint
+        (location move) OR a SCENE_MOVER staleness suggestion is the LAST block
+        so it sits in the strongest attention position, after the player input
+        it qualifies.  Shared by ComplianceStep.run and the production-shape
+        selection tests so both exercise the same composition.
+
+        SCENE_MOVER: the PC-centric _STATIONARY_NUDGE is no longer injected
+        (symmetric agency — an NPC's invitation *is* allowed to move the scene).
         """
+        engine = self.engine
         parts = []
         if world_doc.strip():
             parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
-        parts.append(f"NARRATOR RULE: {self.engine._NARRATOR_RULE}")
+        parts.append(f"AGENCY RULE: {engine._AGENCY_RULE}")
         parts.append(classified_input)
-        if self.engine._scene_hint_pending:
+        if engine._scene_hint_pending:
             # One-shot scene-rotation pressure: consumed here so the hint
             # appears exactly once after a location move (begin_scene also
             # clears it if the model rotated within the moving turn).
-            self.engine._scene_hint_pending = False
+            engine._scene_hint_pending = False
             parts.append(
                 "DIRECTOR NOTE: the location changed since scene "
-                f"'{self.engine.session.current_scene}' began — if this is a "
+                f"'{engine.session.current_scene}' began — if this is a "
                 "new dramatic beat, call begin_scene."
             )
-        if self._is_stationary_turn(classified_input, self.engine.mc_aliases):
-            parts.append(self._STATIONARY_NUDGE)
+        elif engine._should_suggest_scene_advance():
+            # SCENE_MOVER staleness suggestion (backstop for a stuck scene).
+            # Mutually exclusive with the location-move hint above — a move
+            # already implies a fresh beat.  Flag records that the suggestion
+            # was actually shown, so the hard-advance streak only counts
+            # shown-and-ignored turns.
+            engine._scene_advance_shown = True
+            elapsed = engine._turn_count - engine._scene_start_turn
+            parts.append(
+                "DIRECTOR NOTE: this scene "
+                f"('{engine.session.current_scene}') has run {elapsed} turns "
+                "without advancing. If the current beat has settled, call "
+                "begin_scene to open the next one."
+            )
         return "\n\n".join(parts)
 
     def run(
@@ -1897,6 +1929,19 @@ class RPJotEngine:
         # a scene is active; injected as a one-line DIRECTOR NOTE into the NEXT
         # step-2 message, then cleared. No thresholds, no auto-rotation.
         self._scene_hint_pending: bool = False
+        # SCENE_MOVER deterministic scene-advance backstop. _scene_start_turn is
+        # the _turn_count when the active scene last changed (reset in the single
+        # site _tool_begin_scene, plus apply_resume_state). _scene_stale_streak
+        # counts consecutive turns the advance suggestion was SHOWN and ignored;
+        # at SCENE_HARD_ADVANCE_STREAK the engine force-rotates the scene.
+        # _scene_advance_shown is a per-turn one-shot (set in compose when the
+        # suggestion is actually injected; reset at run_turn start) so the streak
+        # counts shown-and-ignored turns, not merely stale ones. scene_mover_
+        # enabled mirrors RPJOT_SCENE_MOVER (default on), set by the play loop.
+        self._scene_start_turn: int = 0
+        self._scene_stale_streak: int = 0
+        self._scene_advance_shown: bool = False
+        self.scene_mover_enabled: bool = True
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -2097,9 +2142,9 @@ class RPJotEngine:
     # pickup/handover. Shipped by default per OT §3.7's budget projection.
     _COMPACT_KEEP_FUNCTION_DESCRIPTIONS: dict = {
         "navigate_to": (
-            "Move the scene when the MC's own body travels (or is physically "
-            "carried) to a new place; never for places merely mentioned, "
-            "offered, or thought about."
+            "Move the scene when the MC travels — by their own action, NPC "
+            "escort, or forced movement (led, carried, dragged). Not for "
+            "places merely mentioned or thought about."
         ),
         "place_object": (
             "Log an object changing hands or rooms — picked up, handed over, "
@@ -2766,11 +2811,13 @@ class RPJotEngine:
         logger.info("[COMMIT-LOC] session.location → %s (source=%s)", path, source)
 
     def _reconcile_loc_hint(self, canonical_results: list) -> None:
-        """Post-step-2 join of the mobile-turn location hint (LM §3.7).
+        """Post-step-2 join of the record_event location hint (LM §3.7).
 
-        The hint only exists when a mobile turn's record_event named an MC
-        location; navigate_to owns mobile moves, so the hint commits only if
-        navigate_to never fired this turn — never racing a real traversal.
+        The hint exists whenever a record_event named an MC-tagged location
+        different from the session (a self-move OR an NPC leading/carrying the
+        MC — SCENE_MOVER symmetric agency). navigate_to owns any real traversal,
+        so the hint commits only if navigate_to never fired this turn — never
+        racing a traversal, on any turn.
         """
         if not self._pending_loc_hint:
             return
@@ -2778,6 +2825,78 @@ class RPJotEngine:
         navigated = any(fn == "navigate_to" for fn, _ in canonical_results)
         if not navigated and hint != self.session.location:
             self._commit_location(hint, source="reconcile")
+
+    # ── SCENE_MOVER: deterministic scene-advance backstop ────────────────────
+    def _should_suggest_scene_advance(self) -> bool:
+        """True when the active scene is stale enough to suggest begin_scene.
+
+        Turn-arm only (v1): elapsed turns in the current scene ≥
+        SCENE_STALE_TURNS. Gated on scene_mover_enabled so RPJOT_SCENE_MOVER=0
+        silences BOTH the soft nudge and the hard auto-advance from one place.
+        """
+        if not self.scene_mover_enabled or not self.session.current_scene:
+            return False
+        return self._turn_count - self._scene_start_turn >= SCENE_STALE_TURNS
+
+    def _auto_scene_slug(self) -> tuple[str, str]:
+        """Deterministic (no-LLM) slug + description for a forced scene advance.
+
+        Slug is an opaque retrieval key: '{last-location-segment}-t{turn}'. The
+        '-t{turn}' suffix keeps it unique within a run; a short content nonce
+        guards the cross-resume collision where _turn_count resets per process
+        and two resumes could otherwise mint the same slug. The description IS
+        surfaced later (get_scene / resume), so it names the location + cast
+        rather than an empty 'stalled' note.
+        """
+        loc = (self.session.location or "scene").rstrip("/").split("/")[-1] or "scene"
+        turn = self._turn_count + 1
+        cast = sorted(p for p in self.session.people_present if p != self.main_character)
+        # Content nonce: stable within a scene, differs across scenes/casts, no
+        # Date/random (unavailable). Keeps two same-loc/same-turn resumes apart.
+        nonce = abs(hash((loc, turn, tuple(cast), self._scene_start_turn))) % 1000
+        slug = f"{loc}-t{turn}-{nonce:03d}"
+        who = ", ".join(cast) if cast else "no one else present"
+        desc = f"Continuation at {loc} with {who} (auto-advanced at turn {turn})."
+        return slug, desc
+
+    def _maybe_hard_advance_scene(self, canonical_results: list) -> None:
+        """Force a scene rotation when a stale scene is genuinely stuck.
+
+        The streak counts only turns where the advance suggestion was SHOWN and
+        ignored (_scene_advance_shown). Any forward motion this turn — a
+        begin_scene the model/engine already logged, or any location change —
+        means the scene is not stalled, so the streak resets. At
+        SCENE_HARD_ADVANCE_STREAK consecutive shown-and-ignored turns the engine
+        rotates the scene itself via the normal dispatch path.
+        """
+        if not self.scene_mover_enabled:
+            return
+        moved = any(
+            fn in ("begin_scene", "navigate_to") for fn, _ in canonical_results
+        ) or self._pending_loc_hint is not None
+        if moved:
+            self._scene_stale_streak = 0
+            return
+        if not self._scene_advance_shown:
+            # Suggestion was not injected this turn (not stale, or pre-empted by a
+            # location-move hint) — do not accrue the streak.
+            return
+        self._scene_stale_streak += 1
+        if self._scene_stale_streak < SCENE_HARD_ADVANCE_STREAK:
+            return
+        slug, desc = self._auto_scene_slug()
+        logger.info(
+            "[SCENE_MOVER] hard auto-advance → %s (streak=%d)",
+            slug,
+            self._scene_stale_streak,
+        )
+        # Route through the normal step-2 dispatch so it lands in
+        # _turn_tool_events / /timing (and resets scene_start_turn + streak via
+        # _tool_begin_scene). Append the result so step-3 acknowledges the beat.
+        result = self._dispatch_step2(
+            "begin_scene", json.dumps({"name": slug, "description": desc})
+        )
+        canonical_results.append(("begin_scene", result))
 
     def run_turn(
         self,
@@ -2812,6 +2931,9 @@ class RPJotEngine:
         # Per-tool execution accounting is turn-scoped too (TOOL_TIMING Inc 0).
         self._turn_tool_events = []
         self._turn_usage = []
+        # SCENE_MOVER: per-turn one-shot, set true iff the staleness suggestion
+        # is actually injected in _compose_step2_user_content this turn.
+        self._scene_advance_shown = False
 
         # MOVEMENT_TREE §3.2: commit any staged locale proposal in the foreground
         # BEFORE the step-1 graph block is built, so this turn's [LOCALE GRAPH]
@@ -2878,6 +3000,11 @@ class RPJotEngine:
         # location that step 2 never consummated with navigate_to — commit it
         # now so step 3 and the idle seed stop keying off the stale room.
         self._reconcile_loc_hint(canonical_results)
+
+        # SCENE_MOVER backstop: force a scene rotation if a stale scene has
+        # ignored the advance suggestion for SCENE_HARD_ADVANCE_STREAK turns.
+        # Runs AFTER reconcile so a committed NPC-led move counts as motion.
+        self._maybe_hard_advance_scene(canonical_results)
 
         # Step 3
         narrative = self._prose_step.run(
@@ -4769,18 +4896,19 @@ class RPJotEngine:
                 for t in tag_str.split()
                 if t.startswith(TAG_EXP)
             )
-            if mc_present and self._turn_stationary:
-                # Stationary turn: navigate_to is nudge-suppressed by design,
-                # so nothing else will move the session — commit immediately.
-                self._commit_location(loc_clean, source="record_event")
-            elif mc_present:
-                # Mobile turn: navigate_to owns the move; reconcile after
-                # step 2 iff it never fires (weak-model bucket).
+            if mc_present:
+                # SCENE_MOVER (symmetric agency): an MC-tagged event at a new
+                # location means someone moved the MC there — a self-move OR an
+                # NPC leading/carrying them. Decoupled from _turn_stationary:
+                # navigate_to may now fire on ANY turn, so we always DEFER to the
+                # post-step-2 reconcile, which lands the move iff navigate_to did
+                # not already own it — avoiding a double-commit that would
+                # collapse compute_traversal (from==to) and erase journey prose.
                 self._pending_loc_hint = loc_clean
                 self._loc_warn(
                     f"record_event filed at {loc_clean} but session is "
-                    f"{self.session.location} (mc-tagged, mobile turn — "
-                    "deferred to navigate_to)"
+                    f"{self.session.location} (mc-tagged — deferred to "
+                    "reconcile/navigate_to)"
                 )
             else:
                 # Off-screen event: filing elsewhere is correct, session stays.
@@ -4790,6 +4918,21 @@ class RPJotEngine:
                 )
         pwd = f"{PWD_EVENTS}/{loc_clean}"
         context = f"canonical event at {loc_clean}"
+
+        # SCENE_MOVER dedup: skip a near-duplicate of a recent event under the
+        # same location + scene (the re-recorded-opening-beat pathology). Scoped
+        # tight (same pwd, same scene, last N notes, ratio ≥ 0.90) so genuinely
+        # new — merely similar — beats on active turns still record. Returns the
+        # ORIGINAL text (marked) rather than writing; the marker keeps it out of
+        # the CANONICAL FACTS synthesis so the prose model never sees a stub.
+        dup = self._find_duplicate_event(description, pwd)
+        if dup is not None:
+            logger.info(
+                "[DEDUP] record_event skipped (≥%.2f vs %r)",
+                RECORD_EVENT_DEDUP_RATIO,
+                dup[:60],
+            )
+            return f"{_DEDUP_SKIP_PREFIX}already canon (not re-recorded): {dup[:80]}"
 
         if self.session.current_scene:
             tag_str = f"{tag_str} {TAG_SCENE}{self.session.current_scene}"
@@ -4811,6 +4954,33 @@ class RPJotEngine:
 
         logger.info("event recorded: ts=%s tag=%s", note.now, note.tag)
         return f"Event recorded: {description[:80]}..."
+
+    def _find_duplicate_event(self, description: str, pwd: str) -> str | None:
+        """Return the message of a recent near-duplicate event, else None.
+
+        Scans the last RECORD_EVENT_DEDUP_WINDOW notes under `pwd` (same
+        location) that belong to the active scene, and returns the first whose
+        SequenceMatcher ratio against `description` meets RECORD_EVENT_DEDUP_
+        RATIO. Conservative by design (SCENE_MOVER hardening): tight scope keeps
+        legitimately-new-but-similar beats recordable. Plain helper (NOT an
+        @rp_tool) — must sit clear of any tool decorator.
+        """
+        scene = self.session.current_scene
+        scene_tag = f"{TAG_SCENE}{scene}" if scene else None
+        recent = []
+        with NoteContext(Note.NOTEFILE, (SearchType.DIRECTORY, pwd)) as nc:
+            for n in nc:
+                if scene_tag and scene_tag not in n.tag:
+                    continue
+                recent.append(n)
+        desc_l = description.strip().lower()
+        for n in recent[-RECORD_EVENT_DEDUP_WINDOW:]:
+            ratio = difflib.SequenceMatcher(
+                None, desc_l, (n.message or "").strip().lower()
+            ).ratio()
+            if ratio >= RECORD_EVENT_DEDUP_RATIO:
+                return n.message
+        return None
 
     @rp_tool(
         description=(
@@ -4892,15 +5062,14 @@ class RPJotEngine:
 
     @rp_tool(
         description=(
-            "Move the scene to a new location. Call this when the player's own input "
-            "moves them there — an [MC action] whose subject is the player (I/MC) "
-            "with a move verb: go, walk, follow, head, step, enter, climb, cross. "
-            "The directive prefix decides: [MC action] where the player moves = "
-            "navigate; [MC speaks aloud] or [MC — likely spoken aloud] = dialogue, "
-            "never navigate. An NPC's invitation, beckoning, or escort becomes "
-            "navigation only once the player's next [MC action] takes it up. Paths "
-            "are hierarchical (e.g. 'manor/foyer/closet'); a bare name is a sibling "
-            "under the current root."
+            "Move the scene to a new location. Call this when the MC's location "
+            "changes — by the MC's own action (an [MC action] with a move verb: "
+            "go, walk, follow, head, step, enter, climb, cross) OR because an NPC "
+            "leads, escorts, or carries them, or an event moves them. Dialogue "
+            "alone ([MC speaks aloud] / [MC — likely spoken aloud]) is not travel; "
+            "a place merely mentioned or thought about is not travel until someone "
+            "acts on it. Paths are hierarchical (e.g. 'manor/foyer/closet'); a "
+            "bare name is a sibling under the current root."
         ),
         parameters={
             "type": "object",
@@ -4909,12 +5078,11 @@ class RPJotEngine:
                     "type": "string",
                     "description": (
                         "Hierarchical destination path (e.g. 'manor/foyer/closet'); '/' marks "
-                        "parent/child, a bare name sits under the current root. Call this ONLY "
-                        "when the player's own [MC action] moves them — subject is the player "
-                        "(I/MC) with a move verb (go/walk/follow/head/step/enter). [MC speaks "
-                        "aloud] is dialogue, never navigation, even if movement is mentioned; an "
-                        "NPC's invite, beckon, or escort becomes navigation only when the "
-                        "player's next [MC action] takes it up."
+                        "parent/child, a bare name sits under the current root. Call when the "
+                        "MC's location changes — the MC's own [MC action] move verb "
+                        "(go/walk/follow/head/step/enter), OR an NPC leading/escorting/carrying "
+                        "the MC, OR an event that moves them. Dialogue alone is not travel; a "
+                        "place merely mentioned or thought about is not travel until acted on."
                     ),
                 },
             },
@@ -5755,8 +5923,9 @@ class RPJotEngine:
             "the story, or after navigate_to arrives somewhere with no active scene; "
             "(2) when the player's input clearly enters a new dramatic context (a "
             "meal, an investigation, a confrontation); (3) when one beat has ended "
-            "and the next clearly begins. Like navigate_to, a scene opens on the "
-            "player's own [MC action], not on an NPC's invitation or escort. Call at "
+            "and the next clearly begins. A scene opens when the dramatic context "
+            "shifts — by player action or NPC initiative alike (an escort or "
+            "invitation that starts a new beat is a valid trigger). Call at "
             "most ONCE per player turn, and not again within the same tool-call "
             "sequence. The scene slug then attaches to later record_event and "
             "record_knowledge calls automatically; old scenes stay queryable via "
@@ -5794,6 +5963,10 @@ class RPJotEngine:
         self._system_refresh_pending = True
         # A fresh scene satisfies any pending location-move rotation hint.
         self._scene_hint_pending = False
+        # SCENE_MOVER single reset site: every scene change (model call,
+        # bootstrap, or the hard auto-advance) rebaselines staleness here.
+        self._scene_start_turn = self._turn_count
+        self._scene_stale_streak = 0
 
         note = Note.jot(
             message=description,
@@ -7572,12 +7745,21 @@ class RPJotEngine:
     # Message construction helpers
     # ------------------------------------------------------------------
 
-    _NARRATOR_RULE = (
-        "Respond to exactly what the player's input describes — the single beat "
-        "in front of you — and advance only as its direct consequence. Do not "
-        "skip ahead or resolve an NPC's offer for the player. When an NPC "
-        "invites, beckons, or leads, narrate the offer and let it hang; the "
-        "player answers on their own next turn."
+    # SCENE_MOVER (symmetric agency): agency is shared between the MC and the
+    # NPCs. This replaces the PC-centric _NARRATOR_RULE ("let the offer hang")
+    # so an NPC may act, lead, escort, or move the MC on any turn — while the
+    # balance clause keeps the model from authoring the MC's *willed* choices.
+    _AGENCY_RULE = (
+        "Resolve the beat the scene calls for. Agency is shared — the main "
+        "character and the NPCs are equally able to drive the moment. If an NPC "
+        "leads, beckons, escorts, or carries the MC, the MC goes and the scene "
+        "moves; you do not need the player's permission for an NPC to act. "
+        "Honor a concrete MC action or line exactly; when the player's input is "
+        "passive or cedes ('wait', 'let her lead'), let the present NPC(s) take "
+        "initiative with a concrete new development. Do not invent the MC's "
+        "deliberate choices or dialogue the player did not give — narrate what "
+        "is done to or around the MC and their involuntary responses, leaving "
+        "the MC's willed decisions to the player."
     )
 
     def build_user_message(self, user_input, dynamic_context=""):
@@ -7596,7 +7778,7 @@ class RPJotEngine:
         if dynamic_context:
             parts.append(f"SCENE CONTEXT:\n{dynamic_context}")
         parts.append(self.session.header())
-        parts.append(self._NARRATOR_RULE)
+        parts.append(self._AGENCY_RULE)
         parts.append(user_input)
         return {"role": "user", "content": "\n\n".join(parts)}
 
@@ -7763,10 +7945,17 @@ class RPJotEngine:
                 "do not list or announce them separately:\n\n" + combined
             )
 
-        if canonical_results:
+        # SCENE_MOVER: drop dedup-skips — a near-duplicate that was NOT written
+        # is not a fresh fact; surfacing its stub would pollute the prose.
+        fresh = [
+            (fn, res)
+            for fn, res in canonical_results
+            if not (isinstance(res, str) and res.startswith(_DEDUP_SKIP_PREFIX))
+        ]
+        if fresh:
             lines = [
                 f"  • {self._summarize_write_result(fn, res)}"
-                for fn, res in canonical_results
+                for fn, res in fresh
             ]
             parts.append(
                 "CANONICAL FACTS ESTABLISHED THIS TURN — these just happened "
@@ -8335,9 +8524,10 @@ class RPJotEngine:
             "memory": "Compare the /construct census below (canon total vs "
                       "as-fed-last-turn) against has_digest/condensed_this_turn: a "
                       "note may be compacted into the digest, not truly forgotten.",
-            "location": "Cross-check _turn_stationary against the [COMMIT-LOC] "
-                        "source= in the digest — a stationary verdict beside a "
-                        "record_event re-mark is the divergence to explain.",
+            "location": "Cross-check the [COMMIT-LOC] source= in the digest. "
+                        "_turn_stationary is now an INFORMATIONAL signal only "
+                        "(SCENE_MOVER: it no longer gates movement); NPC-led "
+                        "moves commit via reconcile/navigate_to on any turn.",
             "misattribution": "Compare npc_tracker last-seen vs session.location and "
                               "[CAST] mentioned-but-absent against the [STEP2] "
                               "record-tool witnesses for the turn.",
