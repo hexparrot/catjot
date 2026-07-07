@@ -2532,6 +2532,29 @@ class TestZeroCanonicalNudge(unittest.TestCase):
         joined = " ".join(c for msgs in calls["msgs"] for c in msgs if c)
         return "No canonical record was written" in joined
 
+    def test_canon_first_directive_rides_initial_message(self):
+        # TOOL_ROI §A: the write demand rides the FIRST step2 user message for
+        # action/speech turns, so a compliant model writes on call 1 and the
+        # loop terminates on call 2 — no corrective round needed.
+        rounds = [
+            self._record_event_round(),  # writes immediately
+            {"content": "DONE"},  # terminates
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertEqual(calls["i"], 2)
+        self.assertFalse(self._injected_nudge(calls))
+        first_user_view = " ".join(calls["msgs"][0])
+        self.assertIn("Record canon in THIS response", first_user_view)
+
+    def test_canon_first_directive_absent_for_inner_monologue(self):
+        rounds = [{"content": "a quiet private thought"}]
+        _, calls = self._run(
+            rounds, "[MC inner monologue — private, unspoken]: I wonder if…"
+        )
+        first_user_view = " ".join(calls["msgs"][0])
+        self.assertNotIn("Record canon in THIS response", first_user_view)
+
     def test_prose_only_then_record_event_after_nudge(self):
         rounds = [
             {"content": "The door is only a door."},  # prose, no canon
@@ -2682,6 +2705,57 @@ class TestTimingTelemetry(unittest.TestCase):
         finally:
             mod.call_llm = original
         self.assertEqual(eng._world_state_step.last_rounds, 1)
+
+    def test_step1_followups_stripped_deduped_and_batched(self):
+        # TOOL_ROI §D: step1 results reach history without followup_instruction;
+        # each distinct instruction lands once per turn as one [DIRECTIVE].
+        import rpjot as rpjot_module
+
+        seen = {"msgs": None}
+
+        def fake_call_llm(messages, **kwargs):
+            seen["msgs"] = [dict(m) for m in messages]
+            if not any(m.get("role") == "tool" for m in messages):
+                return {
+                    "tool_calls": [
+                        {
+                            "id": f"c{n}",
+                            "type": "function",
+                            "function": {
+                                "name": "get_character",
+                                "arguments": json.dumps({"name": f"npc{n}"}),
+                            },
+                        }
+                        for n in (1, 2)
+                    ]
+                }
+            return {"content": "WORLD STATE — the room"}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng.init_pipeline()
+            eng._safe_dispatch = lambda handlers, name, args: json.dumps(
+                {"character": "x", "followup_instruction": "use this profile"}
+            )
+            doc = eng._world_state_step.run("[MC action]: I look at them")
+        finally:
+            rpjot_module.call_llm = original
+
+        self.assertTrue(doc)
+        tool_msgs = [m for m in seen["msgs"] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 2)
+        for m in tool_msgs:
+            self.assertNotIn("followup_instruction", m["content"])
+        directives = [
+            m
+            for m in seen["msgs"]
+            if m.get("role") == "user"
+            and str(m.get("content", "")).startswith("[DIRECTIVE] ")
+        ]
+        self.assertEqual(len(directives), 1)
+        self.assertEqual(directives[0]["content"], "[DIRECTIVE] use this profile")
 
     def test_step2_last_rounds_at_max_iterations(self):
         # The fake repeats its final round, so the loop runs to the bound.
@@ -4011,8 +4085,11 @@ class TestFeatureFamilies(unittest.TestCase):
         names = {s["function"]["name"] for s in e._tool_schemas}
         # Family wrappers + query tools present by default.
         for expected in ("save_yomi", "record_relationship", "record_interior",
-                         "record_conscience", "get_social_map"):
+                         "record_conscience"):
             self.assertIn(expected, names)
+        # get_social_map retired outright (TOOL_ROI): absent even with every
+        # family enabled.
+        self.assertNotIn("get_social_map", names)
         # Granular writers deregistered by default (Inc 4).
         for name in e._GRANULAR_TOOLS:
             self.assertNotIn(name, names)
@@ -4083,6 +4160,22 @@ class TestToolTiming(unittest.TestCase):
         self.assertLessEqual(
             abs(compact_sum - self.engine._cached_compact_step2_schema_toks), n + 2
         )
+
+    def test_session_end_stats_dump_includes_zero_call_rows(self):
+        # TOOL_ROI guard: one [TOOL_STATS] line per REGISTERED tool, zero-call
+        # rows included — the dead-tool signal the audit had to reconstruct.
+        self.engine._dispatch("get_people_present", "{}")
+        with self.assertLogs("rpjot_engine", level="INFO") as cm:
+            self.engine.log_session_tool_stats()
+        rows = [m for m in cm.output if "[TOOL_STATS]" in m]
+        self.assertEqual(len(rows), len(self.engine._tool_handlers))
+        called = [m for m in rows if "get_people_present" in m]
+        self.assertEqual(len(called), 1)
+        self.assertIn("calls=1", called[0])
+        # Never-dispatched tools still get a row, with calls=0.
+        never = [m for m in rows if "record_mood" in m]
+        self.assertEqual(len(never), 1)
+        self.assertIn("calls=0", never[0])
 
     def test_dispatch_records_event_and_session_stat(self):
         # Read-only step-1 tool — avoids appending event notes to the fixture.
@@ -4646,8 +4739,10 @@ class TestClassifyInput(unittest.TestCase):
         out = self._c("^I feel uneasy about this place")
         self.assertIn("[MC inner monologue", out)
         self.assertIn("I feel uneasy about this place", out)
-        # The monologue sigil nudges toward backstory-preserving tools.
-        self.assertIn("record_conscience", out)
+        # The monologue sigil nudges toward a backstory-preserving tool that is
+        # registered by default (TOOL_ROI: conscience family off, record_secret
+        # granular-off — record_knowledge is the always-on core writer).
+        self.assertIn("record_knowledge", out)
 
     def test_default_is_dialogue(self):
         out = self._c("hello everyone")

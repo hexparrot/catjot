@@ -183,6 +183,9 @@ register_prefix("[STEP2]", "tooling", "step-2 compliance / write-tool activity")
 register_prefix("[TOOLS]", "tooling", "per-turn step-2 tool census")
 register_prefix("[DISPATCH]", "tooling", "tool dispatch routing")
 register_prefix("[FAMILY]", "tooling", "per-family tool count + schema token weight")
+register_prefix(
+    "[TOOL_STATS]", "tooling", "session-end per-tool census (zero rows = dead tools)"
+)
 register_prefix("[BUDGET]", "budget", "baseline context token measure (soft warn)")
 register_prefix(
     "[PHASING]",
@@ -1276,6 +1279,13 @@ class WorldStateStep:
         engine = self.engine
         self.last_rounds = 0
         self.last_ok = False
+        # Followup dedupe (TOOL_ROI §D, mirrors step2's U6 precedent): step1
+        # used to send every result raw, so a static FOLLOWUP_* constant rode
+        # along once per get_character/get_relationship_arc call — 43 repeats
+        # in the instrumented run, all feeding the synthesis call's input. Each
+        # distinct instruction now reaches the model once per turn, batched as
+        # a single [DIRECTIVE] after the round's results.
+        seen_instructions: set = set()
 
         for i in range(max_iter):
             messages = engine._guard_payload(
@@ -1314,6 +1324,7 @@ class WorldStateStep:
                 return world_doc.strip()
 
             messages.append(response_msg)
+            round_instructions: list = []
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
                 fn_args = tc["function"]["arguments"]
@@ -1324,9 +1335,26 @@ class WorldStateStep:
                 )
 
                 logger.debug("[STEP1] tool %s → %s", fn_name, result[:120])
-                tool_results_collected.append(f"[{fn_name}]: {result}")
+                instruction, tool_msg = engine.build_tool_result_message(
+                    tool_id, result
+                )
+                tool_results_collected.append(
+                    f"[{fn_name}]: {tool_msg['content']}"
+                )
+                messages.append(tool_msg)
+                if instruction and instruction not in seen_instructions:
+                    seen_instructions.add(instruction)
+                    round_instructions.append(instruction)
+
+            # One batched directive per round, [DIRECTIVE]-prefixed so the
+            # model does not mistake a system-issued followup for player
+            # input (T5) — byte-shape identical to the step2 loop's batching.
+            if round_instructions:
                 messages.append(
-                    {"role": "tool", "tool_call_id": tool_id, "content": result}
+                    {
+                        "role": "user",
+                        "content": "[DIRECTIVE] " + " ".join(round_instructions),
+                    }
                 )
             self.last_rounds = i + 1
 
@@ -1358,8 +1386,25 @@ class ComplianceStep:
     Returns (canonical_results, accumulated_think) for ProseStep.
     """
 
+    # Proactive canon-first directive (TOOL_ROI §A). In the instrumented
+    # 2026-07-03 run the first step2 call produced zero canonical writes in
+    # 55/58 turns and only the reactive nudge below got the write out — three
+    # LLM calls (~16s) for one record_event. The nudge wording is evidently the
+    # effective prompt, so the same demand now rides the INITIAL step2 user
+    # message (same _should_nudge_zero_canonical predicate), collapsing the
+    # common path to write-then-terminate.
+    _CANON_FIRST_DIRECTIVE = (
+        "[DIRECTIVE] Record canon in THIS response: if anything happened — an "
+        "action, dialogue, or discovery — call record_event or record_knowledge "
+        "now, alongside any other state writes. If truly nothing canonical "
+        "occurred, reply exactly: DONE."
+    )
+
     # Corrective directive for the zero-canonical nudge (T2/D4). Prefixed
     # [DIRECTIVE] so the model does not confuse it with player input (T5).
+    # Since TOOL_ROI §A this is the FALLBACK for models that ignore the
+    # canon-first directive above; the loop still guarantees one corrective
+    # round before accepting an empty turn.
     _ZERO_CANONICAL_NUDGE = (
         "[DIRECTIVE] No canonical record was written this turn. If anything "
         "happened — an action, dialogue, or discovery — call record_event or "
@@ -1483,7 +1528,8 @@ class ComplianceStep:
         """Build the step-2 user message exactly as production sends it.
 
         Order (recency-favored): WORLD STATE BRIEFING → AGENCY RULE →
-        classified_input → [conditional] DIRECTOR NOTE.  A scene-rotation hint
+        classified_input → [conditional] canon-first DIRECTIVE →
+        [conditional] DIRECTOR NOTE.  A scene-rotation hint
         (location move) OR a SCENE_MOVER staleness suggestion is the LAST block
         so it sits in the strongest attention position, after the player input
         it qualifies.  Shared by ComplianceStep.run and the production-shape
@@ -1498,6 +1544,12 @@ class ComplianceStep:
             parts.append(f"WORLD STATE BRIEFING:\n{world_doc}")
         parts.append(f"AGENCY RULE: {engine._AGENCY_RULE}")
         parts.append(classified_input)
+        # Canon-first directive (TOOL_ROI §A): demand the writes up front for
+        # the same action/speech prefixes the reactive nudge covers, so the
+        # first call writes instead of narrating. Sits directly after the
+        # player input it qualifies; scene hints keep the last-block slot.
+        if self._should_nudge_zero_canonical(classified_input):
+            parts.append(self._CANON_FIRST_DIRECTIVE)
         if engine._scene_hint_pending:
             # One-shot scene-rotation pressure: consumed here so the hint
             # appears exactly once after a location move (begin_scene also
@@ -2084,8 +2136,12 @@ class RPJotEngine:
     _FAMILY_TOOLS: dict = {
         "yomi": frozenset({"save_yomi", "get_yomi"}),
         "conscience": frozenset({"record_conscience", "get_conscience"}),
+        # get_social_map RETIRED (TOOL_ROI 2026-07-07): 15/15 calls in the
+        # instrumented run returned the sentinel-empty map while costing a step1
+        # schema slot + a read round-trip per scene open; get_relationship_arc
+        # covers the pairwise reads that do land.
         "relationships": frozenset({
-            "record_relationship", "get_relationship_arc", "get_social_map",
+            "record_relationship", "get_relationship_arc",
             "record_bond", "record_history", "record_dynamic",
             "record_power_dynamic", "record_wound", "record_promise",
             "record_debt", "record_lie", "record_leverage", "record_impression",
@@ -2674,6 +2730,36 @@ class RPJotEngine:
         lines.append(HDR)
         return "\n".join(lines)
 
+    def log_session_tool_stats(self) -> None:
+        """Dump the /timing session accumulator to the log at session end.
+
+        TOOL_ROI guard: the per-tool evidence used to live only in the
+        in-memory /timing readout, so the 2026-07-07 audit had to reconstruct
+        call counts from [STEP1]/[TOOLS] lines. One [TOOL_STATS] line per
+        REGISTERED tool — including zero-call rows, which are exactly the
+        dead-tool signal — makes the next audit a grep.
+        """
+        stats = self._session_tool_stats
+        for name in sorted(
+            self._tool_handlers,
+            key=lambda n: -stats.get(n, {}).get("calls", 0),
+        ):
+            s = stats.get(
+                name,
+                {"calls": 0, "errors": 0, "ms": 0.0, "result_toks": 0, "bg_calls": 0},
+            )
+            logger.info(
+                "[TOOL_STATS] %s family=%s calls=%d errors=%d ms=%.1f "
+                "result_toks=%d bg_calls=%d",
+                name,
+                self._tool_families.get(name, "core"),
+                s["calls"],
+                s["errors"],
+                s["ms"],
+                s["result_toks"],
+                s["bg_calls"],
+            )
+
     def _has_led_cue(self, text: str) -> bool:
         """True when `text` carries a passive-arrival cue (LM §3.1 fallback gate).
 
@@ -2802,7 +2888,6 @@ class RPJotEngine:
             )
         self.session.location = path
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
-        self._cache_drop("social_map")
         for slug in self.session.people_present:
             if slug != self.main_character:
                 self.npc_tracker.mark_present(slug, path, self._turn_count)
@@ -5135,7 +5220,6 @@ class RPJotEngine:
         self.session.location_context = ContextBundle(f"{PWD_WORLD}/{to_loc}")
         self.session.attention = {}
         self.session.mood = {}
-        self._cache_drop("social_map")
         self._ensure_location_node(to_loc)  # LM §3.5: guarantee a node for the arrival room
         if self.session.current_scene:
             self._scene_hint_pending = True  # next-turn begin_scene hint
@@ -5244,7 +5328,6 @@ class RPJotEngine:
         self.session.people_present = set(people)
         self.session.attention = {}
         self.session.mood = {}
-        self._cache_drop("social_map")
 
         # NPC tracker: register any new characters and mark them as present
         for slug in people:
@@ -5959,7 +6042,6 @@ class RPJotEngine:
         logger.info("ENTER _tool_begin_scene: name=%r", name)
 
         self.session.current_scene = name
-        self._cache_drop("social_map")
         self._system_refresh_pending = True
         # A fresh scene satisfies any pending location-move rotation hint.
         self._scene_hint_pending = False
@@ -6489,7 +6571,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("bond recorded: %s ↔ %s [%s]", char_a, char_b, bond_type)
         return json.dumps(
             {
@@ -6537,7 +6619,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("history recorded: %s ↔ %s", char_a, char_b)
         return json.dumps({"char_a": char_a, "char_b": char_b, "status": "recorded"})
 
@@ -6578,7 +6660,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("dynamic recorded: %s ↔ %s [%s]", char_a, char_b, pattern)
         return json.dumps(
             {
@@ -6634,7 +6716,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("power dynamic recorded: %s over %s [%s]", holder, subject, basis)
         return json.dumps(
             {"holder": holder, "subject": subject, "basis": basis, "status": "recorded"}
@@ -6684,7 +6766,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info(
             "wound recorded: %s → %s (known=%s)", inflicter, wounded, known_to_inflicter
         )
@@ -6742,7 +6824,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("promise recorded: %s → %s", promiser, recipient)
         return json.dumps(
             {"promiser": promiser, "recipient": recipient, "status": "recorded"}
@@ -6785,7 +6867,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("debt recorded: %s owes %s", debtor, creditor)
         return json.dumps(
             {"debtor": debtor, "creditor": creditor, "status": "recorded"}
@@ -6828,7 +6910,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("lie recorded: %s → %s", liar, target)
         return json.dumps({"liar": liar, "target": target, "status": "recorded"})
 
@@ -6866,7 +6948,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("leverage recorded: %s over %s", holder, subject)
         return json.dumps({"holder": holder, "subject": subject, "status": "recorded"})
 
@@ -6914,7 +6996,7 @@ class RPJotEngine:
             pwd=f"{PWD_REL}/{pair}",
         )
         Note.append(Note.NOTEFILE, note)
-        self._cache_drop(f"rel:{pair}", "social_map")
+        self._cache_drop(f"rel:{pair}")
         logger.info("impression recorded: %s of %s", observer, subject)
         return json.dumps(
             {"observer": observer, "subject": subject, "status": "recorded"}
@@ -7657,82 +7739,6 @@ class RPJotEngine:
                     "Use this relationship history to inform how these characters interact — "
                     "their dialogue, what they avoid, what they reach for, and what they "
                     "cannot bring themselves to say."
-                ),
-            }
-        )
-
-    @rp_tool(
-        description=(
-            "Retrieve a relationship map for all characters currently present in the "
-            "scene — bonds, history, dynamics, wounds, and impressions for every pair. "
-            "Call this once at scene open when multiple characters are present, to "
-            "understand the full web before writing group dynamics. "
-            "Results are cached — repeat calls within the same scene are free. "
-            "Avoid calling this on every beat; once per scene open is the right cadence "
-            "unless the cast changes or new relationship notes have been written "
-            "(cache invalidates automatically on writes and cast changes). "
-            "Returns pair-by-pair summaries sorted newest-first within each pair."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {},
-        },
-        step=1,
-    )
-    def _tool_get_social_map(self) -> str:
-        logger.info("ENTER _tool_get_social_map")
-        people = sorted(self.session.people_present)
-        if len(people) < 2:
-            return json.dumps(
-                {
-                    "social_map": "[fewer than 2 characters present — no relationships to map]",
-                }
-            )
-
-        cache_key = "social_map"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            logger.info("get_social_map: cache hit")
-            return json.dumps(
-                {
-                    "cast": people,
-                    "social_map": cached,
-                    "followup_instruction": (
-                        "Use this relationship web to write group dynamics authentically: "
-                        "who defers to whom, who avoids whose gaze, which alliances are "
-                        "hidden, and who is performing for whose benefit."
-                    ),
-                }
-            )
-
-        map_parts = []
-        for i, char_a in enumerate(people):
-            for char_b in people[i + 1 :]:
-                pair = self._rel_key(char_a, char_b)
-                bundle = ContextBundle(f"{PWD_REL}/{pair}")
-                ctx = self.render_context(bundle, focus_hint=f"{char_a}+{char_b}")
-                if ctx.strip():
-                    map_parts.append(f"[{char_a} ↔ {char_b}]\n{ctx.strip()}")
-
-        social_map_str = (
-            "\n\n".join(map_parts)
-            if map_parts
-            else "[no relationship notes found for current cast]"
-        )
-        self._cache_put(cache_key, social_map_str)
-        logger.info(
-            "get_social_map: %d character(s), %d pair(s) with notes",
-            len(people),
-            len(map_parts),
-        )
-        return json.dumps(
-            {
-                "cast": people,
-                "social_map": social_map_str,
-                "followup_instruction": (
-                    "Use this relationship web to write group dynamics authentically: "
-                    "who defers to whom, who avoids whose gaze, which alliances are "
-                    "hidden, and who is performing for whose benefit."
                 ),
             }
         )

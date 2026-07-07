@@ -79,12 +79,15 @@ _MC_ALIASES = frozenset(
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
 # Feature-family toggles (FEATURE_TOGGLES). RPJOT_DISABLE is a comma-separated
-# denylist of families to drop (e.g. "yomi,relationships"); empty = all on.
+# denylist of families to drop (e.g. "yomi,relationships"). Default denylist
+# (TOOL_ROI): yomi/conscience/interiority — in the instrumented 2026-07-03 run
+# their reads returned sentinel-empty 100% of the time and their writers were
+# never dispatched. Set RPJOT_DISABLE="" (explicit empty) to re-enable all.
 # RPJOT_GRANULAR=1 restores the fine-grained rel/int writers for A/B. The engine
 # never reads env — the play loop pushes these on before register_all_tools.
 _DISABLED_FAMILIES = frozenset(
     f.strip().lower()
-    for f in os.environ.get("RPJOT_DISABLE", "").split(",")
+    for f in os.environ.get("RPJOT_DISABLE", "yomi,conscience,interiority").split(",")
     if f.strip()
 )
 _GRANULAR = os.environ.get("RPJOT_GRANULAR", "") == "1"
@@ -158,8 +161,8 @@ def classify_input(raw: str) -> str:
             f"[MC inner monologue — private, unspoken]: {content}\n"
             "Narrate this as interior experience only, never as spoken dialogue. "
             "If it reveals a meaningful feeling, preference, aversion, memory, or "
-            "developing emotional arc, use record_conscience or record_secret to "
-            "preserve it as MC backstory."
+            "developing emotional arc, use record_knowledge (witnessed by the MC "
+            "alone) to preserve it as MC backstory."
         )
 
     # Default: treat as spoken dialogue; note inference is acceptable
@@ -863,7 +866,6 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
         engine._ensure_location_node(path)
         sess.location = path
         sess.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
-        engine._cache_drop("social_map")
 
     # --- People present (not persisted; inferred). MC is always present. -----
     people = {"mc"}
@@ -872,7 +874,6 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
         if s and s != "mc":
             people.add(s)
     sess.people_present = people
-    engine._cache_drop("social_map")  # social map depends on the (now restored) cast
     for slug in people:
         if not engine.npc_tracker.is_registered(slug):
             engine.npc_tracker.register(slug, slug, location=sess.location, turn=0)
@@ -1174,6 +1175,10 @@ def game_loop(engine, seed_summaries=False):
             refresh_system_message(engine, step2_messages)
 
         bg_thread = start_idle_work(engine, step2_messages)
+
+    # Session-end per-tool census (TOOL_ROI guard): both /quit and Ctrl-C land
+    # here, so dead-tool evidence reaches the debug log every session.
+    engine.log_session_tool_stats()
 
 
 # ---------------------------------------------------------------------------
