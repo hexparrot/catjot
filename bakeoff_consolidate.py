@@ -7,14 +7,19 @@ freed budget restoring four selection-boundary function descriptions. This
 harness measures what that does to SELECTION accuracy, on the same phrases,
 across models:
 
-  legacy_control    the pre-consolidation menu: 19 legacy rel/int tools
-                    visible, merged tools hidden, keep-list descriptions as
-                    shipped before U2 (navigate_to + place_object only).
-  merged            the 15-tool menu with only the merged tools' own
-                    descriptions added (U1 alone, no U2 restorations).
-  merged_desc       the shipped surface: merged menu + the four U2
-                    restorations (record_knowledge, set_people_present,
-                    save_character, save_object).
+  legacy_control    keep-list descriptions as shipped before U2 (navigate_to +
+                    place_object only).
+  merged            only the merged tools' own descriptions added (U1 alone, no
+                    U2 restorations).
+  merged_desc       the shipped surface: the four U2 restorations added
+                    (record_knowledge, set_people_present, save_character,
+                    save_object).
+
+NOTE: the arms once also varied tool VISIBILITY (a legacy 19-tool menu vs the
+merged 15-tool menu) via the engine's _COMPACT_HIDDEN_TOOLS knob. That knob was
+removed in b2e576d when visibility moved to the FEATURE_TOGGLES feature-family
+system, and the merged topology is now the only menu the engine registers, so
+the arms differ solely on function-description keep-lists (the U2 axis).
 
 Two corpora:
   A (regression gate)  the 9 navnudge phrases, scored on navigate_to firing
@@ -179,8 +184,14 @@ ARM_NAMES = ["legacy_control", "merged", "merged_desc"]
 
 
 def build_arms():
-    """Per-arm (hidden, keep_fn) overrides, applied as engine instance attrs
-    so production class state is untouched by the sweep."""
+    """Per-arm keep_fn (function-description) overrides, applied as an engine
+    instance attr so production class state is untouched by the sweep.
+
+    The former tool-visibility ('hidden') dimension was dropped: the engine's
+    _COMPACT_HIDDEN_TOOLS knob was removed in b2e576d when tool visibility moved
+    to the FEATURE_TOGGLES feature-family system, and the merged tool topology is
+    now the only one the engine registers. The arms therefore differ solely on
+    which merged tools carry a function-level description."""
     full_keep = dict(RPJotEngine._COMPACT_KEEP_FUNCTION_DESCRIPTIONS)
     pre_u2 = {k: full_keep[k] for k in ("navigate_to", "place_object")
               if k in full_keep}
@@ -189,18 +200,9 @@ def build_arms():
         if k in full_keep:
             merged_only[k] = full_keep[k]
     return {
-        "legacy_control": dict(
-            hidden=frozenset({"record_relationship", "record_interior"}),
-            keep_fn=pre_u2,
-        ),
-        "merged": dict(
-            hidden=RPJotEngine._COMPACT_HIDDEN_TOOLS,
-            keep_fn=merged_only,
-        ),
-        "merged_desc": dict(
-            hidden=RPJotEngine._COMPACT_HIDDEN_TOOLS,
-            keep_fn=full_keep,
-        ),
+        "legacy_control": dict(keep_fn=pre_u2),
+        "merged": dict(keep_fn=merged_only),
+        "merged_desc": dict(keep_fn=full_keep),
     }
 
 
@@ -367,7 +369,6 @@ def main():
         os.environ["openai_api_model"] = m
         t0 = time.monotonic()
         for a in ARM_NAMES:
-            engine._COMPACT_HIDDEN_TOOLS = arms[a]["hidden"]
             engine._COMPACT_KEEP_FUNCTION_DESCRIPTIONS = arms[a]["keep_fn"]
             for p in CORPUS_A:
                 cell = a_res[m][a][p["id"]]

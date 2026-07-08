@@ -263,7 +263,7 @@ def selected_tools(engine, phrase, strategy):
     )
     parts = [
         f"WORLD STATE BRIEFING:\n{WORLD_DOC}",
-        f"NARRATOR RULE: {engine._NARRATOR_RULE}",
+        f"AGENCY RULE: {engine._AGENCY_RULE}",
         phrase["text"],
     ]
     # nudge_pos_desc always ships the schema micro-description (the model picks

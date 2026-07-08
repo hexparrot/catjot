@@ -240,7 +240,7 @@ def selected_calls(engine, phrase, arm):
     world = WORLD_DOC + (f"\n\n{block}" if block else "")
     parts = [
         f"WORLD STATE BRIEFING:\n{world}",
-        f"NARRATOR RULE: {engine._NARRATOR_RULE}",
+        f"AGENCY RULE: {engine._AGENCY_RULE}",
         phrase["text"],
     ]
     messages = [
