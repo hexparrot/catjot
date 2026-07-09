@@ -33,8 +33,9 @@ from rpjot import (
     _msg_toks,
 )
 
-TMP_CATNOTE = "tests/.catjot"
-FIXED_CATNOTE = "tests/bellvue.jot"
+os.makedirs("local/scratch", exist_ok=True)
+TMP_CATNOTE = "local/scratch/.catjot"  # writable scratch — tests/ is read-only
+FIXED_CATNOTE = "tests/bellvue.jot"  # read-only fixture
 Note.NOTEFILE = FIXED_CATNOTE
 
 
@@ -51,6 +52,32 @@ def _make_engine(location="test-chamber", people=None):
     )
     engine.register_all_tools()
     return engine
+
+
+def _use_scratch_notefile(testcase):
+    """Point Note.NOTEFILE at a fresh temp .jot for the duration of a test.
+
+    Engine tool calls (navigate_to, save_*, record_event) append to Note.NOTEFILE.
+    Classes that exercise those tools must NOT let writes fall through to the
+    read-only tests/bellvue.jot default — route them to gitignored local/scratch/.
+    Registers addCleanup, so it composes with any existing setUp without a tearDown.
+    """
+    import tempfile
+
+    saved = Note.NOTEFILE
+    fd, tmp = tempfile.mkstemp(suffix=".jot", dir="local/scratch")
+    os.close(fd)
+    Note.NOTEFILE = tmp
+
+    def _restore():
+        Note.NOTEFILE = saved
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    testcase.addCleanup(_restore)
+    return tmp
 
 
 def _base_messages(system_content=None):
@@ -342,6 +369,7 @@ class TestToolHandlerOutput(unittest.TestCase):
     """Real tool handlers must return valid JSON with the correct shape."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="test-chamber",
             people={"player", "alice"},
@@ -600,6 +628,7 @@ class TestWorldEntityTools(unittest.TestCase):
     """New world-entity and navigation tools must return correct strings."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="test-chamber",
             people={"player", "alice"},
@@ -617,6 +646,19 @@ class TestWorldEntityTools(unittest.TestCase):
         self.assertEqual(self.engine.session.location, "test-chamber/dungeon")
 
     def test_navigate_to_bare_destination(self):
+        # From a single-component root, a bare destination naming an UNKNOWN root
+        # nests as a child (G4 / LM §3.3) rather than becoming a detached
+        # top-level location. In an isolated notefile there are no saved roots, so
+        # "great-hall" nests under the current room. (This previously asserted a
+        # top-level move only because the shared fixture had accumulated
+        # "great-hall" as a known root via cross-test writes.)
+        self.engine._tool_navigate_to("great-hall")
+        self.assertEqual(self.engine.session.location, "test-chamber/great-hall")
+
+    def test_navigate_to_bare_known_root_is_top_level(self):
+        # A bare destination naming a KNOWN saved root IS a top-level move. Save
+        # the root first so the resolution is deterministic and self-contained.
+        self.engine._tool_save_location("great-hall", "A vast echoing hall.")
         self.engine._tool_navigate_to("great-hall")
         self.assertEqual(self.engine.session.location, "great-hall")
 
@@ -798,6 +840,9 @@ class TestToolRegistry(unittest.TestCase):
 
 class TestLocationHierarchy(unittest.TestCase):
     """Traversal algorithm and hierarchical navigate_to behaviour."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     # --- compute_traversal ---
 
@@ -2018,6 +2063,7 @@ class TestSafeDispatch(unittest.TestCase):
     """_safe_dispatch: one bad tool call must never crash the session."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="ravenwood-manor", people={"player", "alice"}
         )
@@ -2486,6 +2532,9 @@ class TestLocationDriftObservability(unittest.TestCase):
 class TestZeroCanonicalNudge(unittest.TestCase):
     """An empty-canonical action/dialogue turn gets exactly one corrective round."""
 
+    def setUp(self):
+        _use_scratch_notefile(self)
+
     def _run(self, rounds, classified):
         import rpjot as rpjot_module
 
@@ -2622,6 +2671,9 @@ class TestZeroCanonicalNudge(unittest.TestCase):
 
 class TestTimingTelemetry(unittest.TestCase):
     """run_turn emits one parseable [TIMING] line; steps track LLM-call counts."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     def _patched(self, rounds):
         """Context: swap call_llm for a scripted fake; returns (engine, calls)."""
@@ -3112,6 +3164,9 @@ class TestStep1DeltaMode(unittest.TestCase):
 
 class TestSpeculativeSeed(unittest.TestCase):
     """Idle-window speculation stores a validated, single-use seed."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     def _patched(self, rounds):
         import rpjot as rpjot_module

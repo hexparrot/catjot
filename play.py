@@ -38,8 +38,14 @@ from catjot import Note, ContextBundle, NoteContext, SearchType, call_llm
 # ---------------------------------------------------------------------------
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SEED_JOT = os.path.join(_HERE, "tests", "bellvue_canonical.jot")
-_SESSIONS_DIR = os.path.join(_HERE, "sessions")
+# All runtime-writable artifacts live under <repo>/local/ (gitignored).
+_LOCAL_DIR = os.path.join(_HERE, "local")
+# Generated canonical seed (gitignored). Falls back to the read-only tests/bellvue.jot
+# fixture when the seed has not been generated (fresh checkout, no LLM run yet).
+_SEED_JOT = os.path.join(_LOCAL_DIR, "canonical", "bellvue_canonical.jot")
+_SEED_FALLBACK = os.path.join(_HERE, "tests", "bellvue.jot")
+_SESSIONS_DIR = os.path.join(_LOCAL_DIR, "sessions")
+_DEBUG_DIR = os.path.join(_LOCAL_DIR, "debug")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1000,18 +1006,18 @@ def game_loop(engine, seed_summaries=False):
                 print("Usage: /debug <description of what looked wrong>")
                 continue
             desc = parts[1].strip()
-            os.makedirs("debug", exist_ok=True)
+            os.makedirs(_DEBUG_DIR, exist_ok=True)
             report_text, index_row = engine.build_debug_report(
                 desc,
                 step2_messages,
                 step3_messages,
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
-            report_path = os.path.join("debug", index_row["report_file"])
+            report_path = os.path.join(_DEBUG_DIR, index_row["report_file"])
             with open(report_path, "w", encoding="utf-8") as fh:
                 fh.write(report_text)
             with open(
-                os.path.join("debug", "index.jsonl"), "a", encoding="utf-8"
+                os.path.join(_DEBUG_DIR, "index.jsonl"), "a", encoding="utf-8"
             ) as fh:
                 fh.write(json.dumps(index_row) + "\n")
             print(f"[debug report written: {report_path}]")
@@ -1225,11 +1231,14 @@ def _resume_engine():
 
 
 def create_session() -> str:
-    """Copy seed.jot into a fresh timestamped session file and return its path."""
+    """Copy the seed into a fresh timestamped session file and return its path."""
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(_SESSIONS_DIR, f"session_{stamp}.jot")
-    shutil.copy2(_SEED_JOT, path)
+    # Prefer the generated canonical seed; fall back to the read-only fixture so a
+    # fresh checkout can start a game before create_canonical_seed.py has been run.
+    seed = _SEED_JOT if os.path.exists(_SEED_JOT) else _SEED_FALLBACK
+    shutil.copy2(seed, path)
     return path
 
 

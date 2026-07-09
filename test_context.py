@@ -11,11 +11,12 @@ import unittest
 from catjot import Note, NoteContext, SearchType, ContextBundle
 from time import time
 from datetime import datetime
-from os import getcwd, remove, environ
+from os import getcwd, remove, environ, makedirs
 from conftest import jot_teardown
 
-TMP_CATNOTE = "tests/.catjot"
-FIXED_CATNOTE = "tests/bellvue.jot"
+makedirs("local/scratch", exist_ok=True)
+TMP_CATNOTE = "local/scratch/.catjot"  # writable scratch — tests/ is read-only
+FIXED_CATNOTE = "tests/bellvue.jot"  # read-only fixture
 catjot.NOTEFILE = FIXED_CATNOTE
 Note.NOTEFILE = FIXED_CATNOTE
 

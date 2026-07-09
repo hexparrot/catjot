@@ -18,6 +18,7 @@ __version__ = "0.2.0"
 import difflib
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -354,11 +355,17 @@ def _messages_have_digest(*message_lists) -> bool:
 LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(name)s.%(funcName)s: %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
+# All runtime-writable artifacts live under <repo>/local/ (gitignored). Anchor on
+# __file__, not cwd, so logs land at the repo root regardless of where we're launched.
+_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local")
+_LOG_DIR = os.path.join(_LOCAL_DIR, "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+
 logger = logging.getLogger("rpjot_engine")
 _h_file = None  # module-level ref to the current file handler (swappable per session)
 if not logger.handlers:
     _h_stderr = logging.StreamHandler(sys.stderr)
-    _h_file = logging.FileHandler("debug.log", mode="a")
+    _h_file = logging.FileHandler(os.path.join(_LOG_DIR, "debug.log"), mode="a")
     _fmt = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT)
     _h_stderr.setFormatter(_fmt)
     _h_file.setFormatter(_fmt)
@@ -379,7 +386,7 @@ def configure_logging(stamp: str) -> None:
     global _h_file
     if not stamp:
         return
-    new_path = f"debug_{stamp}.log"
+    new_path = os.path.join(_LOG_DIR, f"debug_{stamp}.log")
     new_handler = logging.FileHandler(new_path, mode="a")
     new_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
     if _h_file is not None and _h_file in logger.handlers:
@@ -8443,7 +8450,7 @@ class RPJotEngine:
         # ── log path: authoritative live handler, never reconstructed (V6) ──
         if log_path is None:
             base_file = getattr(_h_file, "baseFilename", None) if _h_file else None
-            log_path = base_file or "debug.log"
+            log_path = base_file or os.path.join(_LOG_DIR, "debug.log")
         log_base = log_path.rsplit("/", 1)[-1]
 
         # ── category routing (highlights, never suppresses — V5) ────────────

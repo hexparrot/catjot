@@ -9,14 +9,27 @@ __status__ = "Development"
 import unittest
 import sys
 import os
+import shutil
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
 from catjot import Note, NoteContext, SearchType
 from conftest import jot_teardown
 
-TMP_CATNOTE = "tests/.catjot"
-FIXED_CATNOTE = "tests/example.jot"
+os.makedirs("local/scratch", exist_ok=True)
+TMP_CATNOTE = "local/scratch/.catjot"  # writable scratch — tests/ is read-only
+FIXED_CATNOTE = "tests/example.jot"  # read-only fixture
+EXAMPLE_RW = "local/scratch/example.jot"  # writable copy for delete/pop/commit tests
+
+
+def _writable_example():
+    """Copy the read-only example fixture into scratch and return the copy's path.
+
+    Write tests (delete/pop/commit) rebind FIXED_CATNOTE to this so tests/ is
+    never mutated.
+    """
+    shutil.copyfile(FIXED_CATNOTE, EXAMPLE_RW)
+    return EXAMPLE_RW
 
 
 def strip_ansi_codes(text):
@@ -546,6 +559,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(iters, 1)
 
     def test_delete_record(self):
+        FIXED_CATNOTE = _writable_example()  # operate on a scratch copy (tests/ read-only)
         iters = 0
         # file, untouched
         for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")):
@@ -578,6 +592,7 @@ class TestTaker(unittest.TestCase):
         self.assertEqual(iters, 4)
 
     def test_pop_record(self):
+        FIXED_CATNOTE = _writable_example()  # operate on a scratch copy (tests/ read-only)
         iters = 0
         # file, untouched
         for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user")):
@@ -1005,6 +1020,7 @@ class TestTaker(unittest.TestCase):
         self.assertNotEqual(a_note, b_note)
 
     def test_equality_full_example(self):
+        FIXED_CATNOTE = _writable_example()  # operate on a scratch copy (tests/ read-only)
         matches = list(
             inst
             for inst in Note.match(FIXED_CATNOTE, (SearchType.DIRECTORY, "/home/user"))
