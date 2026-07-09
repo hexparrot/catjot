@@ -1208,7 +1208,7 @@ def _resume_engine():
     """
     det_location, det_scene = recover_deterministic_state()
     engine = RPJotEngine(
-        location=det_location or "ravenwood-manor",
+        location=det_location or "manor",
         people_present={"mc"},
     )
     _apply_family_config(engine)
@@ -1285,7 +1285,7 @@ def main():
         engine = _resume_engine()
     else:
         engine = RPJotEngine(
-            location="ravenwood-manor",
+            location="manor",
             people_present={"mc"},
         )
         _apply_family_config(engine)

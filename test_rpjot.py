@@ -119,23 +119,23 @@ class TestSessionState(unittest.TestCase):
     """SessionState.header() must produce a well-formed string."""
 
     def test_header_contains_plain_location(self):
-        s = SessionState(location="ravenwood", people_present={"player"})
+        s = SessionState(location="manor", people_present={"player"})
         h = s.header()
-        self.assertIn("location: ravenwood", h)
+        self.assertIn("location: manor", h)
         self.assertNotIn("loc:", h)
 
     def test_header_contains_present_names(self):
-        s = SessionState(location="ravenwood", people_present={"alice", "bob"})
+        s = SessionState(location="manor", people_present={"alice", "bob"})
         h = s.header()
         self.assertIn("alice", h)
         self.assertIn("bob", h)
 
     def test_header_empty_people_shows_none(self):
-        s = SessionState(location="ravenwood", people_present=set())
+        s = SessionState(location="manor", people_present=set())
         self.assertIn("none", s.header())
 
     def test_header_people_are_sorted(self):
-        s = SessionState(location="ravenwood", people_present={"zelda", "alice", "bob"})
+        s = SessionState(location="manor", people_present={"zelda", "alice", "bob"})
         h = s.header()
         self.assertLess(h.index("alice"), h.index("bob"))
         self.assertLess(h.index("bob"), h.index("zelda"))
@@ -241,7 +241,7 @@ class TestMessageConstruction(unittest.TestCase):
     """build_user_message and build_tool_result_message."""
 
     def setUp(self):
-        self.engine = RPJotEngine(location="ravenwood", people_present={"player"})
+        self.engine = RPJotEngine(location="manor", people_present={"player"})
 
     def test_build_user_message_role(self):
         msg = self.engine.build_user_message("I look around.")
@@ -501,7 +501,7 @@ class TestToolDispatch(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor",
+            location="manor",
             people={"player", "alice"},
         )
 
@@ -2065,7 +2065,7 @@ class TestSafeDispatch(unittest.TestCase):
     def setUp(self):
         _use_scratch_notefile(self)
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "alice"}
+            location="manor", people={"player", "alice"}
         )
 
     def _assert_error_json(self, result):
@@ -2175,7 +2175,7 @@ class TestSafeDispatch(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            engine = _make_engine(location="ravenwood-manor", people={"player"})
+            engine = _make_engine(location="manor", people={"player"})
             engine.init_pipeline()
             step2 = [{"role": "system", "content": "rules"}]
             canonical, think = engine._compliance_step.run(
@@ -2205,7 +2205,7 @@ class TestHistoryCompaction(unittest.TestCase):
         return _CHUNK * reps
 
     def _engine_with_stub(self):
-        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine = _make_engine(location="manor", people={"player"})
         self.condense_inputs = []
 
         def stub_condense(raw_text, focus_hint=""):
@@ -2340,11 +2340,11 @@ class TestCastDrift(unittest.TestCase):
     """Named-but-absent NPCs must be detected (never auto-added to the cast)."""
 
     def _engine(self, people):
-        return _make_engine(location="ravenwood-manor", people=people)
+        return _make_engine(location="manor", people=people)
 
     def test_mentioned_but_absent_npc_warns(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC action]: I look around", "Evie beckons you closer from the doorway."
         )
@@ -2353,7 +2353,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_present_npc_no_warning(self):
         eng = self._engine({"player", "evie"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC speaks aloud]: hello", "Evie smiles warmly at you."
         )
@@ -2362,7 +2362,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_known_absent_but_unmentioned_no_warning(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC action]: I sit down", "The room is empty and still."
         )
@@ -2378,7 +2378,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_word_boundary_avoids_substring_false_positive(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("eve", "Eve", location="ravenwood-manor")
+        eng.npc_tracker.register("eve", "Eve", location="manor")
         # 'eventually' contains 'eve' but must not match on a word boundary.
         warnings = eng._scan_cast_drift(
             "[MC action]: I wait", "Eventually the clock chimes; nobody appears."
@@ -2387,7 +2387,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_warning_clears_when_cast_resolves(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         eng._scan_cast_drift("x", "Evie appears in the hall.")
         self.assertTrue(eng._cast_warnings)
         eng.session.people_present.add("evie")
@@ -2398,7 +2398,7 @@ class TestCastDrift(unittest.TestCase):
         # The unified _scan_drift("cast", ...) seam (Phase 0d) must produce the
         # exact same warnings as the underlying _scan_cast_drift.
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_drift(
             "cast", "[MC action]: I look", "Evie beckons from the doorway."
         )
@@ -2409,7 +2409,7 @@ class TestCastDrift(unittest.TestCase):
         # No room-drift scanner exists yet; an unknown kind is a harmless no-op
         # and must not touch _cast_warnings.
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         eng._scan_drift("cast", "x", "Evie appears.")
         before = list(eng._cast_warnings)
         self.assertEqual(eng._scan_drift("room", "x", "Evie appears."), [])
@@ -2473,7 +2473,7 @@ class TestLocationDriftObservability(unittest.TestCase):
     """LOCDRIFT warnings surface in headers + /stats; [REMARK] always logs."""
 
     def _engine(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return eng
 
@@ -2551,7 +2551,7 @@ class TestZeroCanonicalNudge(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng = _make_engine(location="manor", people={"player"})
             eng.init_pipeline()
             step2 = [{"role": "system", "content": "rules"}]
             canonical, think = eng._compliance_step.run(
@@ -2688,7 +2688,7 @@ class TestTimingTelemetry(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -2786,7 +2786,7 @@ class TestTimingTelemetry(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng = _make_engine(location="manor", people={"player"})
             eng.init_pipeline()
             eng._safe_dispatch = lambda handlers, name, args: json.dumps(
                 {"character": "x", "followup_instruction": "use this profile"}
@@ -2930,7 +2930,7 @@ class TestStep1DeltaMode(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -3182,7 +3182,7 @@ class TestSpeculativeSeed(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         eng.seed_enabled = True
         return rpjot_module, original, eng, calls
@@ -3249,7 +3249,7 @@ class TestSpeculativeSeed(unittest.TestCase):
     # -- _consume_seed validation ------------------------------------------
 
     def _engine_with_seed(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         eng.seed_enabled = True
         eng._seed = {
@@ -3323,7 +3323,7 @@ class TestSeedRunTurn(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -3797,7 +3797,7 @@ class TestProseStreaming(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, captured
 
@@ -3847,7 +3847,7 @@ class TestProseStreaming(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         chunks = []
         eng.prose_stream_cb = chunks.append
@@ -3893,7 +3893,7 @@ class TestCompactSchemaKeepList(unittest.TestCase):
     """Critical argument contracts survive step-2 schema compaction."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.compact = {
             s["function"]["name"]: s for s in self.engine._compact_step2_schemas
         }
@@ -3991,7 +3991,7 @@ class TestConsolidatedDispatch(unittest.TestCase):
         fd, self._path = tempfile.mkstemp(suffix=".jot")
         os.close(fd)
         Note.NOTEFILE = self._path
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def tearDown(self):
         Note.NOTEFILE = self._saved_notefile
@@ -4357,7 +4357,7 @@ class TestEntryCitation(unittest.TestCase):
         ]
         for s in seeds:
             Note.append(Note.NOTEFILE, Note.jot(**s))
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def tearDown(self):
         Note.NOTEFILE = self._saved_notefile
@@ -4461,14 +4461,14 @@ class TestEntryCitation(unittest.TestCase):
                 message="An iron key rests on the sill.",
                 tag=f"obj:iron-key ref:{self.T}",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=self.T + 600,
             ),
         )
         registry = self.engine._object_registry()
         self.assertIn("iron-key", registry)
         self.assertEqual(
-            registry["iron-key"]["residence"].get("room"), "ravenwood-manor"
+            registry["iron-key"]["residence"].get("room"), "manor"
         )
 
     # --- backlinks seam ---
@@ -4518,7 +4518,7 @@ class TestCitationCapture(unittest.TestCase):
                 message="The key sits on the mantel.",
                 tag="obj:iron-key",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=T + 200,
             ),
             dict(
@@ -4532,13 +4532,13 @@ class TestCitationCapture(unittest.TestCase):
                 message="The key changes hands again.",
                 tag="obj:iron-key",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=T + 400,
             ),
         ]
         for s in seeds:
             Note.append(Note.NOTEFILE, Note.jot(**s))
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.engine._turn_refs = []
 
     def tearDown(self):
@@ -4636,7 +4636,7 @@ class TestCitationStamps(unittest.TestCase):
                 now=self.T,
             ),
         )
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.engine._turn_refs = [self.T]
 
     def tearDown(self):
@@ -4976,7 +4976,7 @@ class TestThirdPersonMovement(unittest.TestCase):
     def test_nudge_omitted_for_third_person_move(self):
         from rpjot import ComplianceStep
 
-        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng = _make_engine(location="manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
         step = eng._compliance_step
@@ -4990,7 +4990,7 @@ class TestThirdPersonMovement(unittest.TestCase):
         # once fired here ("an invitation is not movement") is RETIRED — an NPC's
         # invitation is now allowed to lead the scene, so no DIRECTOR NOTE is
         # injected and the symmetric AGENCY RULE is present instead.
-        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng = _make_engine(location="manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
         step = eng._compliance_step
@@ -5018,7 +5018,7 @@ class TestProductionActivation(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "evie"}
+            location="manor", people={"player", "evie"}
         )
 
     def _passes(self, fn, n=3, need=2):
@@ -5171,7 +5171,7 @@ class TestSynthesisSeams(unittest.TestCase):
     """Tool results must never leak raw dicts (braces) into the prose synthesis."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def test_record_bond_summary_has_no_braces(self):
         result = json.dumps(
@@ -5243,7 +5243,7 @@ class TestSynthesisSeams(unittest.TestCase):
             calls["i"] += 1
             return r
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         # Force the dispatched result to carry a followup instruction.
         eng._dispatch_step2 = lambda name, args: json.dumps(
@@ -5285,7 +5285,7 @@ class TestSynthesisSeams(unittest.TestCase):
             calls["i"] += 1
             return r
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         n = {"i": 0}
 
@@ -5374,7 +5374,7 @@ class TestHygiene(unittest.TestCase):
     def test_query_cache_fifo_eviction(self):
         from rpjot import _QUERY_CACHE_MAX
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         for i in range(_QUERY_CACHE_MAX + 25):
             eng._cache_put(f"k{i}", "value")
         cache = eng.session._query_cache
@@ -5385,7 +5385,7 @@ class TestHygiene(unittest.TestCase):
     def test_query_cache_update_existing_does_not_grow(self):
         from rpjot import _QUERY_CACHE_MAX
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         for i in range(_QUERY_CACHE_MAX):
             eng._cache_put(f"k{i}", "v")
         self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
@@ -5402,7 +5402,7 @@ class TestHygiene(unittest.TestCase):
         return {"role": "user", "content": _CHUNK * reps}
 
     def test_guard_90pct_history_only_logs_no_trimmable(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         big = self._user_msg_at_pct(0.92)
         msgs = [big, {"role": "user", "content": "the active prompt"}]
@@ -5425,7 +5425,7 @@ class TestHistoryReport(unittest.TestCase):
     """The REPL token panel exposes the number that actually grows: history."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def test_report_contains_expected_fields(self):
         step2 = [
@@ -5494,7 +5494,7 @@ class TestResumeDigestSeeding(unittest.TestCase):
             pass
 
     def _engine(self):
-        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine = _make_engine(location="manor", people={"player"})
         engine._condense_context = lambda raw, focus_hint="": "distilled recap here"
         return engine
 
@@ -6533,14 +6533,14 @@ class TestPrivateConversationKnowledge(unittest.TestCase):
 class TestLocationPrecision(unittest.TestCase):
     """Notes file under the correct, precise room at write time (LOCATION_MARKING).
 
-    Seeds a ravenwood-manor hierarchy plus a couple of sub-room events, then
+    Seeds a manor hierarchy plus a couple of sub-room events, then
     exercises the early location re-mark (both the step-1 CURRENT ROOM path and
     the gated lexical led-move fallback) and the down-walk event recall. world_doc
     is stubbed so no live LLM is needed.
     """
 
-    ROOT = "ravenwood-manor"
-    FOYER = "ravenwood-manor/foyer"
+    ROOT = "manor"
+    FOYER = "manor/foyer"
 
     def setUp(self):
         Note.NOTEFILE = TMP_CATNOTE
@@ -6553,29 +6553,29 @@ class TestLocationPrecision(unittest.TestCase):
             )
 
         for room in (
-            "ravenwood-manor",
-            "ravenwood-manor/foyer",
-            "ravenwood-manor/cottage",
-            "ravenwood-manor/garage",
-            "ravenwood-manor/secret-garden",
-            "ravenwood-manor/garden",
-            "ravenwood-manor/garden-east",
+            "manor",
+            "manor/foyer",
+            "manor/cottage",
+            "manor/garage",
+            "manor/secret-garden",
+            "manor/garden",
+            "manor/garden-east",
         ):
             seed(f"/story/location/{room}", "", room.split("/")[-1])
 
         # Events for the down-walk / TREE-boundary tests.
         seed(
-            "/story/events/ravenwood-manor/garden",
+            "/story/events/manor/garden",
             "exp:evie",
             "Gardeners prune the roses.",
         )
         seed(
-            "/story/events/ravenwood-manor/garden/shed",
+            "/story/events/manor/garden/shed",
             "exp:evie",
             "A rake leans in the garden shed.",
         )
         seed(
-            "/story/events/ravenwood-manor/garden-east",
+            "/story/events/manor/garden-east",
             "exp:evie",
             "The east beds are freshly turned.",
         )
@@ -6603,13 +6603,13 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._engine(self.FOYER)
         wd = eng._remark_location(
             "[MC action]: Evie leads me into the cottage",
-            "CURRENT ROOM: ravenwood-manor/cottage\nWORLD STATE: ...",
+            "CURRENT ROOM: manor/cottage\nWORLD STATE: ...",
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
         self.assertNotIn("CURRENT ROOM:", wd)  # stripped before step 2/3
         # a subsequent record_event with no location stamps the precise room
         eng._tool_record_event("They sit by the fire.", "exp:evie")
-        self.assertEqual(len(self._events_at("ravenwood-manor/cottage")), 1)
+        self.assertEqual(len(self._events_at("manor/cottage")), 1)
 
     # --- KEY acceptance: self-move defers to navigate_to (no double move) ---
 
@@ -6620,7 +6620,7 @@ class TestLocationPrecision(unittest.TestCase):
         )
         self.assertEqual(eng.session.location, self.FOYER)  # deferred to navigate_to
         eng._tool_navigate_to("cottage")
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
 
     # --- fail-safe: nothing confident → location untouched ---
 
@@ -6650,7 +6650,7 @@ class TestLocationPrecision(unittest.TestCase):
         eng._remark_location(
             "[MC action]: the car pulls into the garage", "CURRENT ROOM: UNCHANGED"
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     def test_lexical_fallback_ignores_unknown_room(self):
         eng = self._engine(self.ROOT)
@@ -6663,13 +6663,13 @@ class TestLocationPrecision(unittest.TestCase):
         self.assertEqual(eng.session.location, self.ROOT)
 
     def test_lexical_led_fallback_sibling_room(self):
-        # garage is a SIBLING of foyer (both children of ravenwood-manor) —
+        # garage is a SIBLING of foyer (both children of manor) —
         # the quarters→gallery class the child/root candidate set missed.
         eng = self._engine(self.FOYER)
         eng._remark_location(
             "[MC action]: she pulls me into the garage", "CURRENT ROOM: UNCHANGED"
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     # --- record_event explicit-location handling (LM §3.7 two-gate rule) ---
 
@@ -6684,9 +6684,9 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._mc_engine(self.FOYER)
         eng._tool_record_event(
             "Dust motes swirl.", "exp:evie",
-            location="ravenwood-manor/secret_garden",
+            location="manor/secret_garden",
         )
-        self.assertEqual(len(self._events_at("ravenwood-manor/secret-garden")), 1)
+        self.assertEqual(len(self._events_at("manor/secret-garden")), 1)
 
     def test_record_event_mc_stationary_auto_moves(self):
         eng = self._mc_engine(self.FOYER)
@@ -6699,15 +6699,15 @@ class TestLocationPrecision(unittest.TestCase):
         # stationary verdict) and committed by reconcile when navigate_to did
         # not fire — never immediately, so it can't collide with a real
         # navigate_to traversal on any turn.
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        self.assertEqual(eng._pending_loc_hint, "manor/garage")
         eng._reconcile_loc_hint([])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
         # NPC last-seen follows the committed move.
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
-        self.assertEqual(rec.location_last_seen, "ravenwood-manor/garage")
+        self.assertEqual(rec.location_last_seen, "manor/garage")
         # subsequent bare record_event files in the new room
         eng._tool_record_event("He leans on the workbench.", "exp:bartholomew")
-        self.assertEqual(len(self._events_at("ravenwood-manor/garage")), 2)
+        self.assertEqual(len(self._events_at("manor/garage")), 2)
 
     def test_record_event_compound_exp_tag_detects_mc(self):
         eng = self._mc_engine(self.FOYER)
@@ -6717,9 +6717,9 @@ class TestLocationPrecision(unittest.TestCase):
             location="cottage",
         )
         # Compound exp tag detects MC → move deferred, committed at reconcile.
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/cottage")
+        self.assertEqual(eng._pending_loc_hint, "manor/cottage")
         eng._reconcile_loc_hint([])
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
 
     def test_record_event_non_mc_divergent_warns_only(self):
         eng = self._mc_engine(self.FOYER)
@@ -6729,7 +6729,7 @@ class TestLocationPrecision(unittest.TestCase):
         self.assertEqual(eng.session.location, self.FOYER)  # session unmoved
         self.assertTrue(eng._loc_warnings)
         # the note itself still files at the (canonicalized) explicit room
-        self.assertEqual(len(self._events_at("ravenwood-manor/garden")), 2)
+        self.assertEqual(len(self._events_at("manor/garden")), 2)
 
     def test_record_event_mobile_defers_then_reconciles(self):
         eng = self._mc_engine(self.FOYER)
@@ -6740,10 +6740,10 @@ class TestLocationPrecision(unittest.TestCase):
             location="garage",
         )
         self.assertEqual(eng.session.location, self.FOYER)  # not during step 2
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        self.assertEqual(eng._pending_loc_hint, "manor/garage")
         # step 2 ends without navigate_to → the hint commits
         eng._reconcile_loc_hint([("record_event", "ok")])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
         self.assertIsNone(eng._pending_loc_hint)
 
     def test_record_event_hint_dropped_when_navigate_fired(self):
@@ -6756,7 +6756,7 @@ class TestLocationPrecision(unittest.TestCase):
         )
         eng._tool_navigate_to("garage")  # the real traversal wins
         eng._reconcile_loc_hint([("record_event", "ok"), ("navigate_to", "ok")])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     def test_record_event_same_room_no_gate(self):
         eng = self._mc_engine(self.FOYER)
@@ -6771,10 +6771,10 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._engine(self.FOYER)
         eng._remark_location(
             "[MC action]: Evie leads me into the cottage",
-            "CURRENT ROOM: ravenwood-manor/cottage",
+            "CURRENT ROOM: manor/cottage",
         )
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
-        self.assertEqual(rec.location_last_seen, "ravenwood-manor/cottage")
+        self.assertEqual(rec.location_last_seen, "manor/cottage")
 
     # --- scene hint on location change (minimal rotation pressure) ---
 
@@ -6782,7 +6782,7 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._mc_engine(self.FOYER)
         eng.init_pipeline()
         eng.session.current_scene = "arrival"
-        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        eng._commit_location("manor/garage", source="record_event")
         self.assertTrue(eng._scene_hint_pending)
         step = eng._compliance_step
         first = step._compose_step2_user_content("[MC action]: I wait", "WS: x")
@@ -6793,7 +6793,7 @@ class TestLocationPrecision(unittest.TestCase):
 
     def test_scene_hint_not_set_without_active_scene(self):
         eng = self._mc_engine(self.FOYER)
-        eng._commit_location("ravenwood-manor/garage", source="remark")
+        eng._commit_location("manor/garage", source="remark")
         self.assertFalse(eng._scene_hint_pending)
 
     def test_scene_hint_set_by_navigate_to(self):
@@ -6805,7 +6805,7 @@ class TestLocationPrecision(unittest.TestCase):
     def test_begin_scene_clears_pending_hint(self):
         eng = self._mc_engine(self.FOYER)
         eng.session.current_scene = "arrival"
-        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        eng._commit_location("manor/garage", source="record_event")
         eng._tool_begin_scene("garage-tinkering", "A new beat in the garage.")
         self.assertFalse(eng._scene_hint_pending)
 
@@ -6832,26 +6832,26 @@ class TestLocationPrecision(unittest.TestCase):
         # turn 2: step-1 now sees the move and names the room → re-mark lands
         eng._remark_location(
             "[MC action]: I look around the new place",
-            "CURRENT ROOM: ravenwood-manor/secret-garden",
+            "CURRENT ROOM: manor/secret-garden",
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/secret-garden")
+        self.assertEqual(eng.session.location, "manor/secret-garden")
 
     # --- gather_location_events: down-walk + TREE boundary (§3.6) ---
 
     def test_location_events_includes_subrooms(self):
         eng = self._engine(self.ROOT)
-        events = eng.gather_location_events("ravenwood-manor/garden")
+        events = eng.gather_location_events("manor/garden")
         self.assertIn("prune the roses", events)  # this room
         self.assertIn("rake leans", events)  # sub-room garden/shed
 
     def test_location_events_tree_boundary_excludes_prefix_sibling(self):
         eng = self._engine(self.ROOT)
-        events = eng.gather_location_events("ravenwood-manor/garden")
+        events = eng.gather_location_events("manor/garden")
         self.assertNotIn("east beds", events)  # garden-east must not leak in
 
     def test_location_events_empty_room_is_blank(self):
         eng = self._engine(self.ROOT)
-        self.assertEqual(eng.gather_location_events("ravenwood-manor/cottage"), "")
+        self.assertEqual(eng.gather_location_events("manor/cottage"), "")
 
 
 # ---------------------------------------------------------------------------
@@ -6862,7 +6862,7 @@ class TestLocationPrecision(unittest.TestCase):
 class TestObjectPermanence(unittest.TestCase):
     """Deterministic recall of whatever was written; stale-never-wrong-place.
 
-    A tarnished locket travels ravenwood-manor: it is introduced in the foyer,
+    A tarnished locket travels manor: it is introduced in the foyer,
     restated in place, moved to the secret garden, pocketed by Evie, cracks in
     her keeping, has its canonical description re-saved, and is finally merely
     *talked about* back in the foyer. Each phase is seeded with an exact Note.now
@@ -6872,8 +6872,8 @@ class TestObjectPermanence(unittest.TestCase):
     """
 
     SLUG = "tarnished-locket"
-    ROOM_A = "ravenwood-manor/foyer"
-    ROOM_B = "ravenwood-manor/secret-garden"
+    ROOM_A = "manor/foyer"
+    ROOM_B = "manor/secret-garden"
     HOLDER = "evie"
     T = 1_750_000_000  # base epoch; phases step by 100
 
@@ -6892,8 +6892,8 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 0,
                 message="A tarnished silver locket, clasp worn, holding a faded portrait.",
                 tag="obj:tarnished-locket",
-                context="object sighting: tarnished-locket at ravenwood-manor/foyer",
-                pwd="/story/location/ravenwood-manor/foyer",
+                context="object sighting: tarnished-locket at manor/foyer",
+                pwd="/story/location/manor/foyer",
             ),
         ],
         # P1 — restate in place (place_object, no destination)
@@ -6902,7 +6902,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 100,
                 message="tarnished-locket is here.",
                 tag="obj:tarnished-locket",
-                pwd="/story/location/ravenwood-manor/foyer",
+                pwd="/story/location/manor/foyer",
             )
         ],
         # P2 — moved to room B
@@ -6911,7 +6911,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 200,
                 message="The locket lies on the garden bench.",
                 tag="obj:tarnished-locket",
-                pwd="/story/location/ravenwood-manor/secret-garden",
+                pwd="/story/location/manor/secret-garden",
             )
         ],
         # P3 — picked up by NPC (possession is a residence)
@@ -6948,7 +6948,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 600,
                 message="Evie talks about the locket she lost years ago.",
                 tag="exp:evie obj:tarnished-locket",
-                pwd="/story/events/ravenwood-manor/foyer",
+                pwd="/story/events/manor/foyer",
             )
         ],
     ]
@@ -7101,13 +7101,13 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 50,
             message="iron key on the sill.",
             tag="obj:iron-key",
-            pwd="/story/location/ravenwood-manor/foyer",
+            pwd="/story/location/manor/foyer",
         )
         self._seed(
             now=self.T + 50,
             message="iron key on the bench.",
             tag="obj:iron-key",
-            pwd="/story/location/ravenwood-manor/secret-garden",
+            pwd="/story/location/manor/secret-garden",
         )
         eng = self._engine()
         self.assertEqual(self._residence(eng, "iron-key"), {"room": self.ROOM_B})
@@ -7118,7 +7118,7 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 10,
             message="A wax-sealed letter changes hands by the hearth.",
             tag="exp:evie obj:sealed-letter",
-            pwd="/story/events/ravenwood-manor/foyer",
+            pwd="/story/events/manor/foyer",
         )
         eng = self._engine()
         self.assertEqual(self._residence(eng, "sealed-letter"), {"room": self.ROOM_A})
@@ -7130,8 +7130,8 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 20,
             message="A tall silver mirror in a tarnished frame.",
             tag="obj:silver-mirror",
-            context="object: silver-mirror at ravenwood-manor/foyer",
-            pwd="/story/location/ravenwood-manor/foyer",
+            context="object: silver-mirror at manor/foyer",
+            pwd="/story/location/manor/foyer",
         )
         eng = self._engine()
         data = self._get_object(eng, "silver-mirror")
@@ -7319,7 +7319,7 @@ class TestObjectActivationLive(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "evie"}
+            location="manor", people={"player", "evie"}
         )
 
     def _step2_calls_for(self, phrase, world_doc=None):

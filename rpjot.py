@@ -1909,7 +1909,7 @@ class RPJotEngine:
     and JSON parsing. Does not contain any gameplay logic.
 
     Usage:
-        engine = RPJotEngine(location="ravenwood-manor", people={"mc"})
+        engine = RPJotEngine(location="manor", people={"mc"})
         engine.register_all_tools()
         narrative = engine.run_turn(classified_input, step2_messages, step3_messages)
     """
@@ -4956,7 +4956,7 @@ class RPJotEngine:
                 },
                 "location": {
                     "type": "string",
-                    "description": "Where the event took place (e.g. 'ravenwood-manor/foyer'). Omit to use current session location.",
+                    "description": "Where the event took place (e.g. 'manor/foyer'). Omit to use current session location.",
                 },
             },
             "required": ["description", "tags"],

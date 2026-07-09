@@ -311,7 +311,7 @@ def main():
     print(f"classifier={CLASSIFIER}  strategies={len(STRATEGIES)}  "
           f"phrases={len(CORPUS)}  rounds={ROUNDS}  call_timeout={CALL_TIMEOUT}s\n")
 
-    engine = RPJotEngine(location="ravenwood-manor",
+    engine = RPJotEngine(location="manor",
                          people_present={"player", "evie"})
     engine.register_all_tools()
 

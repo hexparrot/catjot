@@ -39,7 +39,7 @@ Note.NOTEFILE = OUTPUT
 _rpjot_module.NOTEFILE = OUTPUT
 
 # Engine whose location is used as the pwd root for record_knowledge notes.
-engine = RPJotEngine(location="ravenwood-manor", people_present=set())
+engine = RPJotEngine(location="manor", people_present=set())
 engine.register_all_tools()
 
 
@@ -252,7 +252,7 @@ she wears cynicism as armour.""",
 engine._tool_save_character(
     name="cassidy",
     description="""\
-Cassidy Lemon — the Bellvues' personal assistant.
+Cassidy Thorne — the Bellvues' personal assistant.
 
 Personality: sharp-tongued, alluring, and perceptive.  She has been the
 family's right-hand woman for years and is fiercely protective of their
@@ -273,7 +273,7 @@ secret garden.""",
 engine._tool_save_character(
     name="winnie",
     description="""\
-Winifred "Winnie" Belmonte — the youngest Bellvue daughter, a grieving widow.
+Winifred "Winnie" Marsh — the youngest Bellvue daughter, a grieving widow.
 
 Personality: emotionally closed off, suspicious of strangers, fearful that
 anyone new will exploit her grief.  Her warmth has been buried under years of
@@ -290,7 +290,7 @@ and has not left since.""",
 engine._tool_save_character(
     name="sam",
     description="""\
-Samantha "Sam" — the Bellvue family's illegitimate daughter.
+Samantha "Sam" Croft — the Bellvue family's illegitimate daughter.
 
 Personality: outwardly humbled and overlooked; inwardly bitter, resentful, and
 dangerously ambitious.  She sees Bartholomew as yet another obstacle to the
@@ -378,7 +378,7 @@ other staff and of his own parents at the manor are warm but fragmentary.""",
 print("Writing location notes…")
 
 engine._tool_save_location(
-    name="ravenwood-manor",
+    name="manor",
     description="""\
 Ravenswood Manor is a towering relic of Gothic architecture — dark stone
 facade, both grand and foreboding.  A central spire is flanked by two smaller
@@ -394,7 +394,7 @@ waitstaff, mechanics, servants, butlers, and drivers are women.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/cottage",
+    name="manor/cottage",
     description="""\
 A tiny detached cottage in the far depths of Ravenswood Manor's backyard.
 It contains a bedroom, a kitchenette, and a bathroom — everything needed for
@@ -405,7 +405,7 @@ It feels cozy, remote, and private.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/secret-garden",
+    name="manor/secret-garden",
     description="""\
 Deep in the backyard of Ravenswood Manor is a secret garden enclosed by high,
 dense hedges.  There is only one entryway.  The space feels utterly remote and
@@ -418,7 +418,7 @@ Visitors experience the garden as a place of complete privacy.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/car-garage",
+    name="manor/car-garage",
     description="""\
 The car garage is enormous — as much a showroom as a working garage.  It is
 spotlessly maintained and spacious, with each of the Bellvues' vintage cars
