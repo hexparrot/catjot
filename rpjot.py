@@ -802,6 +802,24 @@ _STEP3_SYSTEM = (
 MAX_TOKENS_STEP1 = 4_096  # encyclopedic lookup — needs room to gather
 MAX_ITER_STEP1_DELTA = 3  # seeded delta run — most lookups already in the seed
 MAX_TOKENS_STEP3 = 3_072  # prose — invest output budget here
+# Reply-length ladder (++ / +++ sigils → [REPLY LENGTH …] marker in the classified
+# input). ProseStep raises its output cap so a longer-reply request has room.
+MAX_TOKENS_STEP3_LONG = 4_608  # `++`  — ~1.5x base
+MAX_TOKENS_STEP3_XLONG = 6_144  # `+++` — ~2x base
+# Marker substring (emitted by play.classify_input) → prose token budget.
+_REPLY_LENGTH_BUDGETS = (
+    ("[REPLY LENGTH — much longer]", MAX_TOKENS_STEP3_XLONG),
+    ("[REPLY LENGTH — longer]", MAX_TOKENS_STEP3_LONG),
+)
+
+
+def _prose_max_tokens(classified_input: str) -> int:
+    """Step-3 output cap for this turn, raised by a [REPLY LENGTH …] marker."""
+    text = classified_input or ""
+    for marker, budget in _REPLY_LENGTH_BUDGETS:
+        if marker in text:
+            return budget
+    return MAX_TOKENS_STEP3
 STEP3_TEMPERATURE = 1.2  # higher than legacy NARRATIVE_TEMPERATURE for richer variance
 # Prose is the one step whose LLM failure is fatal, not degradable: steps 1-2
 # fall back (deterministic world doc / partial canon) and still yield a turn,
@@ -1546,39 +1564,57 @@ class ComplianceStep:
         # [TIMING] line. Set on every exit path.
         self.last_rounds = 0
 
+    # Directive-block prefixes classify_input can emit. A classified string may
+    # now carry SEVERAL blocks (one per thought segment); a line starting with one
+    # of these opens a block, other lines are continuations (§SIGILS multi-segment).
+    _DIRECTIVE_BLOCK_PREFIXES = (
+        "[MC action]",
+        "[MC speaks aloud]",
+        "[MC — likely spoken aloud",
+        "[MC inner monologue",
+        "[MC attention",
+        "[MC intent",
+        "[NARRATIVE INJECTION",
+        "[REPLY LENGTH",
+    )
+
+    @classmethod
+    def _directive_blocks(cls, classified_input: str) -> list:
+        """Split a classified string into directive blocks (one per thought).
+
+        A line beginning with a known directive prefix opens a block; any other
+        line is a continuation of the current block. Single-segment input yields a
+        single block, so every downstream check reduces to its legacy form.
+        """
+        blocks: list = []
+        for line in (classified_input or "").split("\n"):
+            if line.lstrip().startswith(cls._DIRECTIVE_BLOCK_PREFIXES) or not blocks:
+                blocks.append(line)
+            else:
+                blocks[-1] += "\n" + line
+        return blocks
+
     @classmethod
     def _should_nudge_zero_canonical(cls, classified_input: str) -> bool:
-        """True when an empty-canonical turn should get one corrective round."""
-        s = (classified_input or "").lstrip()
-        return s.startswith(cls._NUDGE_PREFIXES)
+        """True when an empty-canonical turn should get one corrective round.
+
+        Fires if ANY thought block is nudge-worthy, not just the leading one.
+        """
+        return any(
+            b.lstrip().startswith(cls._NUDGE_PREFIXES)
+            for b in cls._directive_blocks(classified_input)
+        )
 
     @classmethod
-    def _is_stationary_turn(
-        cls, classified_input: str, mc_aliases: frozenset = frozenset()
-    ) -> bool:
-        """True when the MC did not physically move this turn (→ inject the nudge).
+    def _action_body_is_move(cls, action_block: str, mc_aliases: frozenset) -> bool:
+        """True when an [MC action] block's body is a physical MC move (§3.5).
 
-        Implements the sigil→mobility table (§3.5). Speech, likely-speech, inner
-        monologue and attention prefixes are stationary unconditionally. Only
-        [MC action] is ambiguous: it is *mobile* iff its content is a first-person
-        movement — an unquoted line beginning "I ..." carrying a _MOVE_VERBS verb
-        — mirroring classify_heuristic exactly, including the "I follow her down
-        the corridor" collision and the quoted-dialogue guard. Any UNRECOGNIZED
-        prefix fails OPEN to not-stationary (no injection = baseline behavior),
-        so a future sigil can never silently suppress navigate_to.
-
-        mc_aliases (lowercase) adds a third-person branch for players who write
-        "Bartholomew enters the gallery": mobile iff the first body token is an
-        MC alias AND a movement verb (either conjugation set) is present AND the
-        body is unquoted. Empty alias set = legacy behavior exactly; the same
-        "wants to go" collision class as first person is accepted (§3.5 note).
+        Mobile iff the unquoted body is a first-person movement ("I ..." + a
+        _MOVE_VERBS verb) OR a third-person MC-alias movement — mirroring
+        classify_heuristic exactly, including the "I follow her" collision and the
+        quoted-dialogue guard.
         """
-        s = (classified_input or "").lstrip()
-        if s.startswith(cls._STATIONARY_PREFIXES):
-            return True
-        if not s.startswith("[MC action]"):
-            return False  # unrecognized prefix → fail open (treat as mobile)
-        body = s.split("]", 1)[-1].lstrip(": ").strip()
+        body = action_block.split("]", 1)[-1].lstrip(": ").strip()
         low = body.lower()
         quoted = body[:1] in {'"', "'"}
         words = low.split()
@@ -1590,7 +1626,34 @@ class ComplianceStep:
             w.strip('.,;:"') in cls._MOVE_VERBS or w.strip('.,;:"') in cls._MOVE_VERBS_3P
             for w in words
         )
-        return not ((first_person_move or third_person_move) and not quoted)
+        return (first_person_move or third_person_move) and not quoted
+
+    @classmethod
+    def _is_stationary_turn(
+        cls, classified_input: str, mc_aliases: frozenset = frozenset()
+    ) -> bool:
+        """True when the MC did not physically move this turn (→ inject the nudge).
+
+        Implements the sigil→mobility table (§3.5) across ALL thought blocks: the
+        turn is *mobile* iff any [MC action] block is a physical move (see
+        _action_body_is_move). Speech, likely-speech, inner monologue and attention
+        blocks are stationary. Neutral blocks ([REPLY LENGTH], [MC intent], bare
+        text) are ignored. If NO block is recognized (stationary or action), the
+        turn fails OPEN to not-stationary so a stray prefix never suppresses
+        navigate_to. Single-segment input reduces exactly to the legacy behavior.
+        """
+        saw_recognized = False
+        for block in cls._directive_blocks(classified_input):
+            s = block.lstrip()
+            if s.startswith(cls._STATIONARY_PREFIXES):
+                saw_recognized = True
+            elif s.startswith("[MC action]"):
+                saw_recognized = True
+                if cls._action_body_is_move(s, mc_aliases):
+                    return False  # any real move → mobile
+        if not saw_recognized:
+            return False  # unrecognized-only → fail open (treat as mobile)
+        return True
 
     def _compose_step2_user_content(
         self, classified_input: str, world_doc: str
@@ -1950,7 +2013,7 @@ class ProseStep:
                 tools=engine._bare_tool_schemas,
                 tool_choice="none",
                 temperature=STEP3_TEMPERATURE,
-                max_tokens=MAX_TOKENS_STEP3,
+                max_tokens=_prose_max_tokens(classified_input),
                 on_token=on_token,
                 retries=PROSE_RETRY_ATTEMPTS,
             )

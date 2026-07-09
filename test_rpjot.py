@@ -4829,7 +4829,108 @@ class TestCitationStamps(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12f. Sigil classification — play.classify_input (W8d / R4d)
+# 12f. Sigil segmentation — play.segment_input (mechanical splitter)
+# ---------------------------------------------------------------------------
+
+
+class TestSegmentInput(unittest.TestCase):
+    """The mechanical contract: one input line → ordered, typed thought segments.
+
+    Sigils (! @ ^ |) delimit ONLY when attached to the start of a token; `++`/
+    `+++` are standalone length meta-tokens; `*`/`"`/`'` are not sigils.
+    """
+
+    def _s(self, raw):
+        import play
+
+        return play.segment_input(raw)
+
+    def _kinds(self, raw):
+        return [(s.kind, s.text) for s in self._s(raw).segments]
+
+    # --- single sigils ---
+    def test_action_only(self):
+        self.assertEqual(self._kinds("!opens the door"), [("action", "opens the door")])
+
+    def test_attention_only(self):
+        self.assertEqual(self._kinds("@evie"), [("attention", "evie")])
+
+    def test_monologue_only(self):
+        self.assertEqual(self._kinds("^why is she here"), [("monologue", "why is she here")])
+
+    def test_default_speech_no_sigil(self):
+        self.assertEqual(self._kinds("hello everyone"), [("speech", "hello everyone")])
+
+    def test_dropped_sigils_are_literal_speech(self):
+        # `*` and a leading quote are no longer sigils → default speech, verbatim.
+        self.assertEqual(self._kinds("*waves"), [("speech", "*waves")])
+        self.assertEqual(self._kinds('"hello there"'), [("speech", '"hello there"')])
+
+    # --- multiple sigils split in order ---
+    def test_compound_splits_in_order(self):
+        segs = self._s('!draws sword @evie |aurora: "lets go!"')
+        self.assertEqual(
+            [(s.kind, s.text, s.speaker) for s in segs.segments],
+            [
+                ("action", "draws sword", None),
+                ("attention", "evie", None),
+                ("injection", '"lets go!"', "aurora"),
+            ],
+        )
+
+    def test_leading_speech_then_sigil(self):
+        self.assertEqual(
+            self._kinds("you'll regret this !steps back"),
+            [("speech", "you'll regret this"), ("action", "steps back")],
+        )
+
+    # --- attached-only rule: mid/end-word sigils are literal ---
+    def test_trailing_bang_is_not_a_sigil(self):
+        self.assertEqual(self._kinds("go! now"), [("speech", "go! now")])
+
+    def test_interior_quotes_do_not_split(self):
+        self.assertEqual(
+            self._kinds('!draws his sword "you\'ll regret this"'),
+            [("action", 'draws his sword "you\'ll regret this"')],
+        )
+
+    # --- narrative injection speaker parsing ---
+    def test_injection_with_speaker(self):
+        seg = self._s('|aurora: "lets go!"').segments[0]
+        self.assertEqual((seg.kind, seg.speaker, seg.text), ("injection", "aurora", '"lets go!"'))
+
+    def test_injection_without_speaker(self):
+        seg = self._s("|the wind howls through the hall").segments[0]
+        self.assertEqual((seg.kind, seg.speaker, seg.text), ("injection", None, "the wind howls through the hall"))
+
+    # --- reply-length meta tokens ---
+    def test_plus_plus_sets_level_1_and_is_stripped(self):
+        p = self._s("!draws sword ++")
+        self.assertEqual(p.length_level, 1)
+        self.assertEqual([(s.kind, s.text) for s in p.segments], [("action", "draws sword")])
+
+    def test_plus_plus_plus_sets_level_2(self):
+        p = self._s("+++ what happened here")
+        self.assertEqual(p.length_level, 2)
+        self.assertEqual([(s.kind, s.text) for s in p.segments], [("speech", "what happened here")])
+
+    def test_length_only_line_has_no_segments(self):
+        p = self._s("+++")
+        self.assertEqual((p.length_level, p.segments), (2, []))
+
+    def test_plus_inside_text_is_literal(self):
+        p = self._s("a++b and 2+2 stay literal")
+        self.assertEqual(p.length_level, 0)
+        self.assertEqual(self._kinds("a++b and 2+2 stay literal"), [("speech", "a++b and 2+2 stay literal")])
+
+    # --- empty / whitespace ---
+    def test_empty_and_whitespace(self):
+        self.assertEqual(self._s("").segments, [])
+        self.assertEqual(self._s("   ").segments, [])
+
+
+# ---------------------------------------------------------------------------
+# 12f. Sigil classification — play.classify_input (directive strings)
 # ---------------------------------------------------------------------------
 
 
@@ -4841,13 +4942,8 @@ class TestClassifyInput(unittest.TestCase):
 
         return play.classify_input(raw)
 
-    def test_speech_sigil(self):
-        out = self._c('"Hello there.')
-        self.assertTrue(out.startswith("[MC speaks aloud]"))
-        self.assertIn("Hello there.", out)
-
     def test_action_sigil(self):
-        out = self._c("*opens the heavy door")
+        out = self._c("!opens the heavy door")
         self.assertTrue(out.startswith("[MC action]"))
         self.assertIn("opens the heavy door", out)
 
@@ -4871,10 +4967,34 @@ class TestClassifyInput(unittest.TestCase):
         # granular-off — record_knowledge is the always-on core writer).
         self.assertIn("record_knowledge", out)
 
+    def test_injection_sigil_with_speaker(self):
+        out = self._c('|aurora: "lets go!"')
+        self.assertIn("[NARRATIVE INJECTION — aurora]", out)
+        self.assertIn('"lets go!"', out)
+        self.assertIn("canon this turn", out)
+
     def test_default_is_dialogue(self):
         out = self._c("hello everyone")
         self.assertIn("[MC — likely spoken aloud", out)
         self.assertIn("hello everyone", out)
+
+    def test_dropped_sigils_fall_through_to_speech(self):
+        # `*` and `"` are no longer sigils → default speech directive.
+        self.assertIn("[MC — likely spoken aloud", self._c("*opens the door"))
+        self.assertIn("[MC — likely spoken aloud", self._c('"Hello there."'))
+
+    def test_compound_emits_multiple_directives(self):
+        out = self._c("!draws sword @evie")
+        self.assertIn("[MC action]: draws sword", out)
+        self.assertIn("[MC attention", out)
+        # ordered: action block precedes the attention block
+        self.assertLess(out.index("[MC action]"), out.index("[MC attention"))
+
+    def test_reply_length_marker(self):
+        out = self._c("what now +++")
+        self.assertTrue(out.startswith("[REPLY LENGTH — much longer]"))
+        self.assertIn("[MC — likely spoken aloud", out)
+        self.assertNotIn("[REPLY LENGTH", self._c("what now"))
 
 
 # ---------------------------------------------------------------------------
@@ -4977,6 +5097,32 @@ class TestStationaryClassifier(unittest.TestCase):
     def test_empty_and_none_fail_open(self):
         self.assertFalse(self._stat(""))
         self.assertFalse(self._stat(None))
+
+    # --- multi-segment: any action-move block makes the whole turn mobile ---
+    def test_compound_mobile_when_a_later_action_moves(self):
+        import play
+
+        # attention block first, then an [MC action] that is a real move.
+        self.assertFalse(self._stat(play.classify_input("@evie !I walk to the door")))
+
+    def test_compound_stationary_when_no_block_moves(self):
+        import play
+
+        self.assertTrue(self._stat(play.classify_input("@evie !pick up the key")))
+
+    def test_reply_length_marker_is_neutral_for_mobility(self):
+        import play
+
+        # A [REPLY LENGTH …] block must not fail-open a genuine move to stationary.
+        self.assertFalse(self._stat(play.classify_input("!I walk to the door +++")))
+
+    # --- nudge fires when ANY block is nudge-worthy, not just the first ---
+    def test_nudge_fires_on_a_later_action_block(self):
+        import play
+        from rpjot import ComplianceStep
+
+        classified = play.classify_input("@evie !opens the chest")
+        self.assertTrue(ComplianceStep._should_nudge_zero_canonical(classified))
 
 
 # ---------------------------------------------------------------------------
