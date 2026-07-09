@@ -3669,7 +3669,7 @@ class TestCallLLMStreaming(unittest.TestCase):
         ]
         captured = {}
 
-        def fake_post(url, headers=None, json=None, stream=False):
+        def fake_post(url, headers=None, json=None, stream=False, timeout=None):
             captured["payload"] = json
             captured["stream_kw"] = stream
             return self._FakeResp(lines)
@@ -3693,7 +3693,7 @@ class TestCallLLMStreaming(unittest.TestCase):
 
         captured = {}
 
-        def fake_post(url, headers=None, json=None, stream=False):
+        def fake_post(url, headers=None, json=None, stream=False, timeout=None):
             captured["payload"] = json
             return self._FakeResp([])
 
