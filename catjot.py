@@ -1359,11 +1359,74 @@ class catjot_graphql(object):
 # START: LLM/MCP FUNCTIONS
 
 
-def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
+# Endpoint transport tuning (env-overridable). requests.Timeout subclasses
+# RequestException, so every existing endpoint error handler already covers a
+# timeout. Kept as read-at-import constants so slow local-model setups can raise
+# the read ceiling via the environment without a code change.
+LLM_CONNECT_TIMEOUT = float(getenv("openai_api_connect_timeout", "10"))
+LLM_READ_TIMEOUT = float(getenv("openai_api_read_timeout", "180"))
+LLM_RETRY_BACKOFF = float(getenv("openai_api_retry_backoff", "2"))
+
+# Last non-streaming response usage (FEATURE_TOGGLES / TOOL_TIMING Inc 0).
+# Set to the endpoint's {prompt_tokens, completion_tokens, ...} object after
+# every non-streaming call_llm, or None on a streaming call (SSE deltas carry
+# no usage without stream_options). A side channel rather than an added message
+# key, because response messages are re-sent verbatim and strict endpoints may
+# reject unknown keys. Safe under the single-slot endpoint invariant (no two
+# call_llm ever overlap): the reader consumes it right after the call returns.
+LAST_USAGE = None
+
+
+def _endpoint_config(model_override=""):
+    """Resolve ``(url, model, headers)`` for an endpoint request from the env.
+
+    Reads ``openai_api_url`` / ``openai_api_model`` / ``openai_api_key``.  The
+    Authorization header is omitted entirely when ``openai_api_key`` is falsy,
+    so keyless local models work.  *model_override* (the CLI ``-m`` flag) wins
+    over the env model when non-empty.
+    """
+    api_url = getenv("openai_api_url")
+    api_model = model_override or getenv("openai_api_model")
+    headers = {"Content-Type": "application/json"}
+    api_key = getenv("openai_api_key")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return api_url, api_model, headers
+
+
+def _is_retryable(exc):
+    """True if a failed request is worth one more attempt.
+
+    Connection resets and timeouts are transient; 429 and 5xx are the endpoint
+    asking us to back off.  A 4xx other than 429 is a request bug — never
+    retried, since replaying it would only fail the same way.
+    """
+    if isinstance(
+        exc,
+        (requests.exceptions.ConnectionError, requests.exceptions.Timeout),
+    ):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            return resp.status_code == 429 or 500 <= resp.status_code < 600
+    return False
+
+
+def call_llm(
+    messages,
+    tools=None,
+    temperature=0.2,
+    tool_choice="auto",
+    max_tokens=None,
+    on_token=None,
+    retries=0,
+):
     """Fire a single chat-completion request at the configured LLM endpoint.
 
     Reads credentials and model from environment variables:
-        openai_api_key   – Bearer token sent in the Authorization header.
+        openai_api_key   – Bearer token sent in the Authorization header
+                           (omitted when unset, for keyless local models).
         openai_api_url   – Full completion endpoint URL.
         openai_api_model – Model identifier string.
 
@@ -1372,34 +1435,101 @@ def call_llm(messages, tools=None, temperature=0.2, tool_choice="auto"):
     attach ``tool_calls`` at the choice level rather than inside the message
     dict; this function normalises that quirk before returning.
 
+    *max_tokens* caps the output budget for the call.  Pass it to prevent
+    thinking-heavy models from consuming the full output allowance on internal
+    reasoning before producing any prose or tool call.
+
+    *on_token* switches the request to SSE streaming: it is called with each
+    content delta as it arrives, and the return value is the same message
+    dict shape as the non-streaming path (content accumulated) — callers
+    cannot tell the difference.  Intended for prose-only calls; tool-call
+    deltas are not reassembled in streaming mode.
+
+    *retries* opts in to a single reattempt (with ``LLM_RETRY_BACKOFF`` seconds
+    of backoff) on a transient failure — connection reset, timeout, HTTP 429 or
+    5xx.  Defaults to 0: callers with their own degradation policy (e.g. the
+    roleplay engine's per-step fallbacks) must not inherit a hidden extra wait.
+    The streaming path is never retried — a partial stream may already have
+    reached the caller and cannot be safely replayed.
+
     Returns the ``message`` dict from ``choices[0]``.  Raises
     ``requests.HTTPError`` on a non-2xx response.
     """
-    api_key = getenv("openai_api_key")
-    api_url = getenv("openai_api_url")
-    api_model = getenv("openai_api_model")
+    api_url, api_model, headers = _endpoint_config()
 
     payload = {
         "model": api_model,
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
+    if on_token is not None:
+        payload["stream"] = True
+        resp = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT),
+        )
+        resp.raise_for_status()
+        parts = []
+        for raw_line in resp.iter_lines():
+            if not raw_line:
+                continue  # SSE keepalive
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: ") :]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+                delta = chunk["choices"][0].get("delta", {})
+            except (ValueError, KeyError, IndexError):
+                continue  # malformed chunk — skip, don't kill the stream
+            text = delta.get("content")
+            if text:
+                parts.append(text)
+                on_token(text)
+        global LAST_USAGE
+        LAST_USAGE = None  # streaming: no usage in SSE deltas
+        return {"role": "assistant", "content": "".join(parts)}
 
-    resp = requests.post(
-        api_url,
-        headers=headers,
-        json=payload,
-    )
-    resp.raise_for_status()
-    choice = resp.json()["choices"][0]
+    attempt = 0
+    while True:
+        try:
+            resp = requests.post(
+                api_url,
+                headers=headers,
+                json=payload,
+                timeout=(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT),
+            )
+            resp.raise_for_status()
+            break
+        except requests.exceptions.RequestException as exc:
+            if attempt < retries and _is_retryable(exc):
+                import sys
+                import time
+
+                attempt += 1
+                print(
+                    f"  [call_llm] transient endpoint failure ({exc}); "
+                    f"retry {attempt}/{retries} in {LLM_RETRY_BACKOFF}s",
+                    file=sys.stderr,
+                )
+                time.sleep(LLM_RETRY_BACKOFF)
+                continue
+            raise
+
+    body = resp.json()
+    globals()["LAST_USAGE"] = body.get("usage")
+    choice = body["choices"][0]
     msg = choice["message"]
 
     # Some servers put tool_calls at the choice level, not inside message
@@ -1440,47 +1570,99 @@ def register_tool(name, description, parameters, handler):
     TOOL_SCHEMAS.append(schema)
 
 
+def _required_params(tool_name):
+    """Return the list of required argument names for a registered tool.
+
+    Read from the tool's stored JSON schema; empty list if the tool or its
+    ``required`` array is absent.
+    """
+    for schema in TOOL_SCHEMAS:
+        if schema["function"]["name"] == tool_name:
+            return schema["function"].get("parameters", {}).get("required", [])
+    return []
+
+
+def _tool_error(tool_name, detail):
+    """Build the error-JSON string a broken tool call returns to the model."""
+    return json.dumps(
+        {
+            "error": f"tool {tool_name} failed: {detail}",
+            "hint": "check argument names and types against the tool schema",
+        }
+    )
+
+
 def dispatch_tool_call(tool_name, arguments_json):
-    """Look up a registered tool by name and invoke its handler.
+    """Look up a registered tool by name and invoke its handler defensively.
 
     *arguments_json* may arrive as a raw JSON string (as the LLM sends it) or
     as an already-parsed dict — both forms are accepted.
 
-    Returns the handler's string result, or an error string if the tool name
-    is not found in ``TOOL_HANDLERS``.
+    Every failure mode — unknown tool, malformed JSON, non-object arguments,
+    missing required keys, or an exception raised by the handler — is converted
+    to an error-JSON string with a corrective hint instead of raising, so the
+    model sees the error inside its tool loop and can retry.  A bad call must
+    never crash the ``jot llm`` session.  ``aggregate_note_ids`` skips non-list
+    tool results, so an error string is harmlessly ignored downstream.
     """
     handler = TOOL_HANDLERS.get(tool_name)
     if not handler:
-        return f"Error: unknown tool '{tool_name}'"
+        return json.dumps({"error": f"unknown tool: {tool_name}"})
 
-    if isinstance(arguments_json, str):
-        args = json.loads(arguments_json)
-    else:
-        args = arguments_json
+    try:
+        args = (
+            json.loads(arguments_json)
+            if isinstance(arguments_json, str)
+            else arguments_json
+        )
+    except (json.JSONDecodeError, TypeError) as exc:
+        return _tool_error(tool_name, f"{type(exc).__name__}: {exc}")
 
-    return handler(**args)
+    if not isinstance(args, dict):
+        return _tool_error(tool_name, "arguments must be a JSON object")
+
+    missing = [k for k in _required_params(tool_name) if k not in args]
+    if missing:
+        return _tool_error(
+            tool_name, f"missing required argument(s): {', '.join(missing)}"
+        )
+
+    try:
+        return handler(**args)
+    except Exception as exc:
+        return _tool_error(tool_name, f"{type(exc).__name__}: {exc}")
 
 
-# --- per-field search handlers, each returns a JSON list of Note.now IDs ---
+# --- note-field search: one factory, one tool ---
+
+# Field name (as the LLM supplies it) -> the SearchType that scans that field.
+# The four fields mirror the note's own searchable columns (see Note docstring):
+# tag and directory match on exact words; context and message are the
+# case-insensitive free-text fields.
+_FIELD_SEARCH_TYPES = {
+    "tag": SearchType.TAG,
+    "context": SearchType.CONTEXT_I,
+    "message": SearchType.MESSAGE_I,
+    "directory": SearchType.DIRECTORY,
+}
+_SEARCH_FIELDS = list(_FIELD_SEARCH_TYPES)
 
 
-def make_tag_search_handler():
-    """Return a handler that searches notes by the *tag* field.
+def make_field_search_handler(search_type):
+    """Return a handler that searches one note field via *search_type*.
 
     The returned callable splits *query* on whitespace and runs an OR search
     against ``Note.NOTEFILE`` for each word.  It collects the ``note.now``
     timestamps of every matching note (deduplicating order-preservingly) and
-    returns them as a JSON array string — the format expected by
-    ``aggregate_note_ids``.
-
-    Factory pattern used so the handler closes over nothing mutable and can
-    be safely registered at import time via ``register_tool``.
+    returns them as a JSON array string — the format ``aggregate_note_ids``
+    expects.  One factory covers all four note fields; the field is chosen by
+    the SearchType passed in.
     """
 
     def handler(query: str) -> str:
         seen = []
         for word in query.split():
-            for note in Note.match(Note.NOTEFILE, [(SearchType.TAG, word)], logic="or"):
+            for note in Note.match(Note.NOTEFILE, [(search_type, word)], logic="or"):
                 if note.now not in seen:
                     seen.append(note.now)
         return json.dumps(seen)
@@ -1488,125 +1670,74 @@ def make_tag_search_handler():
     return handler
 
 
-def make_context_search_handler():
-    """Return a handler that searches notes by the *context* field (case-insensitive).
+def make_search_notes_handler():
+    """Return the handler backing the single ``search_notes`` tool.
 
-    Identical contract to ``make_tag_search_handler`` but targets
-    ``SearchType.CONTEXT_I``.  Each word in *query* is searched independently
-    and the union of matching note IDs is returned as a JSON array.
+    Routes to a per-field handler based on the ``field`` argument.  An
+    unrecognised field returns an error-JSON string (the same shape
+    ``dispatch_tool_call`` produces) so the model can correct itself.
     """
+    field_handlers = {
+        field: make_field_search_handler(st)
+        for field, st in _FIELD_SEARCH_TYPES.items()
+    }
 
-    def handler(query: str) -> str:
-        seen = []
-        for word in query.split():
-            for note in Note.match(
-                Note.NOTEFILE, [(SearchType.CONTEXT_I, word)], logic="or"
-            ):
-                if note.now not in seen:
-                    seen.append(note.now)
-        return json.dumps(seen)
+    def handler(field: str, query: str) -> str:
+        sub = field_handlers.get(field)
+        if sub is None:
+            return json.dumps(
+                {
+                    "error": f"unknown field: {field}",
+                    "hint": "field must be one of: " + ", ".join(_SEARCH_FIELDS),
+                }
+            )
+        return sub(query)
 
     return handler
 
 
-def make_message_search_handler():
-    """Return a handler that searches notes by the *message* body (case-insensitive).
+# --- the search_notes tool schema ---
 
-    Identical contract to ``make_tag_search_handler`` but targets
-    ``SearchType.MESSAGE_I``.  The message body is typically the longest field
-    in a note, so queries here cover the bulk of free-form note content.
-    """
-
-    def handler(query: str) -> str:
-        seen = []
-        for word in query.split():
-            for note in Note.match(
-                Note.NOTEFILE, [(SearchType.MESSAGE_I, word)], logic="or"
-            ):
-                if note.now not in seen:
-                    seen.append(note.now)
-        return json.dumps(seen)
-
-    return handler
-
-
-def make_directory_search_handler():
-    """Return a handler that searches notes by the *directory* / pwd field.
-
-    Identical contract to ``make_tag_search_handler`` but targets
-    ``SearchType.DIRECTORY``.  Useful when the user query names a path
-    fragment like ``/home/user/projects/catjot``.
-    """
-
-    def handler(query: str) -> str:
-        seen = []
-        for word in query.split():
-            for note in Note.match(
-                Note.NOTEFILE, [(SearchType.DIRECTORY, word)], logic="or"
-            ):
-                if note.now not in seen:
-                    seen.append(note.now)
-        return json.dumps(seen)
-
-    return handler
-
-
-# --- shared parameter schema for all four search tools ---
-
-_SEARCH_PARAM_SCHEMA = {
+_SEARCH_NOTES_SCHEMA = {
     "type": "object",
     "properties": {
+        "field": {
+            "type": "string",
+            "enum": list(_FIELD_SEARCH_TYPES),
+            "description": (
+                "Which note field to search: 'tag' (space-separated labels), "
+                "'context' (the command or summary that produced the note), "
+                "'message' (the free-form note body), or 'directory' (the path "
+                "the note was written from)."
+            ),
+        },
         "query": {
             "type": "string",
-            "description": "Space-separated search terms to look up in this field.",
-        }
+            "description": "Space-separated search terms to look up in that field.",
+        },
     },
-    "required": ["query"],
+    "required": ["field", "query"],
 }
 
 
 def register_search_tools():
-    """Register the four field-search tools used by ``jot llm``.
+    """Register the single ``search_notes`` tool used by ``jot llm``.
 
-    Called lazily from ``run_tool_loop`` so simply importing this module
-    does not mutate the global tool registry.  Idempotent — calling it
-    repeatedly only updates the entries already present.
+    Called lazily from ``run_tool_loop`` so simply importing this module does
+    not mutate the global tool registry.  Idempotent — re-registration replaces
+    the existing entry in place.
     """
     register_tool(
-        name="search_by_tag",
+        name="search_notes",
         description=(
-            "Search catjot notes by the tag field. "
-            "Returns a JSON list of note IDs (Note.now values)."
+            "Search catjot notes. A note has four searchable fields — tag, "
+            "context, message body, and the directory it was written from — and "
+            "this tool searches one of them per call, selected by the 'field' "
+            "argument. Returns a JSON list of note IDs (Note.now values). Call "
+            "it once for each field to cover the whole note."
         ),
-        parameters=_SEARCH_PARAM_SCHEMA,
-        handler=make_tag_search_handler(),
-    )
-    register_tool(
-        name="search_by_context",
-        description=(
-            "Search catjot notes by the context field (case-insensitive). "
-            "Returns a JSON list of note IDs (Note.now values)."
-        ),
-        parameters=_SEARCH_PARAM_SCHEMA,
-        handler=make_context_search_handler(),
-    )
-    register_tool(
-        name="search_by_message",
-        description=(
-            "Search catjot notes by the message body (case-insensitive). "
-            "Returns a JSON list of note IDs (Note.now values)."
-        ),
-        parameters=_SEARCH_PARAM_SCHEMA,
-        handler=make_message_search_handler(),
-    )
-    register_tool(
-        name="search_by_directory",
-        description=(
-            "Search catjot notes by the directory/pwd field. "
-            "Returns a JSON list of note IDs (Note.now values)."
-        ),
-        parameters=_SEARCH_PARAM_SCHEMA,
-        handler=make_directory_search_handler(),
+        parameters=_SEARCH_NOTES_SCHEMA,
+        handler=make_search_notes_handler(),
     )
 
 
@@ -1666,30 +1797,51 @@ def fetch_notes_by_ids(note_ids):
         return results
 
 
+def _searched_field(fn_name, fn_args):
+    """Return the note field a search_notes call covered, or None.
+
+    Best-effort parse of the tool arguments (raw JSON string or dict); a
+    malformed or non-search_notes call contributes no coverage.
+    """
+    if fn_name != "search_notes":
+        return None
+    try:
+        parsed = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, dict):
+        field = parsed.get("field")
+        if field in _FIELD_SEARCH_TYPES:
+            return field
+    return None
+
+
 def run_tool_loop(user_query, max_iterations=10):
     """Drive the agentic search-and-answer loop for ``jot llm``.
 
     The loop enforces a protocol:
 
-    1. The system prompt instructs the LLM to call *all four* search tools
-       (tag, context, message, directory) before drawing conclusions.
+    1. The system prompt instructs the LLM to call ``search_notes`` once for
+       each of the note's four fields (tag, context, message, directory) before
+       drawing conclusions.
     2. Each iteration calls ``call_llm`` with the current message history and
-       the full ``TOOL_SCHEMAS`` list.
-    3. If the response contains ``tool_calls``, each call is dispatched via
-       ``dispatch_tool_call`` and the result is appended as a ``role=tool``
-       message.
-    4. After every iteration the set of tool names called so far is compared
-       against ``REQUIRED_TOOLS``.  Once all four have fired, the loop exits the
-       search phase: ``aggregate_note_ids`` + ``fetch_notes_by_ids`` hydrate the
-       matched notes, a final user turn presents the full note data, and one last
+       the registered ``search_notes`` schema.
+    3. Each tool call is dispatched via ``dispatch_tool_call``; the result is
+       appended as a ``role=tool`` message and the searched field is recorded.
+    4. Once all four fields have been searched, the loop exits the search phase:
+       ``aggregate_note_ids`` + ``fetch_notes_by_ids`` hydrate the matched
+       notes, a final user turn presents the full note data, and one last
        ``call_llm`` call (no tools) produces the human-readable summary.
-    5. If the LLM stops calling tools before all four have run it has broken
-       protocol — the loop returns whatever it said verbatim.
+    5. If the model stops calling tools before covering all four fields, it is
+       nudged once with the fields it still owes; a second early stop returns
+       whatever it said verbatim.
     6. If ``max_iterations`` is exhausted without completing, a polite failure
        string is returned instead of raising.
 
-    The ``openai_api_sysrole`` environment variable is appended to the system
-    prompt so operators can inject persona or constraint instructions.
+    ``call_llm`` runs with ``retries=1`` here so a single transient endpoint
+    failure does not abandon the search.  The ``openai_api_sysrole`` env var is
+    appended to the system prompt so operators can inject persona or constraint
+    instructions.
 
     Returns a plain-text answer string suitable for ``print_ascii_cat_with_text``.
     """
@@ -1698,16 +1850,16 @@ def run_tool_loop(user_query, max_iterations=10):
 
     system_prompt = (
         "You are a helpful cat assistant with access to a notetaking system called catjot. "
-        "To answer the user's query you MUST call ALL FOUR of the following search tools "
-        "before drawing any conclusions:\n"
-        "  1. search_by_tag       - searches the tag field\n"
-        "  2. search_by_context   - searches the context field\n"
-        "  3. search_by_message   - searches the message body\n"
-        "  4. search_by_directory - searches the directory/pwd field\n"
-        "Each tool returns a JSON list of note IDs. Call all four tools using the relevant "
-        "search terms extracted from the user query. Do not skip any tool, even if you think "
-        "it is unlikely to return results. "
-        "Once all four tools have been called, stop making tool calls and wait. "
+        "Each note has four searchable fields:\n"
+        "  - tag        : space-separated labels\n"
+        "  - context    : the command or summary that produced the note\n"
+        "  - message    : the free-form note body\n"
+        "  - directory  : the path the note was written from\n"
+        "To answer the user's query you MUST call the search_notes tool once for EACH of "
+        "these four fields before drawing any conclusions, passing the relevant search "
+        "terms extracted from the user query. Do not skip a field even if you think it is "
+        "unlikely to return results. Each call returns a JSON list of note IDs. "
+        "Once all four fields have been searched, stop making tool calls and wait. "
         "The system will aggregate the results and provide you with the full matching notes "
         "for your final summary.\n"
         f"{CATGPT_ROLE}"
@@ -1718,51 +1870,72 @@ def run_tool_loop(user_query, max_iterations=10):
         {"role": "user", "content": user_query},
     ]
 
-    REQUIRED_TOOLS = {
-        "search_by_tag",
-        "search_by_context",
-        "search_by_message",
-        "search_by_directory",
-    }
-
-    for i in range(max_iterations):
-        response_msg = call_llm(messages, tools=TOOL_SCHEMAS, tool_choice="auto")
+    fields_searched = set()
+    nudged = False
+    bound = max_iterations
+    i = 0
+    while i < bound:
+        response_msg = call_llm(
+            messages, tools=TOOL_SCHEMAS, tool_choice="auto", retries=1
+        )
 
         tool_calls = response_msg.get("tool_calls")
-        if not tool_calls:
-            # LLM stopped calling tools before all four were used - return whatever it said
-            return response_msg.get("content", "")
+        if tool_calls:
+            # Append the assistant message (with tool_calls) to history
+            messages.append(response_msg)
 
-        # Append the assistant message (with tool_calls) to history
-        messages.append(response_msg)
+            for idx, tc in enumerate(tool_calls):
+                fn_name = tc["function"]["name"]
+                fn_args = tc["function"]["arguments"]
+                # Fall back to a per-index id so two same-name calls in one round
+                # never collide when a provider omits tool-call ids.
+                tool_id = tc.get("id") or f"{fn_name}_{idx}"
 
-        # Execute each tool call and append results
-        for tc in tool_calls:
-            fn_name = tc["function"]["name"]
-            fn_args = tc["function"]["arguments"]
-            tool_id = tc.get("id", fn_name)
+                print(f"  [step {i+1}] calling tool: {fn_name}")
 
-            print(f"  [step {i+1}] calling tool: {fn_name}")
+                result = dispatch_tool_call(fn_name, fn_args)
 
-            result = dispatch_tool_call(fn_name, fn_args)
+                field = _searched_field(fn_name, fn_args)
+                if field is not None:
+                    fields_searched.add(field)
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "content": str(result),
-                }
-            )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": str(result),
+                    }
+                )
+        else:
+            # No tool calls this round.
+            missing = [f for f in _SEARCH_FIELDS if f not in fields_searched]
+            if missing:
+                if not nudged:
+                    # One corrective round: name the fields still owed and give
+                    # the loop room for the reply (bound bumped by exactly one).
+                    nudged = True
+                    bound += 1
+                    messages.append(response_msg)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "You have not yet searched these fields: "
+                                + ", ".join(missing)
+                                + ". Call search_notes once for each of them "
+                                "before concluding."
+                            ),
+                        }
+                    )
+                    i += 1
+                    continue
+                # Second stop with fields still missing — return verbatim.
+                return response_msg.get("content", "")
+            # All fields covered though no tool call this round — fall through
+            # to the summary pass below.
 
-        # Determine which tool names have been called across the full history
-        tool_names_called = set()
-        for msg in messages:
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls") or []:
-                    tool_names_called.add(tc["function"]["name"])
-
-        if REQUIRED_TOOLS.issubset(tool_names_called):
-            # All four tools have reported - aggregate IDs and do final LLM pass
+        if set(_SEARCH_FIELDS).issubset(fields_searched):
+            # All four fields searched - aggregate IDs and do final LLM pass
             note_ids = aggregate_note_ids(messages)
             notes = fetch_notes_by_ids(note_ids)
 
@@ -1770,8 +1943,8 @@ def run_tool_loop(user_query, max_iterations=10):
                 {
                     "role": "user",
                     "content": (
-                        "All four searches are complete. "
-                        "Here are the matching notes found across all search fields:\n"
+                        "All four field searches are complete. "
+                        "Here are the matching notes found across all fields:\n"
                         + json.dumps(notes, indent=2)
                         + "\n\nPlease provide a final summary of these notes that is "
                         "relevant to the original query, noting which fields each match "
@@ -1780,8 +1953,10 @@ def run_tool_loop(user_query, max_iterations=10):
                 }
             )
 
-            final_msg = call_llm(messages, tools=None)
+            final_msg = call_llm(messages, tools=None, retries=1)
             return final_msg.get("content", "")
+
+        i += 1
 
     return "Max iterations reached without a final answer."
 
@@ -1812,21 +1987,18 @@ def send_prompt_to_endpoint(messages, model_name, mode):
         for a typewriter effect.  On network failure the generator yields
         ``"[Error]"`` rather than raising.
     """
-    api_key = getenv("openai_api_key")
-    api_url = getenv("openai_api_url")
-    api_model = getenv("openai_api_model")
-    if model_name:  # -m MODEL shall take precedence
-        api_model = model_name
-    headers = {"Content-Type": "application/json"}
-
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    api_url, api_model, headers = _endpoint_config(model_name)
 
     if mode == "full":
         data = {"model": api_model, "messages": messages}
 
         try:
-            response = requests.post(api_url, headers=headers, json=data)
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=data,
+                timeout=(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT),
+            )
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -1842,7 +2014,11 @@ def send_prompt_to_endpoint(messages, model_name, mode):
         def stream_response():
             try:
                 with requests.post(
-                    api_url, headers=headers, json=data, stream=True
+                    api_url,
+                    headers=headers,
+                    json=data,
+                    stream=True,
+                    timeout=(LLM_CONNECT_TIMEOUT, LLM_READ_TIMEOUT),
                 ) as response:
                     response.raise_for_status()
                     for line in response.iter_lines():

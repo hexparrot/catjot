@@ -9,9 +9,11 @@ __status__ = "Development"
 import unittest
 import sys
 import os
+import json
 from time import time
 from datetime import datetime
 from os import getcwd, remove, environ
+from unittest.mock import patch, MagicMock
 from catjot import Note, NoteContext, SearchType
 
 TMP_CATNOTE = "tests/.catjot"
@@ -1159,6 +1161,363 @@ class TestTaker(unittest.TestCase):
         n2 = Note()
         n1.tag = "modified"
         self.assertEqual(n2.tag, "")
+
+
+class _RecordingLLM:
+    """Stand-in for call_llm: returns scripted responses, snapshots each call's
+    message history so tests can inspect what the loop appended."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []  # snapshot of `messages` at each invocation
+
+    def __call__(self, messages, **kwargs):
+        self.calls.append([dict(m) for m in messages])
+        return self.responses.pop(0)
+
+
+def _tool_call(field, query, call_id=None):
+    """Build an assistant message carrying one search_notes tool call."""
+    tc = {
+        "function": {
+            "name": "search_notes",
+            "arguments": json.dumps({"field": field, "query": query}),
+        }
+    }
+    if call_id is not None:
+        tc["id"] = call_id
+    return tc
+
+
+class _FakeResp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            err = requests.exceptions.HTTPError(f"HTTP {self.status_code}")
+            err.response = self
+            raise err
+
+    def json(self):
+        return self._payload
+
+
+_GOOD_LLM_PAYLOAD = {
+    "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+}
+
+
+class TestDispatchGuard(unittest.TestCase):
+    """dispatch_tool_call must convert every failure to error-JSON, never raise."""
+
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+        catjot.register_search_tools()
+
+    def test_unknown_tool_returns_error_json(self):
+        out = self.catjot.dispatch_tool_call("no_such_tool", "{}")
+        parsed = json.loads(out)
+        self.assertIn("unknown tool", parsed["error"])
+
+    def test_malformed_json_returns_error_json(self):
+        out = self.catjot.dispatch_tool_call("search_notes", "{not json")
+        parsed = json.loads(out)
+        self.assertIn("failed", parsed["error"])
+        self.assertIn("hint", parsed)
+
+    def test_non_object_arguments_returns_error_json(self):
+        out = self.catjot.dispatch_tool_call("search_notes", "[1, 2, 3]")
+        parsed = json.loads(out)
+        self.assertIn("must be a JSON object", parsed["error"])
+
+    def test_missing_required_argument_returns_error_json(self):
+        # search_notes requires field + query; supply only field
+        out = self.catjot.dispatch_tool_call(
+            "search_notes", json.dumps({"field": "tag"})
+        )
+        parsed = json.loads(out)
+        self.assertIn("missing required argument", parsed["error"])
+        self.assertIn("query", parsed["error"])
+
+    def test_handler_exception_returns_error_json(self):
+        def boom(**kwargs):
+            raise RuntimeError("kaboom")
+
+        self.catjot.register_tool(
+            name="boom_tool",
+            description="explodes",
+            parameters={"type": "object", "properties": {}},
+            handler=boom,
+        )
+        out = self.catjot.dispatch_tool_call("boom_tool", "{}")
+        parsed = json.loads(out)
+        self.assertIn("RuntimeError", parsed["error"])
+        self.assertIn("kaboom", parsed["error"])
+
+
+class TestFieldSearchHandlers(unittest.TestCase):
+    """One factory covers all four fields; results match the fixture."""
+
+    def setUp(self):
+        self._orig_notefile = Note.NOTEFILE
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def tearDown(self):
+        Note.NOTEFILE = self._orig_notefile
+
+    def _search(self, field, query):
+        from catjot import make_field_search_handler, _FIELD_SEARCH_TYPES
+
+        handler = make_field_search_handler(_FIELD_SEARCH_TYPES[field])
+        return json.loads(handler(query))
+
+    def test_tag_field(self):
+        self.assertEqual(self._search("tag", "project1"), [1694747662])
+
+    def test_context_field(self):
+        self.assertEqual(self._search("context", "adoption"), [1694747662])
+
+    def test_message_field(self):
+        self.assertEqual(self._search("message", "hello"), [1694747662])
+
+    def test_directory_field(self):
+        self.assertEqual(
+            self._search("directory", "/home/user"),
+            [1694747662, 1694747797, 1694747841, 1694748108],
+        )
+
+    def test_search_notes_handler_routes_by_field(self):
+        from catjot import make_search_notes_handler
+
+        handler = make_search_notes_handler()
+        self.assertEqual(json.loads(handler("tag", "project1")), [1694747662])
+
+    def test_search_notes_handler_unknown_field(self):
+        from catjot import make_search_notes_handler
+
+        handler = make_search_notes_handler()
+        parsed = json.loads(handler("bogus", "x"))
+        self.assertIn("unknown field", parsed["error"])
+
+
+class TestSearchNotesRegistration(unittest.TestCase):
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+
+    def test_registers_single_tool_with_field_enum(self):
+        self.catjot.register_search_tools()
+        names = [s["function"]["name"] for s in self.catjot.TOOL_SCHEMAS]
+        self.assertIn("search_notes", names)
+        schema = next(
+            s for s in self.catjot.TOOL_SCHEMAS
+            if s["function"]["name"] == "search_notes"
+        )
+        enum = schema["function"]["parameters"]["properties"]["field"]["enum"]
+        self.assertEqual(
+            set(enum), {"tag", "context", "message", "directory"}
+        )
+
+    def test_registration_is_idempotent(self):
+        self.catjot.register_search_tools()
+        before = sum(
+            1 for s in self.catjot.TOOL_SCHEMAS
+            if s["function"]["name"] == "search_notes"
+        )
+        self.catjot.register_search_tools()
+        after = sum(
+            1 for s in self.catjot.TOOL_SCHEMAS
+            if s["function"]["name"] == "search_notes"
+        )
+        self.assertEqual(before, 1)
+        self.assertEqual(after, 1)
+
+
+class TestRunToolLoop(unittest.TestCase):
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+        self._orig_notefile = Note.NOTEFILE
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def tearDown(self):
+        Note.NOTEFILE = self._orig_notefile
+
+    def test_all_four_fields_then_summary(self):
+        response = {
+            "role": "assistant",
+            "tool_calls": [
+                _tool_call("tag", "project1"),
+                _tool_call("context", "adoption"),
+                _tool_call("message", "hello"),
+                _tool_call("directory", "/home/user"),
+            ],
+        }
+        summary = {"role": "assistant", "content": "FINAL SUMMARY"}
+        llm = _RecordingLLM([response, summary])
+        with patch.object(self.catjot, "call_llm", llm):
+            out = self.catjot.run_tool_loop("find project1")
+        self.assertEqual(out, "FINAL SUMMARY")
+        # Second call is the no-tools summary pass; its history carries the
+        # hydrated notes block.
+        self.assertEqual(len(llm.calls), 2)
+        final_history = llm.calls[1]
+        self.assertTrue(
+            any("field searches are complete" in m.get("content", "")
+                for m in final_history)
+        )
+
+    def test_tool_call_ids_are_unique_without_provider_ids(self):
+        response = {
+            "role": "assistant",
+            "tool_calls": [
+                _tool_call("tag", "project1"),
+                _tool_call("context", "adoption"),
+                _tool_call("message", "hello"),
+                _tool_call("directory", "/home/user"),
+            ],
+        }
+        llm = _RecordingLLM([response, {"role": "assistant", "content": "ok"}])
+        with patch.object(self.catjot, "call_llm", llm):
+            self.catjot.run_tool_loop("q")
+        final_history = llm.calls[1]
+        tool_ids = [
+            m["tool_call_id"] for m in final_history if m.get("role") == "tool"
+        ]
+        self.assertEqual(len(tool_ids), 4)
+        self.assertEqual(len(set(tool_ids)), 4)
+
+    def test_early_stop_nudges_missing_fields_then_completes(self):
+        stop_early = {"role": "assistant", "content": "I'm done early"}
+        finish = {
+            "role": "assistant",
+            "tool_calls": [
+                _tool_call("tag", "project1"),
+                _tool_call("context", "adoption"),
+                _tool_call("message", "hello"),
+                _tool_call("directory", "/home/user"),
+            ],
+        }
+        summary = {"role": "assistant", "content": "SUMMARY"}
+        llm = _RecordingLLM([stop_early, finish, summary])
+        with patch.object(self.catjot, "call_llm", llm):
+            out = self.catjot.run_tool_loop("q")
+        self.assertEqual(out, "SUMMARY")
+        # The second call's history must contain the nudge naming all 4 fields.
+        nudge_history = llm.calls[1]
+        nudge = nudge_history[-1]["content"]
+        self.assertIn("not yet searched", nudge)
+        for field in ("tag", "context", "message", "directory"):
+            self.assertIn(field, nudge)
+
+    def test_second_early_stop_returns_verbatim(self):
+        stop1 = {"role": "assistant", "content": "first stop"}
+        stop2 = {"role": "assistant", "content": "VERBATIM ANSWER"}
+        llm = _RecordingLLM([stop1, stop2])
+        with patch.object(self.catjot, "call_llm", llm):
+            out = self.catjot.run_tool_loop("q")
+        self.assertEqual(out, "VERBATIM ANSWER")
+
+    def test_max_iterations_exhausted(self):
+        # Every round searches only the tag field, so the four-field bar is
+        # never met and the loop runs out of iterations.
+        def only_tag(messages, **kwargs):
+            return {
+                "role": "assistant",
+                "tool_calls": [_tool_call("tag", "project1")],
+            }
+
+        with patch.object(self.catjot, "call_llm", side_effect=only_tag):
+            out = self.catjot.run_tool_loop("q", max_iterations=3)
+        self.assertEqual(out, "Max iterations reached without a final answer.")
+
+
+class TestCallLLMTransport(unittest.TestCase):
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+
+    def _env(self, with_key):
+        env = {
+            "openai_api_url": "http://localhost:9/v1/chat",
+            "openai_api_model": "test-model",
+        }
+        if with_key:
+            env["openai_api_key"] = "secret"
+        return env
+
+    def test_no_auth_header_when_key_unset(self):
+        with patch.dict(os.environ, self._env(with_key=False), clear=False):
+            os.environ.pop("openai_api_key", None)
+            with patch.object(
+                self.catjot.requests, "post",
+                return_value=_FakeResp(_GOOD_LLM_PAYLOAD),
+            ) as post:
+                self.catjot.call_llm([{"role": "user", "content": "hi"}])
+        headers = post.call_args.kwargs["headers"]
+        self.assertNotIn("Authorization", headers)
+
+    def test_auth_header_present_when_key_set(self):
+        with patch.dict(os.environ, self._env(with_key=True), clear=False):
+            with patch.object(
+                self.catjot.requests, "post",
+                return_value=_FakeResp(_GOOD_LLM_PAYLOAD),
+            ) as post:
+                self.catjot.call_llm([{"role": "user", "content": "hi"}])
+        headers = post.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer secret")
+
+    def test_timeout_passed_to_request(self):
+        with patch.dict(os.environ, self._env(with_key=True), clear=False):
+            with patch.object(
+                self.catjot.requests, "post",
+                return_value=_FakeResp(_GOOD_LLM_PAYLOAD),
+            ) as post:
+                self.catjot.call_llm([{"role": "user", "content": "hi"}])
+        self.assertIn("timeout", post.call_args.kwargs)
+
+    def test_retry_once_on_transient_then_succeeds(self):
+        import requests
+
+        orig_backoff = self.catjot.LLM_RETRY_BACKOFF
+        self.catjot.LLM_RETRY_BACKOFF = 0
+        try:
+            with patch.dict(os.environ, self._env(with_key=True), clear=False):
+                post = MagicMock(
+                    side_effect=[
+                        requests.exceptions.ConnectionError("reset"),
+                        _FakeResp(_GOOD_LLM_PAYLOAD),
+                    ]
+                )
+                with patch.object(self.catjot.requests, "post", post):
+                    msg = self.catjot.call_llm(
+                        [{"role": "user", "content": "hi"}], retries=1
+                    )
+            self.assertEqual(post.call_count, 2)
+            self.assertEqual(msg["content"], "hi")
+        finally:
+            self.catjot.LLM_RETRY_BACKOFF = orig_backoff
+
+    def test_no_retry_by_default(self):
+        import requests
+
+        with patch.dict(os.environ, self._env(with_key=True), clear=False):
+            post = MagicMock(
+                side_effect=requests.exceptions.ConnectionError("reset")
+            )
+            with patch.object(self.catjot.requests, "post", post):
+                with self.assertRaises(requests.exceptions.ConnectionError):
+                    self.catjot.call_llm([{"role": "user", "content": "hi"}])
+        self.assertEqual(post.call_count, 1)
 
 
 if __name__ == "__main__":
