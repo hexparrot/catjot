@@ -749,6 +749,15 @@ MAX_TOKENS_STEP1 = 4_096  # encyclopedic lookup — needs room to gather
 MAX_ITER_STEP1_DELTA = 3  # seeded delta run — most lookups already in the seed
 MAX_TOKENS_STEP3 = 3_072  # prose — invest output budget here
 STEP3_TEMPERATURE = 1.2  # higher than legacy NARRATIVE_TEMPERATURE for richer variance
+# Prose is the one step whose LLM failure is fatal, not degradable: steps 1-2
+# fall back (deterministic world doc / partial canon) and still yield a turn,
+# but a blip here raises LLMError and discards a fully-computed turn's narrative.
+# So step 3 alone opts into call_llm's transient retry (connection reset / timeout
+# / 429 / 5xx). Steps 1-2 stay at the retries=0 default — they degrade gracefully
+# and must not pay a retry wait on the common failure path. call_llm never retries
+# the streaming path, so this is a no-op while streaming and only rescues the
+# non-streaming prose call (RPJOT_STREAM off, non-interactive, tests).
+PROSE_RETRY_ATTEMPTS = 1
 
 # ---------------------------------------------------------------------------
 # Tool decorator
@@ -1857,7 +1866,9 @@ class ProseStep:
         # still the strip_think_tags result of the FULL accumulated text —
         # streaming shapes only what is shown live. On a mid-stream
         # RequestException, partial prose may already be on screen; the
-        # LLMError surfaces after it, same contract as today.
+        # LLMError surfaces after it, same contract as today. call_llm never
+        # retries the streaming branch (a partial stream can't be replayed), so
+        # PROSE_RETRY_ATTEMPTS only takes effect on the non-streaming path below.
         engine._prose_streamed = False
         on_token = None
         if engine.prose_stream_cb is not None:
@@ -1885,6 +1896,7 @@ class ProseStep:
                 temperature=STEP3_TEMPERATURE,
                 max_tokens=MAX_TOKENS_STEP3,
                 on_token=on_token,
+                retries=PROSE_RETRY_ATTEMPTS,
             )
         except requests.exceptions.RequestException as exc:
             raise LLMError(str(exc)) from None

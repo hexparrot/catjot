@@ -3884,6 +3884,78 @@ class TestProseStreaming(unittest.TestCase):
         self.assertIsNone(eng.prose_stream_cb)
 
 
+class TestProseRetry(unittest.TestCase):
+    """Step 3 is the only step whose LLM failure is fatal (LLMError aborts the
+    turn), so it opts into call_llm's transient retry — unlike steps 1-2, which
+    degrade gracefully and stay at retries=0."""
+
+    def _run_step3(self, eng):
+        return eng._prose_step.run(
+            "[MC action]: I wave",
+            "WORLD STATE: a room",
+            [],
+            [],
+            [{"role": "system", "content": "prose"}],
+        )
+
+    def test_step3_passes_prose_retry_attempts(self):
+        import rpjot as rpjot_module
+
+        captured = {}
+
+        def fake_call_llm(messages, **kwargs):
+            captured["retries"] = kwargs.get("retries")
+            return {"role": "assistant", "content": "The lamp gutters."}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="manor", people={"player"})
+        eng.init_pipeline()
+        try:
+            narrative = self._run_step3(eng)
+        finally:
+            rpjot_module.call_llm = original
+        self.assertEqual(narrative, "The lamp gutters.")
+        self.assertEqual(captured["retries"], rpjot_module.PROSE_RETRY_ATTEMPTS)
+        self.assertGreaterEqual(rpjot_module.PROSE_RETRY_ATTEMPTS, 1)
+
+    def test_transient_blip_on_nonstreaming_prose_is_retried(self):
+        # End-to-end through the REAL catjot.call_llm: a single connection reset
+        # on the non-streaming prose call must be retried, not fatal.
+        import os
+        import catjot
+        import requests
+        from unittest.mock import patch, MagicMock
+
+        eng = _make_engine(location="manor", people={"player"})
+        eng.init_pipeline()  # built offline before any endpoint is mocked
+
+        good = MagicMock()
+        good.raise_for_status = lambda: None
+        good.json = lambda: {
+            "choices": [
+                {"message": {"role": "assistant", "content": "The hall stills."}}
+            ]
+        }
+        post = MagicMock(
+            side_effect=[requests.exceptions.ConnectionError("reset"), good]
+        )
+        env = {
+            "openai_api_url": "http://localhost:9/v1/chat",
+            "openai_api_model": "test-model",
+        }
+        orig_backoff = catjot.LLM_RETRY_BACKOFF
+        catjot.LLM_RETRY_BACKOFF = 0
+        try:
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(catjot.requests, "post", post):
+                    narrative = self._run_step3(eng)
+        finally:
+            catjot.LLM_RETRY_BACKOFF = orig_backoff
+        self.assertEqual(post.call_count, 2)  # failed once, retried, succeeded
+        self.assertEqual(narrative, "The hall stills.")
+
+
 # ---------------------------------------------------------------------------
 # 12i. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
