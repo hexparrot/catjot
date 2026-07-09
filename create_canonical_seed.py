@@ -12,7 +12,7 @@ tool conventions so the game engine can find everything:
   twist        — narrator-only secrets (system-prompt seed)
   backstory    — common tag on every character note (system-prompt roster)
 
-Output: tests/bellvue_canonical.jot
+Output: local/canonical/bellvue_canonical.jot (gitignored generated seed)
 Run:    python create_canonical_seed.py
 """
 
@@ -26,7 +26,10 @@ import rpjot as _rpjot_module
 from catjot import Note
 from rpjot import RPJotEngine
 
-OUTPUT = os.path.join(_HERE, "tests", "bellvue_canonical.jot")
+# Generated seed → gitignored local/canonical/ (tests/ is read-only; the source
+# lore in tests/bellvue.jot is only read, never written).
+OUTPUT = os.path.join(_HERE, "local", "canonical", "bellvue_canonical.jot")
+os.makedirs(os.path.dirname(OUTPUT), exist_ok=True)
 
 # ── wire everything to the output file before any Note or ContextBundle runs ──
 with open(OUTPUT, "w"):

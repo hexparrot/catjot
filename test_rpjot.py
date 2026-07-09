@@ -33,8 +33,9 @@ from rpjot import (
     _msg_toks,
 )
 
-TMP_CATNOTE = "tests/.catjot"
-FIXED_CATNOTE = "tests/bellvue.jot"
+os.makedirs("local/scratch", exist_ok=True)
+TMP_CATNOTE = "local/scratch/.catjot"  # writable scratch — tests/ is read-only
+FIXED_CATNOTE = "tests/bellvue.jot"  # read-only fixture
 Note.NOTEFILE = FIXED_CATNOTE
 
 
@@ -51,6 +52,32 @@ def _make_engine(location="test-chamber", people=None):
     )
     engine.register_all_tools()
     return engine
+
+
+def _use_scratch_notefile(testcase):
+    """Point Note.NOTEFILE at a fresh temp .jot for the duration of a test.
+
+    Engine tool calls (navigate_to, save_*, record_event) append to Note.NOTEFILE.
+    Classes that exercise those tools must NOT let writes fall through to the
+    read-only tests/bellvue.jot default — route them to gitignored local/scratch/.
+    Registers addCleanup, so it composes with any existing setUp without a tearDown.
+    """
+    import tempfile
+
+    saved = Note.NOTEFILE
+    fd, tmp = tempfile.mkstemp(suffix=".jot", dir="local/scratch")
+    os.close(fd)
+    Note.NOTEFILE = tmp
+
+    def _restore():
+        Note.NOTEFILE = saved
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    testcase.addCleanup(_restore)
+    return tmp
 
 
 def _base_messages(system_content=None):
@@ -342,6 +369,7 @@ class TestToolHandlerOutput(unittest.TestCase):
     """Real tool handlers must return valid JSON with the correct shape."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="test-chamber",
             people={"player", "alice"},
@@ -426,11 +454,24 @@ class TestToolHandlerOutput(unittest.TestCase):
         self.assertIsInstance(result, str)
 
     def test_record_event_result_starts_with_prefix(self):
-        result = self.engine._tool_record_event(
-            description="Bob lit the torch.",
-            tags="bob torch",
-        )
-        self.assertTrue(result.startswith("Event recorded:"))
+        # Isolate from the shared fixture: SCENE_MOVER dedup makes record_event
+        # idempotent, and the committed bellvue.jot already contains this beat
+        # many times over — a fresh notefile guarantees a first, non-dup write.
+        import tempfile
+
+        saved = Note.NOTEFILE
+        fd, tmp = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = tmp
+        try:
+            result = self.engine._tool_record_event(
+                description="Bob lit the torch.",
+                tags="bob torch",
+            )
+            self.assertTrue(result.startswith("Event recorded:"))
+        finally:
+            Note.NOTEFILE = saved
+            os.remove(tmp)
 
     def test_record_event_with_location_kwarg(self):
         result = self.engine._tool_record_event(
@@ -587,6 +628,7 @@ class TestWorldEntityTools(unittest.TestCase):
     """New world-entity and navigation tools must return correct strings."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="test-chamber",
             people={"player", "alice"},
@@ -604,6 +646,19 @@ class TestWorldEntityTools(unittest.TestCase):
         self.assertEqual(self.engine.session.location, "test-chamber/dungeon")
 
     def test_navigate_to_bare_destination(self):
+        # From a single-component root, a bare destination naming an UNKNOWN root
+        # nests as a child (G4 / LM §3.3) rather than becoming a detached
+        # top-level location. In an isolated notefile there are no saved roots, so
+        # "great-hall" nests under the current room. (This previously asserted a
+        # top-level move only because the shared fixture had accumulated
+        # "great-hall" as a known root via cross-test writes.)
+        self.engine._tool_navigate_to("great-hall")
+        self.assertEqual(self.engine.session.location, "test-chamber/great-hall")
+
+    def test_navigate_to_bare_known_root_is_top_level(self):
+        # A bare destination naming a KNOWN saved root IS a top-level move. Save
+        # the root first so the resolution is deterministic and self-contained.
+        self.engine._tool_save_location("great-hall", "A vast echoing hall.")
         self.engine._tool_navigate_to("great-hall")
         self.assertEqual(self.engine.session.location, "great-hall")
 
@@ -785,6 +840,9 @@ class TestToolRegistry(unittest.TestCase):
 
 class TestLocationHierarchy(unittest.TestCase):
     """Traversal algorithm and hierarchical navigate_to behaviour."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     # --- compute_traversal ---
 
@@ -2005,6 +2063,7 @@ class TestSafeDispatch(unittest.TestCase):
     """_safe_dispatch: one bad tool call must never crash the session."""
 
     def setUp(self):
+        _use_scratch_notefile(self)
         self.engine = _make_engine(
             location="ravenwood-manor", people={"player", "alice"}
         )
@@ -2473,6 +2532,9 @@ class TestLocationDriftObservability(unittest.TestCase):
 class TestZeroCanonicalNudge(unittest.TestCase):
     """An empty-canonical action/dialogue turn gets exactly one corrective round."""
 
+    def setUp(self):
+        _use_scratch_notefile(self)
+
     def _run(self, rounds, classified):
         import rpjot as rpjot_module
 
@@ -2518,6 +2580,29 @@ class TestZeroCanonicalNudge(unittest.TestCase):
     def _injected_nudge(self, calls):
         joined = " ".join(c for msgs in calls["msgs"] for c in msgs if c)
         return "No canonical record was written" in joined
+
+    def test_canon_first_directive_rides_initial_message(self):
+        # TOOL_ROI §A: the write demand rides the FIRST step2 user message for
+        # action/speech turns, so a compliant model writes on call 1 and the
+        # loop terminates on call 2 — no corrective round needed.
+        rounds = [
+            self._record_event_round(),  # writes immediately
+            {"content": "DONE"},  # terminates
+        ]
+        canonical, calls = self._run(rounds, "[MC action]: I open the door")
+        self.assertTrue(canonical)
+        self.assertEqual(calls["i"], 2)
+        self.assertFalse(self._injected_nudge(calls))
+        first_user_view = " ".join(calls["msgs"][0])
+        self.assertIn("Record canon in THIS response", first_user_view)
+
+    def test_canon_first_directive_absent_for_inner_monologue(self):
+        rounds = [{"content": "a quiet private thought"}]
+        _, calls = self._run(
+            rounds, "[MC inner monologue — private, unspoken]: I wonder if…"
+        )
+        first_user_view = " ".join(calls["msgs"][0])
+        self.assertNotIn("Record canon in THIS response", first_user_view)
 
     def test_prose_only_then_record_event_after_nudge(self):
         rounds = [
@@ -2586,6 +2671,9 @@ class TestZeroCanonicalNudge(unittest.TestCase):
 
 class TestTimingTelemetry(unittest.TestCase):
     """run_turn emits one parseable [TIMING] line; steps track LLM-call counts."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     def _patched(self, rounds):
         """Context: swap call_llm for a scripted fake; returns (engine, calls)."""
@@ -2669,6 +2757,57 @@ class TestTimingTelemetry(unittest.TestCase):
         finally:
             mod.call_llm = original
         self.assertEqual(eng._world_state_step.last_rounds, 1)
+
+    def test_step1_followups_stripped_deduped_and_batched(self):
+        # TOOL_ROI §D: step1 results reach history without followup_instruction;
+        # each distinct instruction lands once per turn as one [DIRECTIVE].
+        import rpjot as rpjot_module
+
+        seen = {"msgs": None}
+
+        def fake_call_llm(messages, **kwargs):
+            seen["msgs"] = [dict(m) for m in messages]
+            if not any(m.get("role") == "tool" for m in messages):
+                return {
+                    "tool_calls": [
+                        {
+                            "id": f"c{n}",
+                            "type": "function",
+                            "function": {
+                                "name": "get_character",
+                                "arguments": json.dumps({"name": f"npc{n}"}),
+                            },
+                        }
+                        for n in (1, 2)
+                    ]
+                }
+            return {"content": "WORLD STATE — the room"}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        try:
+            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng.init_pipeline()
+            eng._safe_dispatch = lambda handlers, name, args: json.dumps(
+                {"character": "x", "followup_instruction": "use this profile"}
+            )
+            doc = eng._world_state_step.run("[MC action]: I look at them")
+        finally:
+            rpjot_module.call_llm = original
+
+        self.assertTrue(doc)
+        tool_msgs = [m for m in seen["msgs"] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 2)
+        for m in tool_msgs:
+            self.assertNotIn("followup_instruction", m["content"])
+        directives = [
+            m
+            for m in seen["msgs"]
+            if m.get("role") == "user"
+            and str(m.get("content", "")).startswith("[DIRECTIVE] ")
+        ]
+        self.assertEqual(len(directives), 1)
+        self.assertEqual(directives[0]["content"], "[DIRECTIVE] use this profile")
 
     def test_step2_last_rounds_at_max_iterations(self):
         # The fake repeats its final round, so the loop runs to the bound.
@@ -3025,6 +3164,9 @@ class TestStep1DeltaMode(unittest.TestCase):
 
 class TestSpeculativeSeed(unittest.TestCase):
     """Idle-window speculation stores a validated, single-use seed."""
+
+    def setUp(self):
+        _use_scratch_notefile(self)
 
     def _patched(self, rounds):
         import rpjot as rpjot_module
@@ -3788,12 +3930,14 @@ class TestCompactSchemaKeepList(unittest.TestCase):
                     "description", pdef, f"{tool}.{k} kept a description"
                 )
 
-    def test_hidden_legacy_tools_absent_from_compact_menu(self):
-        # U1: the 19 fine-grained rel/int tools leave the LLM-facing menu but
-        # stay registered and dispatchable (safety net for old histories).
-        for name in self.engine._COMPACT_HIDDEN_TOOLS:
+    def test_granular_tools_fully_deregistered(self):
+        # FEATURE_TOGGLES Inc 4: the 19 fine-grained rel/int writers are NOT
+        # registered by default (RPJOT_GRANULAR off) — absent from the compact
+        # menu AND from dispatch. The record_relationship/record_interior
+        # wrappers cover the taxonomy and delegate to the methods directly.
+        for name in self.engine._GRANULAR_TOOLS:
             self.assertNotIn(name, self.compact)
-            self.assertIn(name, self.engine._step2_handlers)
+            self.assertNotIn(name, self.engine._step2_handlers)
 
     def test_merged_tools_present_with_kind_enums(self):
         rel_kind = self._props("record_relationship")["kind"]
@@ -3920,14 +4064,14 @@ class TestConsolidatedDispatch(unittest.TestCase):
             },
         )
         merged = self._last_note()
-        self._dispatch(
-            "record_bond",
-            {
-                "char_a": "evie",
-                "char_b": "sam",
-                "bond_type": "old-friends",
-                "description": "grew up together in the manor",
-            },
+        # The granular writer is deregistered (Inc 4) but still exists as a
+        # method — the wrapper delegates to it directly, so a direct call is the
+        # byte-compatibility oracle.
+        self.engine._tool_record_bond(
+            char_a="evie",
+            char_b="sam",
+            bond_type="old-friends",
+            description="grew up together in the manor",
         )
         legacy = self._last_note()
         self.assertEqual(merged.tag, legacy.tag)
@@ -3946,14 +4090,13 @@ class TestConsolidatedDispatch(unittest.TestCase):
             },
         )
         merged = self._last_note()
-        self._dispatch(
-            "record_subtext",
-            {
-                "speaker": "evie",
-                "statement": "Lovely weather for a walk.",
-                "actual_meaning": "come with me, away from the others",
-                "audience": "sam",
-            },
+        # Direct method call — the granular writer is deregistered (Inc 4) but
+        # remains the wrapper's delegate; see test_merged_bond_matches_legacy.
+        self.engine._tool_record_subtext(
+            speaker="evie",
+            statement="Lovely weather for a walk.",
+            actual_meaning="come with me, away from the others",
+            audience="sam",
         )
         legacy = self._last_note()
         self.assertEqual(merged.tag, legacy.tag)
@@ -3980,6 +4123,155 @@ class TestConsolidatedDispatch(unittest.TestCase):
         note = self._last_note()
         self.assertIn("int:longing", note.tag.split())
         self.assertTrue(note.message.strip())
+
+
+# ---------------------------------------------------------------------------
+# 12e-3b. Feature families + per-tool cost instrumentation (FEATURE_TOGGLES /
+# TOOL_TIMING Inc 0-4). Relative/structural assertions only — the _tok fallback
+# (len//4 without `regex`) changes absolute counts.
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureFamilies(unittest.TestCase):
+    """Family tagging + the registration gate (Inc 1/2/4)."""
+
+    def test_default_registers_all_families_except_granular(self):
+        e = _make_engine(people={"player"})
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        # Family wrappers + query tools present by default.
+        for expected in ("save_yomi", "record_relationship", "record_interior",
+                         "record_conscience"):
+            self.assertIn(expected, names)
+        # get_social_map retired outright (TOOL_ROI): absent even with every
+        # family enabled.
+        self.assertNotIn("get_social_map", names)
+        # Granular writers deregistered by default (Inc 4).
+        for name in e._GRANULAR_TOOLS:
+            self.assertNotIn(name, names)
+
+    def test_core_tools_never_disablable(self):
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        # Even a bogus disable of "core" leaves the 12 pinned tools registered.
+        e.disabled_families = {"core", "yomi", "relationships", "interiority"}
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        for pinned in ("record_event", "get_people_present", "examine_location",
+                       "navigate_to", "set_people_present", "save_character",
+                       "save_location", "save_object", "get_character",
+                       "search_world", "prepare_context", "record_knowledge"):
+            self.assertIn(pinned, names)
+
+    def test_disable_family_drops_exactly_its_tools(self):
+        full = _make_engine(people={"player"})
+        full_names = {s["function"]["name"] for s in full._tool_schemas}
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.disabled_families = {"yomi"}
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        dropped = full_names - names
+        self.assertEqual(dropped, e._FAMILY_TOOLS["yomi"])
+        self.assertFalse(e.family_enabled("yomi"))
+        self.assertTrue(e.family_enabled("core"))
+
+    def test_granular_flag_restores_writers(self):
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.granular_enabled = True
+        e.register_all_tools()
+        names = {s["function"]["name"] for s in e._tool_schemas}
+        for name in e._GRANULAR_TOOLS:
+            self.assertIn(name, names)
+
+    def test_disabled_families_gate_pov_reads(self):
+        # Inc 2: conscience/interiority reads are family-gated. With both off the
+        # flags flip and gather_pov_context still builds a bundle (smaller POV).
+        e = RPJotEngine(location="test-chamber", people_present={"player"})
+        e.disabled_families = {"interiority", "conscience"}
+        e.register_all_tools()
+        self.assertFalse(e.family_enabled("interiority"))
+        self.assertFalse(e.family_enabled("conscience"))
+        self.assertIsNotNone(e.gather_pov_context("player"))
+
+
+class TestToolTiming(unittest.TestCase):
+    """Per-tool token map + dispatch instrumentation + timing_report (Inc 0)."""
+
+    def setUp(self):
+        self.engine = _make_engine(people={"player"})
+
+    def test_tok_map_covers_all_registered_tools(self):
+        names = {s["function"]["name"] for s in self.engine._tool_schemas}
+        self.assertEqual(set(self.engine._tool_tok_map), names)
+
+    def test_tok_map_sums_near_cached_aggregates(self):
+        m = self.engine._tool_tok_map
+        n = len(m)
+        full_sum = sum(v["full"] for v in m.values())
+        compact_sum = sum(v["compact"] for v in m.values())
+        # Per-entry tokenization drifts from the whole-list aggregate by ≤ ~1
+        # tok/tool (the list delimiters); allow n+2 slack in either direction.
+        self.assertLessEqual(
+            abs(full_sum - self.engine._cached_schema_toks), n + 2
+        )
+        self.assertLessEqual(
+            abs(compact_sum - self.engine._cached_compact_step2_schema_toks), n + 2
+        )
+
+    def test_session_end_stats_dump_includes_zero_call_rows(self):
+        # TOOL_ROI guard: one [TOOL_STATS] line per REGISTERED tool, zero-call
+        # rows included — the dead-tool signal the audit had to reconstruct.
+        self.engine._dispatch("get_people_present", "{}")
+        with self.assertLogs("rpjot_engine", level="INFO") as cm:
+            self.engine.log_session_tool_stats()
+        rows = [m for m in cm.output if "[TOOL_STATS]" in m]
+        self.assertEqual(len(rows), len(self.engine._tool_handlers))
+        called = [m for m in rows if "get_people_present" in m]
+        self.assertEqual(len(called), 1)
+        self.assertIn("calls=1", called[0])
+        # Never-dispatched tools still get a row, with calls=0.
+        never = [m for m in rows if "record_mood" in m]
+        self.assertEqual(len(never), 1)
+        self.assertIn("calls=0", never[0])
+
+    def test_dispatch_records_event_and_session_stat(self):
+        # Read-only step-1 tool — avoids appending event notes to the fixture.
+        self.engine._dispatch("get_people_present", "{}")
+        self.assertTrue(self.engine._turn_tool_events)
+        ev = self.engine._turn_tool_events[-1]
+        self.assertEqual(ev["name"], "get_people_present")
+        self.assertTrue(ev["ok"])
+        self.assertGreaterEqual(ev["ms"], 0.0)
+        self.assertGreater(ev["result_toks"], 0)
+        self.assertEqual(
+            self.engine._session_tool_stats["get_people_present"]["calls"], 1
+        )
+
+    def test_unknown_tool_records_error_with_unchanged_json(self):
+        result = self.engine._dispatch("nonexistent_tool", "{}")
+        self.assertIn("error", json.loads(result))
+        self.assertFalse(self.engine._turn_tool_events[-1]["ok"])
+        self.assertEqual(
+            self.engine._session_tool_stats["nonexistent_tool"]["errors"], 1
+        )
+
+    def test_timing_report_renders_without_turn(self):
+        report = self.engine.timing_report()
+        self.assertIn("STANDING COST", report)
+        self.assertIn("no turn yet", report)
+        self.assertTrue(report.strip())
+
+    def test_timing_report_renders_after_snapshot(self):
+        self.engine._dispatch("get_people_present", "{}")
+        self.engine._last_turn_report = {
+            "turn": 1,
+            "events": list(self.engine._turn_tool_events),
+            "iters": {"step1": 1, "step2": 1, "step3": 1},
+            "step_s": {"step1": 1.0, "step2": 1.0, "step3": 1.0, "total": 3.0},
+            "seed": "off",
+            "usage": [],
+        }
+        report = self.engine.timing_report()
+        self.assertIn("EXECUTED THIS TURN", report)
+        self.assertIn("get_people_present", report)
 
 
 # ---------------------------------------------------------------------------
@@ -4502,8 +4794,10 @@ class TestClassifyInput(unittest.TestCase):
         out = self._c("^I feel uneasy about this place")
         self.assertIn("[MC inner monologue", out)
         self.assertIn("I feel uneasy about this place", out)
-        # The monologue sigil nudges toward backstory-preserving tools.
-        self.assertIn("record_conscience", out)
+        # The monologue sigil nudges toward a backstory-preserving tool that is
+        # registered by default (TOOL_ROI: conscience family off, record_secret
+        # granular-off — record_knowledge is the always-on core writer).
+        self.assertIn("record_knowledge", out)
 
     def test_default_is_dialogue(self):
         out = self._c("hello everyone")
@@ -4691,8 +4985,11 @@ class TestThirdPersonMovement(unittest.TestCase):
         )
         self.assertNotIn("DIRECTOR NOTE", moved)
 
-    def test_nudge_still_fires_for_npc_invitation(self):
-        # the swept neg_navto shape: an invitation is not movement.
+    def test_npc_invitation_no_longer_nudged(self):
+        # SCENE_MOVER (symmetric agency): the PC-centric stationary nudge that
+        # once fired here ("an invitation is not movement") is RETIRED — an NPC's
+        # invitation is now allowed to lead the scene, so no DIRECTOR NOTE is
+        # injected and the symmetric AGENCY RULE is present instead.
         eng = _make_engine(location="ravenwood-manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
@@ -4700,7 +4997,9 @@ class TestThirdPersonMovement(unittest.TestCase):
         invited = step._compose_step2_user_content(
             '[MC speaks aloud]: "Show me the gallery sometime."', "WORLD STATE: x"
         )
-        self.assertIn("DIRECTOR NOTE", invited)
+        self.assertNotIn("DIRECTOR NOTE", invited)
+        self.assertNotIn("has not moved themselves", invited)
+        self.assertIn("Agency is shared", invited)
 
 
 # ---------------------------------------------------------------------------
@@ -6396,8 +6695,14 @@ class TestLocationPrecision(unittest.TestCase):
             "exp:bartholomew exp:evie",
             location="garage",
         )
+        # SCENE_MOVER: an MC-tagged move is now DEFERRED (decoupled from the
+        # stationary verdict) and committed by reconcile when navigate_to did
+        # not fire — never immediately, so it can't collide with a real
+        # navigate_to traversal on any turn.
+        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        eng._reconcile_loc_hint([])
         self.assertEqual(eng.session.location, "ravenwood-manor/garage")
-        # NPC last-seen follows the move (the gap plain remark used to have)
+        # NPC last-seen follows the committed move.
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
         self.assertEqual(rec.location_last_seen, "ravenwood-manor/garage")
         # subsequent bare record_event files in the new room
@@ -6411,6 +6716,9 @@ class TestLocationPrecision(unittest.TestCase):
             "exp:bartholomew+evie",
             location="cottage",
         )
+        # Compound exp tag detects MC → move deferred, committed at reconcile.
+        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/cottage")
+        eng._reconcile_loc_hint([])
         self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
 
     def test_record_event_non_mc_divergent_warns_only(self):
@@ -7518,6 +7826,191 @@ class TestDebugReport(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         for row in rows:
             self.assertTrue(os.path.isfile(os.path.join(d, row["report_file"])))
+
+
+class TestSceneMover(unittest.TestCase):
+    """SCENE_MOVER: symmetric agency directives + deterministic scene backstop.
+
+    Fully deterministic — no live LLM. Writes route to a per-test temp notefile
+    so tests/bellvue.jot is never mutated.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._saved_notefile = Note.NOTEFILE
+        fd, self._tmp = tempfile.mkstemp(suffix=".jot")
+        os.close(fd)
+        Note.NOTEFILE = self._tmp
+        self.engine = _make_engine(location="manor/library", people={"mc", "evie"})
+        self.cs = rpjot.ComplianceStep(self.engine)
+
+    def tearDown(self):
+        Note.NOTEFILE = self._saved_notefile
+        try:
+            os.remove(self._tmp)
+        except OSError:
+            pass
+
+    # --- Symmetric-agency directive changes ---
+
+    def test_agency_rule_replaces_narrator_rule(self):
+        self.assertTrue(hasattr(self.engine, "_AGENCY_RULE"))
+        self.assertFalse(hasattr(self.engine, "_NARRATOR_RULE"))
+        self.assertIn("Agency is shared", self.engine._AGENCY_RULE)
+
+    def test_build_user_message_uses_agency_rule(self):
+        msg = self.engine.build_user_message("I wait.")
+        self.assertIn("Agency is shared", msg["content"])
+
+    def test_stationary_nudge_not_injected(self):
+        # An inner-monologue turn classifies stationary; the retired PC-centric
+        # nudge must NOT appear in the composed step-2 message.
+        stationary = "[MC inner monologue — private, unspoken]: I wonder."
+        self.assertTrue(
+            rpjot.ComplianceStep._is_stationary_turn(stationary, self.engine.mc_aliases)
+        )
+        content = self.cs._compose_step2_user_content(stationary, "world doc")
+        self.assertNotIn("has not moved themselves", content)
+        self.assertIn("AGENCY RULE", content)
+
+    # --- _should_suggest_scene_advance ---
+
+    def test_suggest_false_without_scene(self):
+        self.engine.session.current_scene = ""
+        self.engine._turn_count = 99
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+
+    def test_suggest_false_when_disabled(self):
+        self.engine.scene_mover_enabled = False
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS + 5
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+
+    def test_suggest_threshold(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS - 1
+        self.assertFalse(self.engine._should_suggest_scene_advance())
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS
+        self.assertTrue(self.engine._should_suggest_scene_advance())
+
+    # --- _auto_scene_slug ---
+
+    def test_auto_scene_slug_deterministic_and_shaped(self):
+        self.engine._turn_count = 12
+        slug1, desc1 = self.engine._auto_scene_slug()
+        slug2, desc2 = self.engine._auto_scene_slug()
+        self.assertEqual(slug1, slug2)  # deterministic
+        self.assertTrue(slug1.startswith("library-t13-"))  # last loc segment + turn
+        self.assertRegex(slug1, r"^[a-z0-9\-]+$")  # kebab / opaque key
+        self.assertIn("evie", desc1)  # cast named in the surfaced description
+
+    # --- _maybe_hard_advance_scene ---
+
+    def _prime_stale(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._scene_start_turn = 0
+        self.engine._turn_count = rpjot.SCENE_STALE_TURNS + 1
+        self.engine._scene_stale_streak = 0
+
+    def test_hard_advance_needs_shown_suggestion(self):
+        self._prime_stale()
+        # Suggestion NOT shown this turn → streak must not accrue.
+        self.engine._scene_advance_shown = False
+        self.engine._maybe_hard_advance_scene([])
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    def test_hard_advance_resets_on_motion(self):
+        self._prime_stale()
+        self.engine._scene_stale_streak = 2
+        self.engine._scene_advance_shown = True
+        # A location change this turn means the scene is moving → streak resets.
+        self.engine._maybe_hard_advance_scene([("navigate_to", "moved")])
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    def test_hard_advance_fires_after_streak(self):
+        self._prime_stale()
+        results = []
+        for _ in range(rpjot.SCENE_HARD_ADVANCE_STREAK):
+            self.engine._scene_advance_shown = True
+            self.engine._maybe_hard_advance_scene(results)
+        # Forced rotation: scene changed, a begin_scene landed in results, and
+        # the streak + start-turn were reset by _tool_begin_scene.
+        self.assertNotEqual(self.engine.session.current_scene, "opening")
+        self.assertTrue(any(fn == "begin_scene" for fn, _ in results))
+        self.assertEqual(self.engine._scene_stale_streak, 0)
+        self.assertEqual(self.engine._scene_start_turn, self.engine._turn_count)
+
+    def test_hard_advance_noop_when_disabled(self):
+        self._prime_stale()
+        self.engine.scene_mover_enabled = False
+        for _ in range(rpjot.SCENE_HARD_ADVANCE_STREAK + 2):
+            self.engine._scene_advance_shown = True
+            self.engine._maybe_hard_advance_scene([])
+        self.assertEqual(self.engine.session.current_scene, "opening")
+
+    # --- record_event dedup ---
+
+    def test_dedup_skips_near_duplicate(self):
+        self.engine.session.current_scene = "opening"
+        desc = "Bartholomew provokes Samantha in the library about her mask."
+        first = self.engine._tool_record_event(description=desc, tags="exp:evie")
+        self.assertTrue(first.startswith("Event recorded:"))
+        # Near-identical (one word changed) → skipped, original returned.
+        near = "Bartholomew provokes Samantha in the library about her veil."
+        second = self.engine._tool_record_event(description=near, tags="exp:evie")
+        self.assertTrue(second.startswith(rpjot._DEDUP_SKIP_PREFIX))
+
+    def test_dedup_allows_distinct_event(self):
+        self.engine.session.current_scene = "opening"
+        self.engine._tool_record_event(
+            description="Evie leads the MC down the cellar stairs.", tags="exp:evie"
+        )
+        distinct = self.engine._tool_record_event(
+            description="Samantha lights a candle and studies the ledger.",
+            tags="exp:samantha",
+        )
+        self.assertTrue(distinct.startswith("Event recorded:"))
+
+    def test_dedup_skip_filtered_from_synthesis(self):
+        skip = f"{rpjot._DEDUP_SKIP_PREFIX}already canon (not re-recorded): X"
+        synth = self.engine._build_narrative_synthesis(
+            [], [("record_event", skip)]
+        )
+        self.assertNotIn("CANONICAL FACTS", synth)
+        real = self.engine._build_narrative_synthesis(
+            [], [("record_event", "Event recorded: Evie opens the door...")]
+        )
+        self.assertIn("CANONICAL FACTS", real)
+
+    # --- record_event MC-tag move decoupled from _turn_stationary ---
+
+    def test_mc_tag_move_deferred_regardless_of_stationary(self):
+        for stationary in (True, False):
+            with self.subTest(stationary=stationary):
+                self.engine._turn_stationary = stationary
+                self.engine._pending_loc_hint = None
+                self.engine._tool_record_event(
+                    description="Evie ushers the MC into the cellar.",
+                    tags="exp:mc exp:evie",
+                    location="cellar",
+                )
+                # Move is DEFERRED (not immediate) regardless of the stationary
+                # verdict; the hint carries the canonicalized destination.
+                self.assertIsNotNone(self.engine._pending_loc_hint)
+                self.assertTrue(self.engine._pending_loc_hint.endswith("cellar"))
+                self.assertNotEqual(
+                    self.engine._pending_loc_hint, self.engine.session.location
+                )
+
+    def test_reconcile_commits_when_no_navigate(self):
+        self.engine._pending_loc_hint = "cellar"
+        self.engine._reconcile_loc_hint([("record_event", "ok")])
+        self.assertEqual(self.engine.session.location, "cellar")
 
 
 if __name__ == "__main__":

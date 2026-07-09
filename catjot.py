@@ -1440,6 +1440,8 @@ def call_llm(
             if text:
                 parts.append(text)
                 on_token(text)
+        global LAST_USAGE
+        LAST_USAGE = None  # streaming: no usage in SSE deltas
         return {"role": "assistant", "content": "".join(parts)}
 
     resp = requests.post(
@@ -1448,7 +1450,9 @@ def call_llm(
         json=payload,
     )
     resp.raise_for_status()
-    choice = resp.json()["choices"][0]
+    body = resp.json()
+    globals()["LAST_USAGE"] = body.get("usage")
+    choice = body["choices"][0]
     msg = choice["message"]
 
     # Some servers put tool_calls at the choice level, not inside message
@@ -1457,6 +1461,15 @@ def call_llm(
 
     return msg
 
+
+# Last non-streaming response usage (FEATURE_TOGGLES / TOOL_TIMING Inc 0).
+# Set to the endpoint's {prompt_tokens, completion_tokens, ...} object after
+# every non-streaming call_llm, or None on a streaming call (SSE deltas carry
+# no usage without stream_options). A side channel rather than an added message
+# key, because response messages are re-sent verbatim and strict endpoints may
+# reject unknown keys. Safe under the single-slot endpoint invariant (no two
+# call_llm ever overlap): the reader consumes it right after the call returns.
+LAST_USAGE = None
 
 # Maps tool name -> handler function
 TOOL_HANDLERS = {}

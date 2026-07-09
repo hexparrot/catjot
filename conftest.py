@@ -1,3 +1,5 @@
+import glob
+import hashlib
 import os
 import shutil
 import time
@@ -6,19 +8,69 @@ import pytest
 import requests
 from os import getenv, remove
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_TESTS_DIR = os.path.join(_HERE, "tests")
 
-def jot_teardown(tmp_catnote: str, fixed_catnote: str):
-    """Shared teardown for test classes that write to a temporary .jot file."""
-    try:
-        remove(tmp_catnote)
-    except FileNotFoundError:
-        pass
-    try:
-        remove(f"{tmp_catnote}.new")
-    except FileNotFoundError:
-        pass
-    if os.path.exists(f"{fixed_catnote}.old"):
-        shutil.move(f"{fixed_catnote}.old", fixed_catnote)
+
+def jot_teardown(tmp_catnote: str, fixed_catnote: str = None):
+    """Shared teardown for tests that write to scratch .jot files under local/.
+
+    Removes the scratch note plus any .new/.old shadow copies catjot leaves during
+    delete/amend/commit. Nothing under tests/ is touched — those fixtures are
+    read-only (enforced by the _guard_readonly_fixtures autouse fixture below).
+    """
+    for base in (tmp_catnote, "local/scratch/example.jot"):
+        if not base:
+            continue
+        for p in (base, f"{base}.new", f"{base}.old"):
+            try:
+                remove(p)
+            except FileNotFoundError:
+                pass
+
+
+def _snapshot_tests_jot():
+    """Map every tests/*.jot path to its current bytes (read-only baseline)."""
+    return {
+        p: open(p, "rb").read()
+        for p in glob.glob(os.path.join(_TESTS_DIR, "*.jot"))
+    }
+
+
+# Session-wide pristine baseline of the read-only fixtures, captured at import.
+_TESTS_BASELINE = _snapshot_tests_jot()
+
+
+@pytest.fixture(autouse=True)
+def _guard_readonly_fixtures():
+    """Fail (and restore) if any test mutates a tests/*.jot fixture.
+
+    tests/ is read-only: catjot/rpjot must route every write to local/. If a test
+    leaves a fixture changed, restore it from the pristine baseline so later tests
+    and the working tree stay clean, then fail this test to pinpoint the offender.
+    """
+    yield
+    changed = []
+    for path, original in _TESTS_BASELINE.items():
+        try:
+            current = open(path, "rb").read()
+        except FileNotFoundError:
+            current = None
+        if current != original:
+            changed.append(os.path.relpath(path, _HERE))
+            with open(path, "wb") as fh:
+                fh.write(original)
+    # Also delete any stray shadow copies a write left inside tests/.
+    for stray in glob.glob(os.path.join(_TESTS_DIR, "*.jot.new")) + glob.glob(
+        os.path.join(_TESTS_DIR, "*.jot.old")
+    ):
+        os.remove(stray)
+        changed.append(os.path.relpath(stray, _HERE))
+    assert not changed, (
+        "test wrote to read-only tests/ fixtures (restored): "
+        + ", ".join(sorted(changed))
+        + " — route writes to local/ instead."
+    )
 
 
 _LLM_CLASSES = {

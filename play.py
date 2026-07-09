@@ -38,8 +38,14 @@ from catjot import Note, ContextBundle, NoteContext, SearchType, call_llm
 # ---------------------------------------------------------------------------
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SEED_JOT = os.path.join(_HERE, "tests", "bellvue_canonical.jot")
-_SESSIONS_DIR = os.path.join(_HERE, "sessions")
+# All runtime-writable artifacts live under <repo>/local/ (gitignored).
+_LOCAL_DIR = os.path.join(_HERE, "local")
+# Generated canonical seed (gitignored). Falls back to the read-only tests/bellvue.jot
+# fixture when the seed has not been generated (fresh checkout, no LLM run yet).
+_SEED_JOT = os.path.join(_LOCAL_DIR, "canonical", "bellvue_canonical.jot")
+_SEED_FALLBACK = os.path.join(_HERE, "tests", "bellvue.jot")
+_SESSIONS_DIR = os.path.join(_LOCAL_DIR, "sessions")
+_DEBUG_DIR = os.path.join(_LOCAL_DIR, "debug")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -52,7 +58,7 @@ logger = logging.getLogger("play")
 # ---------------------------------------------------------------------------
 
 _SLASH_EXACT = frozenset(
-    ["/quit", "/mood", "/attn", "/prompt"]
+    ["/quit", "/mood", "/attn", "/prompt", "/timing"]
 )
 # /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
 # yomi take a name arg — all prefix-matched by the unknown-command guard.
@@ -78,6 +84,30 @@ _MC_ALIASES = frozenset(
 # Stream step-3 prose to the console token-by-token (perceived latency:
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
+# Feature-family toggles (FEATURE_TOGGLES). RPJOT_DISABLE is a comma-separated
+# denylist of families to drop (e.g. "yomi,relationships"). Default denylist
+# (TOOL_ROI): yomi/conscience/interiority — in the instrumented 2026-07-03 run
+# their reads returned sentinel-empty 100% of the time and their writers were
+# never dispatched. Set RPJOT_DISABLE="" (explicit empty) to re-enable all.
+# RPJOT_GRANULAR=1 restores the fine-grained rel/int writers for A/B. The engine
+# never reads env — the play loop pushes these on before register_all_tools.
+_DISABLED_FAMILIES = frozenset(
+    f.strip().lower()
+    for f in os.environ.get("RPJOT_DISABLE", "yomi,conscience,interiority").split(",")
+    if f.strip()
+)
+_GRANULAR = os.environ.get("RPJOT_GRANULAR", "") == "1"
+# SCENE_MOVER deterministic scene-advance backstop. Default ON; set
+# RPJOT_SCENE_MOVER=0 to silence both the staleness suggestion and the hard
+# auto-advance (e.g. for the legacy-control arm of bakeoff_agency.py).
+_SCENE_MOVER = os.environ.get("RPJOT_SCENE_MOVER", "1") == "1"
+
+
+def _apply_family_config(engine):
+    """Push RPJOT_DISABLE / RPJOT_GRANULAR onto the engine before tool
+    registration (the engine never reads env)."""
+    engine.disabled_families = set(_DISABLED_FAMILIES)
+    engine.granular_enabled = _GRANULAR
 
 _PARAPHRASE_INSTRUCTION = (
     "You are a narrator-briefing editor. "
@@ -100,8 +130,8 @@ _HELP_TEXT = (
     "  @name   — shift MC focus to person/object; tail is intent toward it\n"
     "  ^text   — MC inner monologue (can seed backstory)\n"
     "Commands: /quit, /people [full], /location [full], /objects [name], "
-    "/construct <name>, /stats [full], /debug <description>, /mood, /attn, "
-    "/yomi <name>, /prompt [text]"
+    "/construct <name>, /stats [full], /timing, /debug <description>, /mood, "
+    "/attn, /yomi <name>, /prompt [text]"
 )
 
 
@@ -137,8 +167,8 @@ def classify_input(raw: str) -> str:
             f"[MC inner monologue — private, unspoken]: {content}\n"
             "Narrate this as interior experience only, never as spoken dialogue. "
             "If it reveals a meaningful feeling, preference, aversion, memory, or "
-            "developing emotional arc, use record_conscience or record_secret to "
-            "preserve it as MC backstory."
+            "developing emotional arc, use record_knowledge (witnessed by the MC "
+            "alone) to preserve it as MC backstory."
         )
 
     # Default: treat as spoken dialogue; note inference is acceptable
@@ -842,7 +872,6 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
         engine._ensure_location_node(path)
         sess.location = path
         sess.location_context = ContextBundle(f"{PWD_WORLD}/{path}")
-        engine._cache_drop("social_map")
 
     # --- People present (not persisted; inferred). MC is always present. -----
     people = {"mc"}
@@ -851,7 +880,6 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
         if s and s != "mc":
             people.add(s)
     sess.people_present = people
-    engine._cache_drop("social_map")  # social map depends on the (now restored) cast
     for slug in people:
         if not engine.npc_tracker.is_registered(slug):
             engine.npc_tracker.register(slug, slug, location=sess.location, turn=0)
@@ -869,6 +897,11 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
     # --- Scene: re-enter without a new scene-header note. --------------------
     if det_scene:
         sess.current_scene = det_scene
+    # SCENE_MOVER: resume is the 4th path that sets current_scene directly (not
+    # via _tool_begin_scene), so baseline staleness here — otherwise a resumed
+    # scene would look stale from turn 1 and could hard-advance mid-play.
+    engine._scene_start_turn = engine._turn_count
+    engine._scene_stale_streak = 0
 
     # First turn must rebuild the system doc for the restored scene/location.
     engine._system_refresh_pending = True
@@ -890,6 +923,7 @@ def game_loop(engine, seed_summaries=False):
     pair_sizes: deque = deque(maxlen=5)
     # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
     engine.seed_enabled = _BG_SEED
+    engine.scene_mover_enabled = _SCENE_MOVER
     engine.mc_aliases = engine.mc_aliases | _MC_ALIASES
     # rpjot's logger, not play's: the alias set must land in the session
     # debug file so an under-firing gate is diagnosable from the log alone.
@@ -962,24 +996,28 @@ def game_loop(engine, seed_summaries=False):
             )
             continue
 
+        if _cmd0 == "/timing":
+            print(engine.timing_report())
+            continue
+
         if _cmd0 == "/debug":
             parts = user_input.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].strip():
                 print("Usage: /debug <description of what looked wrong>")
                 continue
             desc = parts[1].strip()
-            os.makedirs("debug", exist_ok=True)
+            os.makedirs(_DEBUG_DIR, exist_ok=True)
             report_text, index_row = engine.build_debug_report(
                 desc,
                 step2_messages,
                 step3_messages,
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
-            report_path = os.path.join("debug", index_row["report_file"])
+            report_path = os.path.join(_DEBUG_DIR, index_row["report_file"])
             with open(report_path, "w", encoding="utf-8") as fh:
                 fh.write(report_text)
             with open(
-                os.path.join("debug", "index.jsonl"), "a", encoding="utf-8"
+                os.path.join(_DEBUG_DIR, "index.jsonl"), "a", encoding="utf-8"
             ) as fh:
                 fh.write(json.dumps(index_row) + "\n")
             print(f"[debug report written: {report_path}]")
@@ -1032,6 +1070,9 @@ def game_loop(engine, seed_summaries=False):
             continue
 
         if user_input.lower().startswith("/yomi"):
+            if not engine.family_enabled("yomi"):
+                print("[feature disabled: yomi (RPJOT_DISABLE)]")
+                continue
             parts = user_input.split(maxsplit=1)
             if len(parts) > 1:
                 char_name = parts[1].strip()
@@ -1141,6 +1182,10 @@ def game_loop(engine, seed_summaries=False):
 
         bg_thread = start_idle_work(engine, step2_messages)
 
+    # Session-end per-tool census (TOOL_ROI guard): both /quit and Ctrl-C land
+    # here, so dead-tool evidence reaches the debug log every session.
+    engine.log_session_tool_stats()
+
 
 # ---------------------------------------------------------------------------
 # Session management
@@ -1166,6 +1211,7 @@ def _resume_engine():
         location=det_location or "ravenwood-manor",
         people_present={"mc"},
     )
+    _apply_family_config(engine)
     engine.register_all_tools()
     engine.init_pipeline()
 
@@ -1185,11 +1231,14 @@ def _resume_engine():
 
 
 def create_session() -> str:
-    """Copy seed.jot into a fresh timestamped session file and return its path."""
+    """Copy the seed into a fresh timestamped session file and return its path."""
     os.makedirs(_SESSIONS_DIR, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(_SESSIONS_DIR, f"session_{stamp}.jot")
-    shutil.copy2(_SEED_JOT, path)
+    # Prefer the generated canonical seed; fall back to the read-only fixture so a
+    # fresh checkout can start a game before create_canonical_seed.py has been run.
+    seed = _SEED_JOT if os.path.exists(_SEED_JOT) else _SEED_FALLBACK
+    shutil.copy2(seed, path)
     return path
 
 
@@ -1239,6 +1288,7 @@ def main():
             location="ravenwood-manor",
             people_present={"mc"},
         )
+        _apply_family_config(engine)
         engine.register_all_tools()
         engine.init_pipeline()
         # Bootstrap the opening scene so current_scene is never empty from turn one.

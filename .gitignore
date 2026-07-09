@@ -1,7 +1,12 @@
+# All runtime-writable artifacts: sessions, logs, debug reports, generated
+# canonical seed, test/bakeoff scratch. tests/ stays read-only; nothing writable
+# lives at the repo root or under tests/ anymore.
+/local/
+
 # .catjot files
 .catjot.old
 
-# /debug player-concern capture output (EXEC_DEBUG)
+# /debug player-concern capture output (EXEC_DEBUG) — now under local/debug/
 debug/
 
 # Byte-compiled / optimized / DLL files
