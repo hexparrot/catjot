@@ -4198,6 +4198,84 @@ class TestConsolidatedDispatch(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12e-3a. MC-relationship nudge (MC_REL) — _pending_mc_rel_nudge + injection
+# ---------------------------------------------------------------------------
+
+
+class TestMcRelNudge(unittest.TestCase):
+    """The DIRECTOR NOTE that gets the model to record the MC's own relationships.
+
+    Without it, the model only ever writes NPC↔NPC relationships, so
+    get_relationship_arc('mc', X) stays empty. Pure unit (no LLM).
+    """
+
+    def setUp(self):
+        _use_scratch_notefile(self)  # any writes go to a scratch .jot
+
+    def _engine(self, people={"mc", "evie"}):
+        from rpjot import MC_REL_MIN_TURNS
+
+        eng = _make_engine(location="manor", people=people)
+        eng.mc_rel_nudge_enabled = True
+        eng._turn_count = MC_REL_MIN_TURNS  # past the dwell gate
+        return eng
+
+    def test_pending_after_dwell_with_present_unrecorded_npc(self):
+        self.assertEqual(self._engine()._pending_mc_rel_nudge(), "evie")
+
+    def test_dwell_gate_suppresses_early_turns(self):
+        eng = self._engine()
+        eng._turn_count = 0
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_no_npc_present(self):
+        self.assertIsNone(self._engine(people={"mc"})._pending_mc_rel_nudge())
+
+    def test_per_scene_guard_fires_once(self):
+        eng = self._engine()
+        self.assertEqual(eng._pending_mc_rel_nudge(), "evie")
+        eng._mc_rel_nudge_shown.add(eng._rel_key("mc", "evie"))
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_disabled_flag_silences(self):
+        eng = self._engine()
+        eng.mc_rel_nudge_enabled = False
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_existing_rel_note_suppresses(self):
+        eng = self._engine()
+        eng._dispatch_step2(
+            "record_relationship",
+            json.dumps(
+                {
+                    "kind": "bond",
+                    "char_a": "mc",
+                    "char_b": "evie",
+                    "description": "wary mutual respect",
+                }
+            ),
+        )
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_directive_injected_in_step2_content(self):
+        from rpjot import ComplianceStep
+
+        content = ComplianceStep(self._engine())._compose_step2_user_content(
+            "[MC action]: I nod to her", "WORLD STATE: x"
+        )
+        self.assertIn("record_relationship(char_a='mc', char_b='evie'", content)
+
+    def test_begin_scene_rearms_guard(self):
+        eng = self._engine()
+        eng._mc_rel_nudge_shown.add(eng._rel_key("mc", "evie"))
+        eng._dispatch_step2(
+            "begin_scene",
+            json.dumps({"name": "New Beat", "description": "a fresh scene begins"}),
+        )
+        self.assertEqual(eng._mc_rel_nudge_shown, set())
+
+
+# ---------------------------------------------------------------------------
 # 12e-3b. Feature families + per-tool cost instrumentation (FEATURE_TOGGLES /
 # TOOL_TIMING Inc 0-4). Relative/structural assertions only — the _tok fallback
 # (len//4 without `regex`) changes absolute counts.

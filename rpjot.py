@@ -695,6 +695,7 @@ SYSTEM_REFRESH_INTERVAL = 8
 # scene (no movement, no new beat) and the near-duplicate event guard.
 SCENE_STALE_TURNS = 6  # elapsed turns in one scene → inject an advance suggestion
 SCENE_HARD_ADVANCE_STREAK = 3  # consecutive SHOWN-and-ignored suggestions → engine forces begin_scene
+MC_REL_MIN_TURNS = 3  # turns an NPC must have been in play before the MC-relationship nudge fires
 RECORD_EVENT_DEDUP_RATIO = 0.90  # skip a record_event ≥ this similar to a recent same-scene/loc event
 RECORD_EVENT_DEDUP_WINDOW = 8  # compare against at most this many recent same-loc notes
 _DEDUP_SKIP_PREFIX = "[dedup-skip] "  # marks a near-duplicate record_event that was NOT written
@@ -1683,6 +1684,21 @@ class ComplianceStep:
         # player input it qualifies; scene hints keep the last-block slot.
         if self._should_nudge_zero_canonical(classified_input):
             parts.append(self._CANON_FIRST_DIRECTIVE)
+        # MC-relationship nudge (MC_REL): ask the model to record the MC's own
+        # evolving relationships, which it otherwise only ever writes for NPC↔NPC
+        # pairs. One pair per turn; guarded to once per pair per scene.
+        mc_rel_npc = engine._pending_mc_rel_nudge()
+        if mc_rel_npc:
+            engine._mc_rel_nudge_shown.add(
+                engine._rel_key(engine.main_character, mc_rel_npc)
+            )
+            parts.append(
+                f"[DIRECTIVE] The main character and {mc_rel_npc} have shared this "
+                "scene, but their relationship is unrecorded. If a bond, impression, "
+                "or dynamic has formed or shifted, call record_relationship("
+                f"char_a='{engine.main_character}', char_b='{mc_rel_npc}', kind=…) "
+                "now to capture it. If nothing durable has developed yet, ignore this."
+            )
         if engine._scene_hint_pending:
             # One-shot scene-rotation pressure: consumed here so the hint
             # appears exactly once after a location move (begin_scene also
@@ -2132,6 +2148,15 @@ class RPJotEngine:
         self._scene_stale_streak: int = 0
         self._scene_advance_shown: bool = False
         self.scene_mover_enabled: bool = True
+        # MC-relationship nudge (MC_REL): the model records NPC↔NPC relationships
+        # but never the MC's own, so get_relationship_arc('mc', X) stays empty. A
+        # turn-scoped DIRECTOR NOTE asks it to record an mc↔present-NPC bond once
+        # they have shared the scene a few turns and no note exists yet.
+        # _mc_rel_nudge_shown guards to one nudge per pair per scene (re-armed at
+        # begin_scene). mc_rel_nudge_enabled mirrors RPJOT_MC_REL_NUDGE (default
+        # on), set by the play loop.
+        self._mc_rel_nudge_shown: set = set()
+        self.mc_rel_nudge_enabled: bool = True
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -3063,6 +3088,32 @@ class RPJotEngine:
         if not self.scene_mover_enabled or not self.session.current_scene:
             return False
         return self._turn_count - self._scene_start_turn >= SCENE_STALE_TURNS
+
+    def _pending_mc_rel_nudge(self) -> str | None:
+        """The present NPC (if any) whose mc↔NPC relationship should be recorded.
+
+        Eligible (MC_REL): the NPC is co-present, has been in play at least
+        MC_REL_MIN_TURNS turns, has no mc↔NPC relationship note yet, and has not
+        already been nudged this scene. Returns the first such slug, or None.
+        Uses only live signals — NPCRecord.interacted is dead code. The dwell
+        gate also keeps this silent on turn 0 (production-shape selection tests).
+        """
+        if not self.mc_rel_nudge_enabled:
+            return None
+        mc = self.main_character
+        for slug in sorted(self.session.people_present):
+            if slug == mc:
+                continue
+            pair = self._rel_key(mc, slug)
+            if pair in self._mc_rel_nudge_shown:
+                continue
+            rec = self.npc_tracker.get(slug)
+            if rec is None or self._turn_count - rec.turn_introduced < MC_REL_MIN_TURNS:
+                continue
+            if len(ContextBundle(f"{PWD_REL}/{pair}")) > 0:
+                continue  # relationship already recorded
+            return slug
+        return None
 
     def _auto_scene_slug(self) -> tuple[str, str]:
         """Deterministic (no-LLM) slug + description for a forced scene advance.
@@ -6196,6 +6247,8 @@ class RPJotEngine:
         # bootstrap, or the hard auto-advance) rebaselines staleness here.
         self._scene_start_turn = self._turn_count
         self._scene_stale_streak = 0
+        # MC_REL: re-arm one MC-relationship nudge per pair for the new scene.
+        self._mc_rel_nudge_shown.clear()
 
         note = Note.jot(
             message=description,
@@ -7588,7 +7641,9 @@ class RPJotEngine:
             "debtor, liar, inflicter, or observer; char_b is the target or "
             "recipient. description carries the main content; label is a short "
             "kebab-case type tag (bond type / pattern / power basis); detail is "
-            "the second layer (significance, stakes, origin, the concealed truth)."
+            "the second layer (significance, stakes, origin, the concealed truth). "
+            "This applies to the main character's relationships too, not only "
+            "NPC↔NPC pairs — record how the MC and an NPC come to stand."
         ),
         parameters={
             "type": "object",
