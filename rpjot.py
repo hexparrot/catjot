@@ -439,6 +439,18 @@ _REF_DEREF_CAP = 12
 
 # MOVEMENT_TREE §3.0 — locale-graph edge encoding. An edge endpoint is a full
 # canonical room path; the tag value is that path with "/"→"." so it is a single
+def _slug_path(s: str) -> str:
+    """Canonicalize a location path to kebab-case per segment.
+
+    Lowercases and maps spaces/underscores/punctuation to '-', leaving '/'
+    separators intact (so `manor/upper_hallways` → `manor/upper-hallways`). This
+    is the ONE source of truth for the slug regex that _canonicalize_room and the
+    resume recovery both rely on; every seam that stores a location must funnel
+    through it so two spellings of one room can never split into two keys.
+    """
+    return re.sub(r"[^a-z0-9/-]+", "-", (s or "").strip().lower()).strip("-/")
+
+
 # whitespace-safe, "/"-free tag word (catjot tags split on whitespace).
 def _edge_tag(path: str) -> str:
     """Encode a canonical room path as an adj: tag word (manor/foyer → adj:manor.foyer)."""
@@ -687,14 +699,20 @@ RECORD_EVENT_DEDUP_RATIO = 0.90  # skip a record_event ≥ this similar to a rec
 RECORD_EVENT_DEDUP_WINDOW = 8  # compare against at most this many recent same-loc notes
 _DEDUP_SKIP_PREFIX = "[dedup-skip] "  # marks a near-duplicate record_event that was NOT written
 
-# System prompt for Step 1: World State Resolution
-_STEP1_SYSTEM = (
+# System prompt for Step 1: World State Resolution. The capability list in the
+# first sentence is assembled per-turn by _build_step1_system() from the ENABLED
+# families, so a disabled family (RPJOT_DISABLE) never advertises a lookup the
+# schema doesn't carry — the same family_enabled() gate ProseStep uses for the
+# yomi injection. Order below = reading order in the sentence; family None is the
+# always-on core.
+_STEP1_SYSTEM_PREFIX = (
     "You are a scene intelligence system for a text-based RPG. "
     "Your only job is to retrieve facts — not to narrate or decide what happens. "
     "Read the player's input (note the [MC ...] directive prefix and who is "
-    "acting) and call lookup tools to gather everything relevant: character "
-    "profiles, relationships, location details, story context, yomi, and "
-    "conscience constraints. Then output a structured WORLD STATE document "
+    "acting) and call lookup tools to gather everything relevant: "
+)
+_STEP1_SYSTEM_SUFFIX = (
+    ". Then output a structured WORLD STATE document "
     "summarizing what you found. Be comprehensive — it feeds both the "
     "compliance and prose steps.\n"
     "The VERY FIRST line of your output must be `CURRENT ROOM: <path>` naming "
@@ -703,6 +721,43 @@ _STEP1_SYSTEM = (
     "the room has not changed since the current location, write "
     "`CURRENT ROOM: UNCHANGED`. Base this on scene understanding (who moved whom, "
     "where), not on places merely mentioned, offered, or thought about."
+)
+_STEP1_CAPABILITIES = [
+    ("character profiles", None),
+    ("relationships", "relationships"),
+    ("location details", None),
+    ("story context", None),
+    ("yomi", "yomi"),
+    ("conscience constraints", "conscience"),
+]
+
+
+def _join_oxford(phrases: list) -> str:
+    """Join with commas and a final 'and' (Oxford comma for 3+)."""
+    if len(phrases) <= 1:
+        return phrases[0] if phrases else ""
+    if len(phrases) == 2:
+        return f"{phrases[0]} and {phrases[1]}"
+    return ", ".join(phrases[:-1]) + ", and " + phrases[-1]
+
+
+def _build_step1_system(engine) -> str:
+    """Step 1 system prompt with the capability list filtered to enabled families."""
+    phrases = [
+        phrase
+        for phrase, family in _STEP1_CAPABILITIES
+        if family is None or engine.family_enabled(family)
+    ]
+    return _STEP1_SYSTEM_PREFIX + _join_oxford(phrases) + _STEP1_SYSTEM_SUFFIX
+
+
+# Canonical all-families-enabled form. Production goes through
+# _build_step1_system(engine); this constant is the static baseline the LLM-gated
+# step-1 selection test imports.
+_STEP1_SYSTEM = (
+    _STEP1_SYSTEM_PREFIX
+    + _join_oxford([phrase for phrase, _ in _STEP1_CAPABILITIES])
+    + _STEP1_SYSTEM_SUFFIX
 )
 
 # Placeholder input for the idle-window speculative step-1 run. Explicit
@@ -741,7 +796,6 @@ _STEP3_SYSTEM = (
     "Use the World State for atmospheric detail, sensory imagery, and character voice. "
     "Use the Narrative Facts as the factual skeleton: these things happened this turn and "
     "must appear in your prose. Do not call tools. Do not plan. Only narrate. "
-    "Write prose that is immersive, sensory, and character-voiced. "
     "Vary sentence structure and rhythm. Show, do not tell."
 )
 
@@ -1226,7 +1280,7 @@ class WorldStateStep:
 
         if seed_doc is not None:
             messages = [
-                {"role": "system", "content": _STEP1_SYSTEM},
+                {"role": "system", "content": _build_step1_system(self.engine)},
                 {
                     "role": "user",
                     "content": self._build_seeded_message(classified_input, seed_doc),
@@ -1269,7 +1323,7 @@ class WorldStateStep:
     def _run_full(self, classified_input: str) -> str:
         """The full (unseeded) Step 1 path — behavior identical to legacy run()."""
         messages = [
-            {"role": "system", "content": _STEP1_SYSTEM},
+            {"role": "system", "content": _build_step1_system(self.engine)},
             {"role": "user", "content": self._build_initial_message(classified_input)},
         ]
         tool_results_collected: list[str] = []
@@ -1835,9 +1889,11 @@ class ProseStep:
             else ""
         )
 
+        # tool_choice="none" (below) hard-blocks tools and _STEP3_SYSTEM already
+        # says "Do not call tools. Do not plan." — so this per-turn header only
+        # needs the phase cue, not a third restatement of the no-tools rule.
         injection_parts = [
-            "PROSE PHASE — write the narrative response now. "
-            "Do not plan or invoke any tools; this is the final prose generation step."
+            "PROSE PHASE — write the narrative response now."
         ]
         if world_doc.strip():
             injection_parts.append(
@@ -2898,6 +2954,9 @@ class RPJotEngine:
         plain re-mark used to strand) — but does NOT reset attention/mood:
         scene-move semantics stay owned by navigate_to.
         """
+        # Defense-in-depth: callers already canonicalize, but a raw path here
+        # would store a non-canonical session.location and split the room's data.
+        path = _slug_path(path)
         if self._ensure_location_node(path):
             # Stub minting is worth surfacing (LM §5 audit advisory) — and the
             # header line doubles as a save_location prompt for the model.
@@ -3870,8 +3929,8 @@ class RPJotEngine:
         nothing and the output is byte-identical to the pre-graph tree walk (I8).
 
         Examples:
-            "manor/foyer/kitchen" → "manor/foyer/drawing_room"
-            ⟹ ["manor/foyer/kitchen", "manor/foyer", "manor/foyer/drawing_room"]
+            "manor/foyer/kitchen" → "manor/foyer/drawing-room"
+            ⟹ ["manor/foyer/kitchen", "manor/foyer", "manor/foyer/drawing-room"]
 
             "manor/foyer/staircase/elevator" → "manor/foyer"
             ⟹ ["manor/foyer/staircase/elevator", "manor/foyer/staircase", "manor/foyer"]
@@ -4046,8 +4105,7 @@ class RPJotEngine:
         """
         if not proposed:
             return None
-        slug = proposed.strip().lower()
-        slug = re.sub(r"[^a-z0-9/-]+", "-", slug).strip("-/")
+        slug = _slug_path(proposed)
         if not slug:
             return None
         leaf = slug.split("/")[-1]
@@ -4163,6 +4221,7 @@ class RPJotEngine:
         existing edges ∪ {the other endpoint}. Re-adding an existing edge writes
         nothing (union unchanged → skip). A self-edge is a no-op.
         """
+        a, b = _slug_path(a), _slug_path(b)
         if not a or not b or a == b:
             return
         self._ensure_location_node(a)
@@ -4900,17 +4959,13 @@ class RPJotEngine:
             _tok(ctx_rendered),
         )
         prompt = (
-            "You are analyzing scene context. Extract information and respond "
-            "ONLY with valid JSON, no other text.\n\n"
+            "Analyze the scene context and reply with ONLY the JSON object "
+            "below — no prose, no markdown.\n\n"
             "Context:\n%s\n\n"
             "Rules:\n"
             "- noteworthy_objects: physical objects explicitly mentioned or strongly implied\n"
             "- established_props: objects with confirmed narrative/story significance\n"
-            "- Use empty lists if nothing qualifies\n"
-            "- No explanation, no markdown, only the JSON object\n"
-            "- Each list must contain only plain strings, not objects\n"
-            "- Do not include any keys other than "
-            '"noteworthy_objects" and "established_props"\n\n'
+            "- Use empty lists if nothing qualifies\n\n"
             "Respond with this exact JSON structure:\n"
             "{\n"
             '  "noteworthy_objects": ["object name and brief detail"],\n'
@@ -5197,7 +5252,11 @@ class RPJotEngine:
         """Compute traversal path and move to a new location."""
         logger.info("ENTER _tool_navigate_to: location_name=%r", location_name)
 
-        raw_dest = location_name
+        # Slug-normalize the LLM's raw destination BEFORE resolve_destination:
+        # resolve_destination does pure path logic and returns its input verbatim,
+        # so an underscore/space spelling here would seed session.location (and the
+        # adj: edges) with a non-canonical variant that later trips [LOCDRIFT].
+        raw_dest = _slug_path(location_name)
         from_loc = self.session.location
 
         resolved_dest, nav_type = self.resolve_destination(
@@ -5452,6 +5511,12 @@ class RPJotEngine:
     def _tool_save_location(self, name: str, description: str, tags: str = ""):
         """Persist a location's description to notes."""
         logger.info("ENTER _tool_save_location: name=%r", name)
+
+        # Canonicalize the name to kebab-case so a saved node keys identically to
+        # a navigated/record_event one (no underscore/hyphen split of one room).
+        name = _slug_path(name)
+        if not name:
+            return "Location not saved: empty or invalid name."
 
         tag_str = tags.strip() if tags else ""
 

@@ -6760,6 +6760,35 @@ class TestLocationPrecision(unittest.TestCase):
         )
         self.assertEqual(len(self._events_at("manor/secret-garden")), 1)
 
+    def test_navigate_to_canonicalizes_underscore(self):
+        # navigate_to must slug-normalize its raw destination before it becomes
+        # session.location — otherwise an underscore spelling seeds a non-canonical
+        # room key that later trips [LOCDRIFT] against hyphenated record_event.
+        eng = self._engine(self.FOYER)
+        eng._tool_navigate_to("manor/upper_hallways")
+        self.assertEqual(eng.session.location, "manor/upper-hallways")
+
+    def test_save_location_canonicalizes_underscore(self):
+        # A saved node must key identically to a navigated/record_event one.
+        eng = self._engine(self.FOYER)
+        eng._tool_save_location("manor/drawing_room", "A quiet drawing room.")
+        self.assertTrue(eng._location_node_exists("manor/drawing-room"))
+        self.assertFalse(eng._location_node_exists("manor/drawing_room"))
+
+    def test_navigate_underscore_then_record_event_no_locdrift(self):
+        # Regression for the reported bug: navigate to an underscore-spelled room,
+        # then file an MC-tagged event there — session and filed location now agree,
+        # so no "filed at ... but session is ..." drift warning is emitted.
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_navigate_to("manor/upper_hallways")
+        eng._tool_record_event(
+            "Bartholomew pauses on the landing.",
+            "exp:bartholomew",
+            location="manor/upper-hallways",
+        )
+        drift = [w for w in eng._loc_warnings if "but session is" in w]
+        self.assertEqual(drift, [])
+
     def test_record_event_mc_stationary_auto_moves(self):
         eng = self._mc_engine(self.FOYER)
         eng._tool_record_event(

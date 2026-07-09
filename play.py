@@ -30,6 +30,7 @@ from rpjot import (
     MODEL_CONTEXT_LIMIT_TOKS,
     _RESPONSE_RESERVE_TOKS,
     _msg_toks,
+    _slug_path,
 )
 from catjot import Note, ContextBundle, NoteContext, SearchType, call_llm
 
@@ -781,10 +782,10 @@ def recover_deterministic_state():
     ev = _newest_under((SearchType.TREE, PWD_EVENTS))
     if ev and ev.pwd.startswith(PWD_EVENTS + "/"):
         raw_loc = ev.pwd.removeprefix(PWD_EVENTS + "/").strip("/")
-        # Slug-normalize (same regex as _canonicalize_room): a historically
-        # fragmented pwd (manor/evie_quarters) must not seed session.location
-        # with a non-canonical variant on resume.
-        location = re.sub(r"[^a-z0-9/-]+", "-", raw_loc.lower()).strip("-/") or None
+        # Slug-normalize (shared _slug_path): a historically fragmented pwd
+        # (manor/evie_quarters) must not seed session.location with a
+        # non-canonical variant on resume.
+        location = _slug_path(raw_loc) or None
 
     scene = None
     sc = _newest_under((SearchType.TREE, PWD_SCENES))
