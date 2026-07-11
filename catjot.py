@@ -2226,7 +2226,8 @@ def main():
         "  jot t friendly   search all notes, filtering by (tag), case-sensitive\n"
         "  jot newsr        create a new note designed for spaced repetition practice\n"
         "  jot sr           iterate through all scheduled (sr) spaced repetition notes\n"
-        "  jot llm          talk to a cat naturally to find information\n",
+        "  jot llm          talk to a cat naturally to find information\n"
+        "  jot mcp          serve notes over MCP (stdio) for an external host\n",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -2385,6 +2386,7 @@ def main():
             "ITERATE_SPACED_REPETITIONS": ["sr"],
             "CHAT": ["chat", "catgpt", "c"],
             "LLM": ["llm"],
+            "START_MCP_SERVER": ["mcp"],
             "CONVO": [
                 "cat",
                 "catenate",
@@ -3009,6 +3011,26 @@ def main():
 """  # credits felix lee
 
                 alternate_last_n_lines(TWOCAT, 5)
+            elif args.additional_args[0] in SHORTCUTS["START_MCP_SERVER"]:
+                # Delegate to the standalone MCP server (catjot_mcp.py).  Kept in
+                # its own module so this file stays copy-one-file usable and no
+                # blocking stdio server loop lands in the CLI; the import is lazy
+                # so a missing catjot_mcp.py degrades to a message, not a crash.
+                try:
+                    import catjot_mcp
+                except ImportError:
+                    print(
+                        "jot mcp requires catjot_mcp.py alongside catjot.py.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                # The server binds CATJOT_FILE itself; pass the CLI-resolved path
+                # explicitly so both honour the same override.  Writes stay
+                # opt-in via CATJOT_MCP_WRITES=1 (read-only by default).
+                catjot_mcp.serve(
+                    notefile=NOTEFILE,
+                    allow_writes=environ.get("CATJOT_MCP_WRITES") == "1",
+                )
             elif args.additional_args[0] in SHORTCUTS["BULK_MANAGE_NOTES"]:
                 import tempfile
                 import subprocess
