@@ -175,6 +175,7 @@ The abbreviated and (parenthesized) forms are both acceptable.
 | `jot l N` | (last) show last N written notes from this directory only |
 | `jot l ~N` | (last) show N-th to last written note from this directory only |
 | `jot llm` | talk to a cat naturally; AI searches all note fields to answer your query |
+| `jot mcp` | serve notes over MCP (stdio) so an external host can search/read them |
 | `jot m <term>` | (match) case-sensitive `<term>` within message payload |
 | `jot p` | (pop) delete the last-written note in this pwd |
 | `jot pl` | (payload) show last-written note, message only, omitting headers |
@@ -385,3 +386,35 @@ $ jot -t convo-1719967764 continue 1696727387
 $ jot continue 1696727387
          # Using the provided timestamp, auto-match the convo-* tag, and truncate notes after the provided timestamp
 ```
+
+### MCP server (expose your notes to an AI host)
+
+Where `jot llm` makes catjot the *host* that drives a model, `jot mcp` flips the
+direction: it serves your notes over the [Model Context Protocol](https://modelcontextprotocol.io)
+so any MCP host — Claude Code, Claude Desktop, an IDE extension — can search,
+list, and read them as first-class tools. It speaks JSON-RPC 2.0 over stdio
+using only the standard library (no extra dependency).
+
+```
+$ jot mcp                              # read-only: search / list / get
+$ python catjot_mcp.py                 # same, run directly
+$ python catjot_mcp.py --allow-writes  # also expose create_note
+```
+
+Register it with Claude Code:
+
+```
+$ claude mcp add catjot -- python /path/to/catjot_mcp.py
+```
+
+The note file served is `$CATJOT_FILE` (falling back to `~/.catjot`), or
+`--notefile PATH`. Writes are **off by default** — a read-only posture for a
+surface an external model drives; enable note creation with `--allow-writes` or
+`CATJOT_MCP_WRITES=1`. Tools exposed:
+
+| Tool | Description |
+|------|-------------|
+| `search_notes(field, query)` | search one field (tag/context/message/directory); returns full notes |
+| `list_notes(directory, tree)` | notes written from a directory, optionally its whole subtree |
+| `get_note(timestamp)` | a single note by its `now` id |
+| `create_note(message, tag, context, directory)` | *(writes only)* append a new note |
