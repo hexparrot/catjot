@@ -639,6 +639,50 @@ class TestTaker(unittest.TestCase):
             iters += 1
         self.assertEqual(iters, 1)
 
+    def test_whitespace_only_message_rejected(self):
+        # Regression: a whitespace-only message used to slip past the guard
+        # (truthy string), strip down to "\n", and land an empty note on disk.
+        Note.append(TMP_CATNOTE, Note.jot("a real note"))
+
+        for blank in ("   ", "\t", "\n", " \n\t "):
+            with self.assertRaises(ValueError):
+                Note.jot(blank)
+
+        # nothing whitespace-only got written; only the real note remains
+        iters = 0
+        for inst in Note.iterate(TMP_CATNOTE):
+            iters += 1
+        self.assertEqual(iters, 1)
+
+    def test_newline_in_tag_context_does_not_corrupt_store(self):
+        # Regression: a newline in tag/context injected extra lines into the
+        # record and desynced the parser, mangling this note's fields (and pwd
+        # silently falling back to cwd) plus any that followed.
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(
+                "real body",
+                pwd="/tmp/stamped",
+                tag="foo\nbar",
+                context="ctx\nDate:9999",
+            ),
+        )
+        # A following note must remain independently parseable.
+        Note.append(TMP_CATNOTE, Note.jot("second note", pwd="/tmp/second"))
+
+        notes = list(Note.iterate(TMP_CATNOTE))
+        self.assertEqual(len(notes), 2)
+
+        first = notes[0]
+        self.assertEqual(first.pwd, "/tmp/stamped")
+        self.assertEqual(first.tag, "foo bar")
+        self.assertEqual(first.context, "ctx Date:9999")
+        self.assertEqual(first.message, "real body\n")
+
+        second = notes[1]
+        self.assertEqual(second.pwd, "/tmp/second")
+        self.assertEqual(second.message, "second note\n")
+
     def test_separator_in_data_detectable(self):
         NOTEFILE = "tests/edgecase.jot"
         multi = Note.iterate(NOTEFILE)

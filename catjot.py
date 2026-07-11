@@ -403,6 +403,16 @@ class Note(object):
         else:
             return False
 
+    @staticmethod
+    def _single_line(value):
+        """Collapse any newlines/carriage returns in *value* to spaces.
+
+        tag and context each occupy a single line in the on-disk record
+        format; a stray newline in either would inject spurious lines and
+        desync the parser for this note *and* those that follow it.
+        """
+        return value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
     @classmethod
     def jot(cls, message, tag="", context="", pwd=None, now=None):
         """Create a new Note without touching the filesystem.
@@ -427,15 +437,15 @@ class Note(object):
         """
         from time import time
 
-        if not message:
+        if not message.strip():
             raise ValueError
 
         return Note(
             {
                 "pwd": pwd or getcwd(),
                 "now": now or int(time()),
-                "tag": tag,
-                "context": context,
+                "tag": cls._single_line(tag),
+                "context": cls._single_line(context),
                 "message": message.strip() + "\n",
             }
         )
@@ -459,12 +469,15 @@ class Note(object):
         if not note.message:
             raise ValueError("Cannot append a note with an empty message")
 
+        # tag and context each occupy a single line in the record format;
+        # collapse any embedded newlines defensively so a Note built outside
+        # of Note.jot() (e.g. directly from a dict) can't desync the parser.
         with open(src, "at") as file:
             file.write(f"{Note.LABEL_SEP}\n")
             file.write(f"{Note.LABEL_PWD}{note.pwd}\n")
             file.write(f"{Note.LABEL_NOW}{note.now}\n")
-            file.write(f"{Note.LABEL_TAG}{note.tag}\n")
-            file.write(f"{Note.LABEL_CTX}{note.context}\n")
+            file.write(f"{Note.LABEL_TAG}{Note._single_line(note.tag)}\n")
+            file.write(f"{Note.LABEL_CTX}{Note._single_line(note.context)}\n")
             file.write(f"{Note.LABEL_ARG}{note.message}\n\n")
 
     @classmethod

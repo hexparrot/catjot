@@ -266,6 +266,42 @@ class TestWriteTool(MCPTestBase):
         self.assertEqual(len(on_disk), 1)
         self.assertEqual(on_disk[0].message.strip(), "note via MCP")
 
+    def test_create_note_whitespace_message_is_error(self):
+        # Regression: a whitespace-only body used to slip past the non-empty
+        # guard and land an empty note on disk.  It must now surface as an
+        # error and write nothing.
+        self.start(allow_writes=True)
+        data, is_err = self.tool_result("create_note", {"message": "   "})
+        self.assertTrue(is_err)
+        self.assertIn("error", data)
+        self.assertEqual(list(Note.iterate(self.notefile)), [])
+
+    def test_create_note_newline_in_tag_context_does_not_corrupt(self):
+        # Regression: a newline in the LLM-supplied tag/context used to inject
+        # extra lines and desync the parser, mangling the note and its pwd.
+        self.start(allow_writes=True)
+        data, is_err = self.tool_result(
+            "create_note",
+            {
+                "message": "real body",
+                "tag": "foo\nbar",
+                "context": "ctx\nDate:9999",
+                "directory": "/tmp/stamped",
+            },
+        )
+        self.assertFalse(is_err)
+        # returned payload is consistent with what lands on disk
+        self.assertEqual(data["tag"], "foo bar")
+        self.assertEqual(data["context"], "ctx Date:9999")
+
+        on_disk = list(Note.iterate(self.notefile))
+        self.assertEqual(len(on_disk), 1)
+        note = on_disk[0]
+        self.assertEqual(note.pwd, "/tmp/stamped")
+        self.assertEqual(note.tag, "foo bar")
+        self.assertEqual(note.context, "ctx Date:9999")
+        self.assertEqual(note.message.strip(), "real body")
+
     def test_create_note_absent_when_readonly(self):
         self.start(allow_writes=False)
         _, is_err = self.tool_result("create_note", {"message": "x"})
