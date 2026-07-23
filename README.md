@@ -228,6 +228,16 @@ export CATJOT_FILE=$HOME/.catjot        # this is the default when unset
 export CATJOT_FILE=$HOME/notesandmusings
 ```
 
+Or pass `-f`/`--notefile` to force a jotfile for a single invocation. The flag
+supersedes `CATJOT_FILE`, and unlike the environment variable it also governs
+the LLM/tool-layer paths (`jot llm`, `jot mcp`), making it the reliable choice
+for MCP hosts and other wrappers where environment plumbing is awkward.
+
+```
+jot -f $HOME/notesandmusings last
+echo "meeting notes" | jot --notefile /shared/team.jot
+```
+
 ### Returning Only the (date)/Timestamp Value
 
 Add `-d` to the command to return only the timestamps for the matched notes.

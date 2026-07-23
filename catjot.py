@@ -2183,9 +2183,12 @@ def main():
     - ``printout(note_obj, message_only, time_only)`` – formats a single note
       for display according to active flags.
 
-    **Environment variable override**: if ``CATJOT_FILE`` is set and non-empty
-    it replaces ``Note.NOTEFILE`` for this invocation (file is touch-created if
-    it doesn't yet exist).
+    **Notefile override**: ``-f/--notefile PATH`` forces the jotfile for this
+    invocation, superseding ``CATJOT_FILE``; it also rebinds ``Note.NOTEFILE``
+    so the LLM/tool-layer paths (``ContextBundle``, ``run_tool_loop``) honour
+    it.  Otherwise, if ``CATJOT_FILE`` is set and non-empty it replaces the
+    notefile for the command branches only.  Either way the file is
+    touch-created if it doesn't yet exist.  Precedence: flag > env > ~/.catjot.
 
     **LLM subcommands** (``jot chat``, ``jot convo``, ``jot llm``):
     - ``chat``  – one-shot: build a single-turn messages list, call
@@ -2262,6 +2265,13 @@ def main():
         const="context",
         help="search notes by context / read pipe into context as amendment",
     )
+    parser.add_argument(
+        "-f",
+        "--notefile",
+        type=str,
+        default=None,
+        help="use this jotfile for all reads/writes (supersedes CATJOT_FILE)",
+    )
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument(
         "-d", action="store_true", help="only return (date)/timestamps for match"
@@ -2272,7 +2282,15 @@ def main():
     NOTEFILE = Note.NOTEFILE
     import sys
 
-    if "CATJOT_FILE" in environ:
+    if args.notefile:
+        # explicit flag supersedes CATJOT_FILE and reaches every code path:
+        # rebind the class attribute (as catjot_mcp.bind_notefile does) so
+        # ContextBundle / run_tool_loop / _all_tags honour it too
+        Note.NOTEFILE = args.notefile
+        NOTEFILE = args.notefile
+        with open(NOTEFILE, "a") as file:
+            pass
+    elif "CATJOT_FILE" in environ:
         # the environment variable will always supercede $HOME default when set
         if environ["CATJOT_FILE"]:  # truthy test for env that exists but unset
             NOTEFILE = environ["CATJOT_FILE"]

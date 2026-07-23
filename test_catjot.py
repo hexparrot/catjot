@@ -1564,5 +1564,77 @@ class TestCallLLMTransport(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
 
+class TestNotefileFlag(unittest.TestCase):
+    """Drive the CLI as a subprocess: -f/--notefile must supersede CATJOT_FILE.
+
+    Subprocess isolation is deliberate — the flag rebinds the Note.NOTEFILE
+    class attribute, and per-process runs keep that mutation from leaking
+    into other tests.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = os.path.dirname(os.path.abspath(__file__))
+        self.flagfile = os.path.join(self.tmpdir.name, "flag.jot")
+        self.envfile = os.path.join(self.tmpdir.name, "env.jot")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _run(self, cli_args, catjot_file=None, stdin=None):
+        import subprocess
+
+        env = dict(os.environ)
+        env["HOME"] = self.tmpdir.name  # keep the real ~/.catjot out of reach
+        env.pop("CATJOT_FILE", None)
+        if catjot_file is not None:
+            env["CATJOT_FILE"] = catjot_file
+        return subprocess.run(
+            [sys.executable, os.path.join(self.repo, "catjot.py")] + cli_args,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=self.repo,
+        )
+
+    def _contents(self, path):
+        with open(path, "r") as f:
+            return f.read()
+
+    def test_flag_write_and_read_back(self):
+        result = self._run(["-f", self.flagfile], stdin="hello flag\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("hello flag", self._contents(self.flagfile))
+        # default notefile under the sandboxed HOME must not appear
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir.name, ".catjot")))
+
+        result = self._run(["-f", self.flagfile, "h"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("hello flag", result.stdout)
+
+    def test_flag_supersedes_catjot_file(self):
+        result = self._run(
+            ["-f", self.flagfile], catjot_file=self.envfile, stdin="into flag\n"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("into flag", self._contents(self.flagfile))
+        # env branch is skipped entirely: envfile is not even touch-created
+        self.assertFalse(os.path.exists(self.envfile))
+
+    def test_env_only_behavior_unchanged(self):
+        result = self._run([], catjot_file=self.envfile, stdin="into env\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("into env", self._contents(self.envfile))
+        self.assertFalse(os.path.exists(self.flagfile))
+
+    def test_long_form_matches_short(self):
+        result = self._run([f"--notefile={self.flagfile}"], stdin="long form\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("long form", self._contents(self.flagfile))
+
+
 if __name__ == "__main__":
     unittest.main()
