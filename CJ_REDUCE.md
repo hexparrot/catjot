@@ -1,5 +1,10 @@
 # CJ_REDUCE — decompose `main()` into a command-handler registry
 
+> **Status: implemented** on branch `cj_reduce` (decomposition in commit
+> "Decompose main() into module-level cmd_* handlers", approved behavior fixes in
+> "Error with exit 2 on bad CLI input"). Line references below describe the
+> pre-refactor file.
+
 ## Context
 
 `catjot.py` is a 3,547-line single-file app that is also a public library — `catjot_mcp.py`,
