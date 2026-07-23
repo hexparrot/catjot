@@ -2236,15 +2236,24 @@ def _canonical(verb):
     return _ALIAS_TO_ACTION.get(verb)
 
 
-# special case "summarize" implies convo
-# and should continue to the SHORTCUTS dispatch
-# with no actions necessary in the -t flag path
-# also special case "continue" allows dropping past the -t flag path
-# and allows evaluation below for CONVO
-# continue only works with [tags]
-_TAG_FLAG_SKIP = set(
-    ["continue", "sum", "summary", "summarize", "convo", "chat", "scoop"]
+# Verbs that must bypass the -t flag search and reach the chat/convo/scoop
+# dispatch instead (e.g. `jot -t convo-123 continue`, `jot -t x scoop`).
+# Derived from SHORTCUTS so alias edits can't drift: the old hardcoded list
+# had `chat` but not `catgpt`/`c`, `scoop` but not `cherry-pick`, and none
+# of `cat`/`catenate`/`talk`.
+_TAG_FLAG_SKIP = (
+    set(SHORTCUTS["CONVO"]) | set(SHORTCUTS["CHAT"]) | set(SHORTCUTS["BULK_MANAGE_NOTES"])
 )
+
+
+def _arity_error(args):
+    """Report an unsupported verb arity to stderr and exit 2 (approved fix)."""
+    given = len(args.additional_args) - 1
+    print(
+        f"jot: '{args.additional_args[0]}' does not take {given} additional argument(s)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 class Ctx:
@@ -2900,6 +2909,8 @@ def cmd_last(ctx):
                 printout(last_notes[-record_count_to_show], time_only=args.d)
             except IndexError:
                 pass
+    else:
+        _arity_error(args)
 
 
 def cmd_head(ctx):
@@ -2943,6 +2954,8 @@ def cmd_head(ctx):
                 printout(last_notes[-record_count_to_show], time_only=args.d)
             except IndexError:
                 pass
+    else:
+        _arity_error(args)
 
 
 def cmd_pop(ctx):
@@ -2950,7 +2963,7 @@ def cmd_pop(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # always deletes the most recently created note in this PWD
     try:
         Note.pop(NOTEFILE, getcwd())
@@ -2969,7 +2982,7 @@ def cmd_home(ctx):
     NOTEFILE = ctx.notefile
     params = ctx.params()
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # if simply typed, show home notes
     # if piped to, save as home note
     if sys.stdin.isatty():
@@ -2995,7 +3008,7 @@ def cmd_dump(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # show all notes, from everywhere, everywhen
     with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
         for inst in nc:
@@ -3024,7 +3037,14 @@ def cmd_payload(ctx):
         # returns the message only (no pwd, no timestamp, no context).
         # when provided a timestamp, any notes matching timestamp
         # will be sent to stdout, concatenated in order of appearance
-        flattened = int(args.additional_args[1])
+        try:
+            flattened = int(args.additional_args[1])
+        except ValueError:
+            print(
+                f"jot: expected a numeric timestamp, got '{args.additional_args[1]}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         if flattened:  # if truthy, e.g., timestamp, use it for search
             with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
                 for inst in nc:
@@ -3045,13 +3065,15 @@ def cmd_payload(ctx):
                 print("No notes to show.")
             else:
                 printout(last_note, message_only=True)
+    else:
+        _arity_error(args)
 
 
 def cmd_zzz(ctx):
     """SLEEPING_CAT: nap with a kitten."""
     args = ctx.args
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     def alternate_last_n_lines(text, n):
         import time
 
@@ -3088,7 +3110,7 @@ def cmd_mcp(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # Delegate to the standalone MCP server (catjot_mcp.py).  Kept in
     # its own module so this file stays copy-one-file usable and no
     # blocking stdio server loop lands in the CLI; the import is lazy
@@ -3116,7 +3138,7 @@ def cmd_scoop(ctx):
     NOTEFILE = ctx.notefile
     params = ctx.params()
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     import tempfile
     import subprocess
     import os
@@ -3189,7 +3211,7 @@ def cmd_stray(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     import os
 
     with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
@@ -3209,7 +3231,7 @@ def cmd_graphql(ctx):
     """GRAPHQL: query notes with k:v pairs from a pipe, or pwd tree."""
     args = ctx.args
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # allow reading from "cat|jot ql" with k:v pairs space separated:
     # pwd /home/willy
     # -> {"pwd": "/home/willy"}
@@ -3250,7 +3272,7 @@ def cmd_newsr(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     print("Enter note prompt/hint:")
     prompt = flatten_pipe(sys.stdin.readlines())  # this matches context
     print("Enter answer:")
@@ -3265,7 +3287,7 @@ def cmd_sr(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     from datetime import datetime, timedelta
 
     def next_interval(number, intervals=[1, 2, 4, 7, 12]):
@@ -3379,7 +3401,7 @@ def cmd_llm(ctx):
     """LLM: agentic grounded Q&A over the notefile via run_tool_loop."""
     args = ctx.args
     if len(args.additional_args) != 1:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     if sys.stdin.isatty():  # jot llm
         print_ascii_cat_with_text(
             "Hi, what can I help you with today? ",
@@ -3411,7 +3433,7 @@ def cmd_match(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # match if "term [+term2] [..]" exists in any line of the note
     flattened = flatten(args.additional_args[1:])
     with NoteContext(NOTEFILE, (SearchType.MESSAGE, flattened)) as nc:
@@ -3428,7 +3450,7 @@ def cmd_search(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # match if "term [+term2] [..]" exists in any line of the note
     flattened = flatten(args.additional_args[1:])
     with NoteContext(NOTEFILE, (SearchType.MESSAGE_I, flattened)) as nc:
@@ -3445,9 +3467,16 @@ def cmd_ts(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # match if timestamp matches!
-    flattened = int(flatten(args.additional_args[1:]))
+    try:
+        flattened = int(flatten(args.additional_args[1:]))
+    except ValueError:
+        print(
+            f"jot: expected a numeric timestamp, got '{flatten(args.additional_args[1:])}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
         for inst in nc:
             printout(inst, time_only=args.d)
@@ -3462,7 +3491,7 @@ def cmd_remove(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # delete any notes matching the provided timestamp
     flattened = 0
     try:
@@ -3482,7 +3511,7 @@ def cmd_show_tag(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # show all notes with tag
     flattened = args.additional_args[1]
     with NoteContext(NOTEFILE, (SearchType.TAG, flattened)) as nc:
@@ -3499,7 +3528,7 @@ def cmd_sbs(ctx):
     args = ctx.args
     NOTEFILE = ctx.notefile
     if len(args.additional_args) != 2:
-        return  # unsupported arity: silent no-op, as pre-refactor
+        _arity_error(args)
     # prints a note and allows you to rewrite the line/accept line as-is
     # Acceptable Input:
     # <matched input> = matched input kept
@@ -3528,7 +3557,14 @@ def cmd_sbs(ctx):
             for inst in nc:
                 last_note = inst
     else:
-        user_timestamp = int(args.additional_args[1])
+        try:
+            user_timestamp = int(args.additional_args[1])
+        except ValueError:
+            print(
+                f"jot: expected a numeric timestamp, got '{args.additional_args[1]}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
             for inst in nc:
                 last_note = inst
@@ -3808,7 +3844,11 @@ def main():
             handler = COMMANDS.get(_canonical(verb))
             if handler is not None:
                 handler(ctx)
-            # unknown verb: silent no-op, matching the pre-refactor ladder
+            else:
+                # approved fix: a typo'd verb errors instead of silently
+                # doing nothing (and silently discarding any piped stdin)
+                print(f"jot: unknown command '{verb}'", file=sys.stderr)
+                sys.exit(2)
 
 
 
