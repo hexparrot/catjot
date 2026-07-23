@@ -1564,5 +1564,175 @@ class TestCallLLMTransport(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
 
+class TestNotefileFlag(unittest.TestCase):
+    """Drive the CLI as a subprocess: -f/--notefile must supersede CATJOT_FILE.
+
+    Subprocess isolation is deliberate — the flag rebinds the Note.NOTEFILE
+    class attribute, and per-process runs keep that mutation from leaking
+    into other tests.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = os.path.dirname(os.path.abspath(__file__))
+        self.flagfile = os.path.join(self.tmpdir.name, "flag.jot")
+        self.envfile = os.path.join(self.tmpdir.name, "env.jot")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _run(self, cli_args, catjot_file=None, stdin=None):
+        import subprocess
+
+        env = dict(os.environ)
+        env["HOME"] = self.tmpdir.name  # keep the real ~/.catjot out of reach
+        env.pop("CATJOT_FILE", None)
+        if catjot_file is not None:
+            env["CATJOT_FILE"] = catjot_file
+        return subprocess.run(
+            [sys.executable, os.path.join(self.repo, "catjot.py")] + cli_args,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=self.repo,
+        )
+
+    def _contents(self, path):
+        with open(path, "r") as f:
+            return f.read()
+
+    def test_flag_write_and_read_back(self):
+        result = self._run(["-f", self.flagfile], stdin="hello flag\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("hello flag", self._contents(self.flagfile))
+        # default notefile under the sandboxed HOME must not appear
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir.name, ".catjot")))
+
+        result = self._run(["-f", self.flagfile, "h"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("hello flag", result.stdout)
+
+    def test_flag_supersedes_catjot_file(self):
+        result = self._run(
+            ["-f", self.flagfile], catjot_file=self.envfile, stdin="into flag\n"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("into flag", self._contents(self.flagfile))
+        # env branch is skipped entirely: envfile is not even touch-created
+        self.assertFalse(os.path.exists(self.envfile))
+
+    def test_env_only_behavior_unchanged(self):
+        result = self._run([], catjot_file=self.envfile, stdin="into env\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("into env", self._contents(self.envfile))
+        self.assertFalse(os.path.exists(self.flagfile))
+
+    def test_long_form_matches_short(self):
+        result = self._run([f"--notefile={self.flagfile}"], stdin="long form\n")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("long form", self._contents(self.flagfile))
+
+
+class TestCommandDispatch(unittest.TestCase):
+    """Lock in the cmd_* registry seam introduced by the CJ_REDUCE refactor."""
+
+    def setUp(self):
+        import catjot
+
+        self.catjot = catjot
+
+    def test_every_alias_resolves_to_its_action(self):
+        for action, aliases in self.catjot.SHORTCUTS.items():
+            for alias in aliases:
+                self.assertEqual(self.catjot._canonical(alias), action)
+
+    def test_unknown_alias_resolves_to_none(self):
+        self.assertIsNone(self.catjot._canonical("frobnicate"))
+
+    def test_commands_cover_all_dispatchable_actions(self):
+        # CHAT/CONVO are resolved before the registry (any-arity verbs);
+        # AMEND has aliases but amending is driven by the -a flag path
+        expected = set(self.catjot.SHORTCUTS) - {"CHAT", "CONVO", "AMEND"}
+        self.assertEqual(set(self.catjot.COMMANDS), expected)
+
+    def test_tag_flag_skip_derived_from_shortcuts(self):
+        expected = (
+            set(self.catjot.SHORTCUTS["CONVO"])
+            | set(self.catjot.SHORTCUTS["CHAT"])
+            | set(self.catjot.SHORTCUTS["BULK_MANAGE_NOTES"])
+        )
+        self.assertEqual(self.catjot._TAG_FLAG_SKIP, expected)
+        # the aliases the old hardcoded list had drifted away from
+        for alias in ("c", "catgpt", "cat", "catenate", "talk", "cherry-pick"):
+            self.assertIn(alias, self.catjot._TAG_FLAG_SKIP)
+
+
+class TestCliBadInput(unittest.TestCase):
+    """Unknown verbs, unsupported arity, and non-numeric args error with exit 2."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = os.path.dirname(os.path.abspath(__file__))
+        self.jotfile = os.path.join(self.tmpdir.name, "bad.jot")
+        shutil.copy(os.path.join(self.repo, FIXED_CATNOTE), self.jotfile)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _run(self, cli_args, stdin=None):
+        import subprocess
+
+        env = dict(os.environ)
+        env["HOME"] = self.tmpdir.name
+        env.pop("CATJOT_FILE", None)
+        return subprocess.run(
+            [sys.executable, os.path.join(self.repo, "catjot.py"), "-f", self.jotfile]
+            + cli_args,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=self.repo,
+        )
+
+    def test_unknown_verb_errors(self):
+        result = self._run(["frobnicate"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown command 'frobnicate'", result.stderr)
+
+    def test_unknown_verb_with_pipe_does_not_write(self):
+        before = open(self.jotfile).read()
+        result = self._run(["frobnicate"], stdin="orphaned pipe data\n")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(open(self.jotfile).read(), before)
+
+    def test_wrong_arity_errors(self):
+        result = self._run(["m", "multi", "word", "term"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'m' does not take 3", result.stderr)
+
+        result = self._run(["pop", "extra"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("'pop' does not take 1", result.stderr)
+
+    def test_non_numeric_timestamp_errors_cleanly(self):
+        for argv in (["pl", "abc"], ["ts", "abc"]):
+            result = self._run(argv)
+            self.assertEqual(result.returncode, 2, argv)
+            self.assertIn("expected a numeric timestamp", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_valid_commands_still_succeed(self):
+        result = self._run(["h"])
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("jot:", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
