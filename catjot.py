@@ -37,6 +37,7 @@ Architecture at a glance
 
 import requests
 import json
+import sys
 from functools import partial
 from typing import Callable, List
 from os import environ, getcwd, getenv
@@ -2149,6 +2150,1527 @@ def print_ascii_cat_with_text(
 # START: COMMAND LINE RUNTIME CODE
 
 
+# ---------------------------------------------------------------------------
+# CLI command layer
+#
+# main() parses argv, resolves the notefile, and dispatches through the
+# COMMANDS registry below.  Each cmd_* handler is module-level and takes a
+# Ctx, so every command body is importable and unit-testable.
+# ---------------------------------------------------------------------------
+
+
+def flatten(arg_lst):
+    return " ".join(arg_lst).rstrip()
+
+
+def flatten_pipe(arg_lst):
+    return "".join(arg_lst).rstrip()
+
+
+def printout(note_obj, message_only=False, time_only=False):
+    if message_only:
+        print(note_obj.message, end="")
+    elif time_only:
+        print(note_obj.now)
+    else:  # normal display
+        print(Note.REC_TOP)
+        print(note_obj, end="")
+        print(Note.REC_BOT)
+
+
+# START: USER-EDITABLE AREA
+# this section can be freely customized for all strings
+# in the right-hand side lists.
+
+
+SHORTCUTS = {
+    "MOST_RECENTLY_WRITTEN_ALLTIME": ["HEAD", "head", "h"],
+    "MOST_RECENTLY_WRITTEN_HERE": ["last", "l"],
+    "MATCH_NOTE_NAIVE": ["match", "m"],
+    "MATCH_NOTE_NAIVE_I": ["search", "s", "mi"],
+    "DELETE_MOST_RECENT_PWD": ["pop", "p"],
+    "BULK_MANAGE_NOTES": ["scoop", "cherry-pick"],
+    "NOTES_REFERENCING_ABSENT_DIRS": ["str", "stra", "stray", "strays"],
+    "SHOW_ALL": ["dump", "display", "d"],
+    "MATCH_TIMESTAMP": ["timestamp", "ts"],
+    "REMOVE_BY_TIMESTAMP": ["remove", "r"],
+    "HOMENOTES": ["home"],
+    "SHOW_TAG": ["tagged", "tag", "t"],
+    "AMEND": ["amend", "a"],
+    "MESSAGE_ONLY": ["payload", "pl"],
+    "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
+    "SLEEPING_CAT": ["zzz"],
+    "GRAPHQL": ["graph", "graphql", "ql"],
+    "CREATE_SPACED_REPETITION": ["newsr"],
+    "ITERATE_SPACED_REPETITIONS": ["sr"],
+    "CHAT": ["chat", "catgpt", "c"],
+    "LLM": ["llm"],
+    "START_MCP_SERVER": ["mcp"],
+    "CONVO": [
+        "cat",
+        "catenate",
+        "convo",
+        "continue",
+        "talk",
+        "sum",
+        "summary",
+        "summarize",
+    ],
+}
+
+
+# Default prompt to start jot chat with; the environment variable
+# openai_api_sysrole is consulted at chat time, not at import time.
+CATGPT_ROLE_DEFAULT = (
+    """You're proudly a cat assistant here to help the user in any way you can."""
+)
+# END: USER-EDITABLE AREA
+
+_ALIAS_TO_ACTION = {
+    alias: action for action, aliases in SHORTCUTS.items() for alias in aliases
+}
+
+
+def _canonical(verb):
+    """Resolve a CLI word to its SHORTCUTS action ("h" -> "MOST_RECENTLY_WRITTEN_ALLTIME")."""
+    return _ALIAS_TO_ACTION.get(verb)
+
+
+# Verbs that must bypass the -t flag search and reach the chat/convo/scoop
+# dispatch instead (e.g. `jot -t convo-123 continue`, `jot -t x scoop`).
+# Derived from SHORTCUTS so alias edits can't drift: the old hardcoded list
+# had `chat` but not `catgpt`/`c`, `scoop` but not `cherry-pick`, and none
+# of `cat`/`catenate`/`talk`.
+_TAG_FLAG_SKIP = (
+    set(SHORTCUTS["CONVO"]) | set(SHORTCUTS["CHAT"]) | set(SHORTCUTS["BULK_MANAGE_NOTES"])
+)
+
+
+def _arity_error(args):
+    """Report an unsupported verb arity to stderr and exit 2 (approved fix)."""
+    given = len(args.additional_args) - 1
+    print(
+        f"jot: '{args.additional_args[0]}' does not take {given} additional argument(s)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+class Ctx:
+    """Shared per-invocation state handed to every cmd_* handler."""
+
+    def __init__(self, args, notefile):
+        self.args = args
+        self.notefile = notefile
+
+    def params(self):
+        """Build a fresh flag-seeded params dict.
+
+        Handlers that mutate params must call this exactly once and reuse
+        the returned dict, mirroring the single mutable local the old
+        main() body shared across its branch bodies.
+        """
+        p = {}
+        if self.args.c:
+            p["context"] = flatten(self.args.additional_args)
+        if self.args.t:
+            p["tag"] = self.args.t
+        if self.args.p:
+            p["pwd"] = self.args.p
+        return p
+
+
+
+def cmd_amend_flags(ctx):
+    """-a with -c/-t/-p: amend the most recent note's fields."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    # amend engaged, and at least one amendable value provided
+    # Accepted Usage:
+    # jot -ac this is how i feel
+    # jot -at personal_feelings
+    # jot -ap /home/user
+    # jot -ac "this is how i feel" -t "personal_feelings"
+    # jot -ac "this is how i feel" -t "personal_feelings" -p /home/user
+
+    if sys.stdin.isatty():  # interactive tty, not a pipe!
+        # accept all attrs to change and complete amendment
+        Note.amend(NOTEFILE, **params)
+        Note.commit(NOTEFILE)
+    else:  # pipe always interpreted as context, never pwd/tag
+        # Accepted Usage:
+        # | jot -act "celebration_notes"
+        # | jot -acp "/home/user"
+        # piped data will be a ''.joined string, maintaining newlines
+        piped_data = flatten_pipe(sys.stdin.readlines())
+        params["context"] = piped_data  # overwrite anything in args
+        Note.amend(NOTEFILE, **params)
+        Note.commit(NOTEFILE)
+    sys.exit(0)  # end logic for amending
+
+
+def cmd_flag_context(ctx):
+    """-c: search notes by context, or write a piped note with context."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    if sys.stdin.isatty():  # interactive tty, no pipe!
+        # jot -c observations
+        # not intending to amend instead means match by context field
+        with NoteContext(NOTEFILE, (SearchType.CONTEXT_I, params["context"])) as nc:
+            for inst in nc:
+                printout(inst, time_only=args.d)
+    else:  # yes pipe!
+        # | jot -c musings
+        # write new note with provided context from arg
+        piped_data = flatten_pipe(sys.stdin.readlines())
+        Note.append(NOTEFILE, Note.jot(piped_data, **params))
+
+
+def cmd_flag_tag(ctx):
+    """-t: search notes by tag, or write a piped note with tag."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    if sys.stdin.isatty():  # interactive tty, no pipe!
+        # jot -t project2
+        # not intending to amend instead means match by tag field
+        with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+            for inst in nc:
+                printout(inst, time_only=args.d)
+    else:  # yes pipe!
+        # | jot -t project4
+        # new note with tag set to [project4]
+        piped_data = flatten_pipe(sys.stdin.readlines())
+        Note.append(NOTEFILE, Note.jot(piped_data, **params))
+
+
+def cmd_flag_pwd(ctx):
+    """-p: search notes by pwd, or write a piped note with pwd."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    if sys.stdin.isatty():  # interactive tty, no pipe!
+        # jot -p /home/user
+        # not intending to amend instead means match by pwd field
+        with NoteContext(NOTEFILE, (SearchType.DIRECTORY, params["pwd"])) as nc:
+            for inst in nc:
+                printout(inst, time_only=args.d)
+    else:  # yes pipe!
+        piped_data = flatten_pipe(sys.stdin.readlines())
+        Note.append(NOTEFILE, Note.jot(piped_data, **params))
+
+
+def cmd_chat(ctx):
+    """CHAT: one-shot GPT round-trip, reply saved as a note."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    CATGPT_ROLE = getenv("openai_api_sysrole", CATGPT_ROLE_DEFAULT)
+    # gpt-related functionality
+    # INTRO AND TEXT are both are sent, in that order, to the GPT prompt.
+    # ChatGPT recommends asking the query (intro) before providing the data (message)
+    #
+    # 1- jot chat
+    #               intro=<usertyped>,
+    #               text=,
+    # 2- jot chat 1719967764
+    #               intro=,
+    #               text=note,
+    # 3- jot chat 1719967764 what is this about?
+    #               intro='what is this about?',
+    #               text=note,
+    # 4- jot chat when is national take your cat to work day?
+    #               intro='when is...',
+    #               text=,
+    # 5- echo "tell me about national cat day" | jot chat
+    #               intro='tell me about...',
+    #               text=,
+    # 6- echo "tell me about this file" | jot chat 1719967764
+    #               intro='tell me about this file',
+    #               text=note,
+    # 7- cat requests | jot chat
+    #               intro=requests
+    #               text=,
+    # 8- cat requests | jot chat 1719967764
+    #               intro=requests,
+    #               text=note,
+    # 9- cat broken.jot | jot chat how many notes are there?
+    #               intro='how many notes...',
+    #               text=broken.jot,
+    # 10- cat broken.jot | jot chat 1719967764 how many notes are there?
+    #               intro='how many notes...',
+    #               text=note+broken.jot,
+
+    intro = ""
+    txt = ""
+
+    all_args = list(args.additional_args)
+    all_args.pop(0)
+    timestamp_tgt = all_args[0] if all_args else ""
+
+    if timestamp_tgt.isdigit():
+        all_args.pop(0)
+        with NoteContext(
+            NOTEFILE, (SearchType.TIMESTAMP, int(timestamp_tgt))
+        ) as nc:
+            txt = f"\n\n".join([str(inst) for inst in nc])
+    intro = " ".join(all_args)  # join together everything after 'chat'
+
+    if sys.stdin.isatty():  # interactive tty, no pipe!
+        if (
+            timestamp_tgt.isdigit() and not txt
+        ):  # requested note but wasnt found
+            print_ascii_cat_with_text(
+                "Uh oh, you requested a timestamp with no matching note. "
+                "Try another timestamp and try again.",
+                "",
+            )
+            sys.exit(1)
+        elif not txt and not intro:
+            intro = flatten_pipe(sys.stdin.readlines())
+    else:  # not interactive tty, all pipe!
+        # routes 5,6,7,8,9,10: fill in the blank, pref intro
+        if not txt and not intro:
+            intro = flatten_pipe(sys.stdin.readlines())
+        elif txt and not intro:
+            intro = flatten_pipe(sys.stdin.readlines())
+        elif not txt and intro:
+            txt = flatten_pipe(sys.stdin.readlines())
+        elif txt and intro:
+            txt_append = flatten_pipe(sys.stdin.readlines())
+            txt = (
+                "### FILE 1 ###"
+                + "\n\n"
+                + txt
+                + "\n\n### FILE 2 ###\n\n"
+                + txt_append
+            )
+
+    params["tag"] = params.get("tag", "catgpt")
+
+    full_sendout = f"{intro}\n\n{txt}"
+
+    if is_binary_string(full_sendout):
+        print_ascii_cat_with_text(
+            "Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
+            "Try another file that is text-based, instead.",
+            "",
+        )
+        sys.exit(1)
+    elif len(full_sendout.encode("utf-8")) > 512000:
+        # 512000 bytes is an estimation of 128000  * 4 bytes
+        # a real tokenizer might be better, but this approximation
+        # should be sufficient and cost-proTECtive ($0.15/million tokens)
+        print_ascii_cat_with_text(
+            "Uh oh, the pipe I received seems to have too much data. "
+            f"It has exceeded the 512000 character context limit (data size: {len(full_sendout)})",
+            "",
+        )
+        sys.exit(1)
+
+    messages = [
+        {
+            "role": "system",
+            "content": CATGPT_ROLE,
+        },
+        {
+            "role": "user",
+            "content": full_sendout,
+        },
+    ]
+
+    response = ""
+    if args.w:  # wall of text preferred
+        response = send_prompt_to_endpoint(
+            messages, model_name=args.m, mode="full"
+        )
+
+        if response:
+            retval = response["choices"][0]["message"]["content"]
+            endline = return_footer(response)
+            print_ascii_cat_with_text(
+                intro, retval, endline, intro_color=OutputColors.CHAT_ME
+            )
+            Note.append(NOTEFILE, Note.jot(retval, **params))
+        else:
+            print("Failed to get response from OpenAI API.")
+    else:
+        import time
+
+        print_ascii_cat_with_text(
+            intro, "", "", intro_color=OutputColors.CHAT_ME
+        )
+
+        response_generator = send_prompt_to_endpoint(
+            messages, model_name=args.m, mode="stream"
+        )
+
+        for char in response_generator:
+            print(char, end="", flush=True)
+            response += char
+            time.sleep(0.01)
+        print()
+
+        if response:
+            Note.append(NOTEFILE, Note.jot(response, **params))
+
+            if Note.USE_COLORIZATION:
+                print(
+                    f"{OutputColors.CHAT_END.value}stop.{AnsiColor.RESET.value}"
+                )
+            else:
+                print(f"stop.")
+        else:
+            print("Failed to get response from OpenAI API.")
+
+
+def cmd_convo(ctx):
+    """CONVO: multi-turn conversation loop (continue/summarize/catenate)."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    # gpt-related functionality
+    # Starts a conversation with a GPT;
+    # Conversations include yours and the GPTs conversations for RESUBMISSION BACK,
+    # which means the context grows on every single submission. This can get expensive.
+    # Take note of the prompt/output token counts.
+    # Starting a new conversation will, naturally, reset this count.
+    import time
+
+    now = int(time.time())
+
+    SYS_ROLE_TRIGGER = "SYSTEM:"
+    if not set(args.additional_args) & set(
+        ["sum", "summary", "summarize", "continue"]
+    ):
+        print_ascii_cat_with_text(
+            "Hi, what can I help you with today? ",
+            "Enter your prompt and hit Control-D to submit. \n"
+            + f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'",
+        )
+
+    note_count = 0
+    notable_notes = []  # first and last note for reference
+    messages = []
+    user_input = ""
+
+    if "continue" in args.additional_args:
+        provided_args = list(args.additional_args)
+        provided_args.remove("continue")
+        timestamp = (
+            int(provided_args[0])
+            if len(provided_args) and provided_args[0].isdigit()
+            else 0
+        )
+
+        if timestamp and params.get("tag", ""):
+            # INPUT: timestamp and a tag
+            # OUTPUT: select by tag, include up to timestamp, truncate after
+            # jot -t convo-1234567 continue 2345678
+            with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                value_matched = False
+                notable_notes.append(nc[0])
+                for inst in nc:
+                    if timestamp:
+                        if inst.now == timestamp:
+                            value_matched = True
+                            notable_notes.append(inst)
+                        elif value_matched:
+                            break  # hits only after timestamp is hit AND all matching timestamps
+                    messages.append({"role": "user", "content": inst.context})
+                    messages.append(
+                        {"role": "assistant", "content": inst.message}
+                    )
+                    note_count += 1
+        elif not timestamp and params.get("tag", ""):
+            # INPUT: accept a tag and NOT a timestamp
+            # OUTPUT: select by tag
+            # jot -t convo-1234567 continue
+            with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+                notable_notes.append(nc[0])
+                notable_notes.append(nc[-1])
+                for inst in nc:
+                    messages.append({"role": "user", "content": inst.context})
+                    messages.append(
+                        {"role": "assistant", "content": inst.message}
+                    )
+                    timestamp = inst.now
+                    note_count += 1
+        elif timestamp and not params.get("tag", ""):
+            # INPUT: accepting a timestamp and NOT a tag
+            # OUTPUT: select by tag, include up to timestamp, truncate after
+            # jot continue 2345678
+            # determine tag based on timestamp
+            with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp)) as nc:
+                for inst in nc:
+                    if inst.now == timestamp:
+                        params["tag"] = inst.tag
+                        break
+
+            # now that we have a tag to work with
+            if not params.get("tag", ""):
+                print("No valid tag or timestamp provided, aborting...")
+                sys.exit(1)
+            else:
+                with NoteContext(
+                    NOTEFILE, (SearchType.TAG, params["tag"])
+                ) as nc:
+                    value_matched = False
+                    notable_notes.append(nc[0])
+                    for inst in nc:
+                        if inst.now == timestamp:
+                            notable_notes.append(inst)
+                            value_matched = True
+                        elif value_matched:
+                            break  # hits only after timestamp is hit AND all matching timestamps
+                        messages.append(
+                            {"role": "user", "content": inst.context}
+                        )
+                        messages.append(
+                            {"role": "assistant", "content": inst.message}
+                        )
+                        note_count += 1
+        else:
+            print("No valid tag or timestamp provided, aborting...")
+            sys.exit(1)
+
+        composite_string = (
+            "timestamp | context (30)                 | message (30)\n"
+            "----------|------------------------------|------------------------------\n"
+        )
+        for nn in notable_notes:
+            composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
+
+        print_ascii_cat_with_text(
+            f"{note_count} notes included as context from conversation chain: {params.get('tag', '')}",
+            composite_string,
+            "PROMPT:",
+        )
+
+    elif args.t and set(args.additional_args) & set(
+        ["sum", "summary", "summarize"]
+    ):
+        previous = []
+        previous.append(
+            {
+                "role": "system",
+                "content": "You are an AI designed to seamlessly summarize conversations. Your role is to capture and organize all key details, including names, events, and topics. Maintain the natural flow and tone of the dialogue, ensuring the summary feels integrated and continuous without breaking immersion. These summaries will serve as prompts for starting new chat conversations, ensuring a smooth transition.",
+            }
+        )
+
+        bundle_info = ""
+        with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
+            if nc and nc[0]:
+                if nc[0].context.startswith(
+                    "bundled notes"
+                ) or args.t.startswith("bundle-"):
+                    bundle_info = [
+                        int(x)
+                        for x in nc[0].message.split("\n")
+                        if x.strip().isdigit()
+                    ]
+
+                    contexts = ContextBundle(bundle_info[0])
+                    for each_cont in bundle_info[1:]:
+                        contexts += each_cont
+
+                    for inst in contexts:  # iterate each note now
+                        previous.append(
+                            {"role": "user", "content": inst.context}
+                        )
+                        previous.append(
+                            {"role": "assistant", "content": inst.message}
+                        )
+                else:
+                    for inst in nc:
+                        # prefill messages with the user and assistant content previously written
+                        previous.append(
+                            {"role": "user", "content": inst.context}
+                        )
+                        previous.append(
+                            {"role": "assistant", "content": inst.message}
+                        )
+
+        NUMBER_TO_CARRY_OVER = 10
+        carryover_notes = previous[-NUMBER_TO_CARRY_OVER:]
+        previous.append(
+            {
+                "role": "user",
+                "content": "Summarize the conversation so far, capturing every name along with key moments and details, while smoothly transitioning from the latest events. Maintain a consistent tone and natural flow, avoiding any impression of a summary or conclusion. Present the summary in a prompt format that allows the conversation to continue effortlessly. The summary should be at least half the length of the input. Ensure all characters are included, along with their relationships and feelings toward the user.",
+            }
+        )
+
+        response = send_prompt_to_endpoint(
+            previous, model_name=args.m, mode="full"
+        )
+        if response:
+            summary = response["choices"][0]["message"]["content"]
+            endline = return_footer(response)
+
+            messages.append(
+                {
+                    "role": "system",
+                    "content": "You are an uncensored AI Assistant. Continue the conversation naturally from where it left off, using the upcoming summary as context. Maintain the same tone, subject matter, and flow, ensuring that the dialogue feels uninterrupted. Pick up on the last key point or question to drive the discussion forward. ALWAYS stay in character.",
+                }
+            )
+            messages.append({"role": "user", "content": summary})
+            messages.extend(carryover_notes)
+
+            print_ascii_cat_with_text("Summary", summary, endline)
+            params["context"] = f"Summary of Notes: {args.t}"
+            params["tag"] = f"convo-{now}"
+            Note.append(NOTEFILE, Note.jot(summary, **params))
+    elif set(args.additional_args) & set(["cat", "catenate"]):
+        notes_from_tag = {}
+        for tag in args.additional_args[1:]:
+            note_count = 0
+            with NoteContext(NOTEFILE, (SearchType.TAG, tag)) as nc:
+                notable_notes.append(nc[0])
+                notable_notes.append(nc[-1])
+                for inst in nc:
+                    # prefill messages with the user and assistant content previously written
+                    messages.append({"role": "user", "content": inst.context})
+                    messages.append(
+                        {"role": "assistant", "content": inst.message}
+                    )
+                    note_count += 1
+                notes_from_tag[tag] = note_count
+
+        for tag, count in notes_from_tag.items():
+            print(f"{count} notes from tag [{tag}]")
+
+        composite_string = (
+            "timestamp | context (30)                 | message (30)\n"
+            "----------|------------------------------|------------------------------\n"
+        )
+        for nn in notable_notes:
+            composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
+
+        print_ascii_cat_with_text(
+            f"{sum(notes_from_tag.values())} notes included as context from conversation chain: {' '.join([f'[{arg}]' for arg in args.additional_args[1:]])}",
+            composite_string,
+        )
+
+    # SUMMARY / CAT ends here, begins normal convo loop
+    while True:
+        try:
+            user_input = flatten_pipe(sys.stdin.readlines())
+            if not user_input:
+                return
+        except KeyboardInterrupt:
+            return
+
+        if user_input.startswith(SYS_ROLE_TRIGGER):
+            messages.append(
+                {
+                    "role": "system",
+                    "content": user_input[len(SYS_ROLE_TRIGGER) :],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": user_input,
+                }
+            )
+
+        response = ""
+        params["context"] = user_input
+        params["tag"] = params.get("tag", f"convo-{now}")
+
+        if args.w:  # wall of text preferred
+            response = send_prompt_to_endpoint(
+                messages, model_name=args.m, mode="full"
+            )
+
+            if response:
+                retval = response["choices"][0]["message"]["content"]
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": retval,
+                    }
+                )
+                endline = return_footer(response)
+                print_ascii_cat_with_text(
+                    user_input,
+                    retval,
+                    endline,
+                    intro_color=OutputColors.CHAT_ME,
+                )
+                Note.append(NOTEFILE, Note.jot(retval, **params))
+            else:
+                print("Failed to get response from OpenAI API.")
+        else:
+            print_ascii_cat_with_text(
+                user_input, "", "", intro_color=OutputColors.CHAT_ME
+            )
+
+            response_generator = send_prompt_to_endpoint(
+                messages, model_name=args.m, mode="stream"
+            )
+
+            for char in response_generator:
+                print(char, end="", flush=True)
+                response += char
+                time.sleep(0.01)
+            print()
+
+            if response:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": response,
+                    }
+                )
+                Note.append(NOTEFILE, Note.jot(response, **params))
+
+                if Note.USE_COLORIZATION:
+                    print(
+                        f"{OutputColors.CHAT_END.value}stop. {AnsiColor.RESET.value}"
+                    )
+                else:
+                    print(f"stop.")
+            else:
+                print("Failed to get response from OpenAI API.")
+
+
+def cmd_default(ctx):
+    """No verb: list pwd notes (tty) or write a new note from the pipe."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    # show all notes originating from this PWD
+    if sys.stdin.isatty():
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            match_count = 0
+            non_match_count = 0
+            total_count = 0
+            for inst in nc:
+                total_count += 1
+                if getcwd() == inst.pwd:
+                    match_count += 1
+                    printout(inst, time_only=args.d)
+                else:
+                    non_match_count += 1
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{match_count} notes in current directory")
+            print(f"{non_match_count} notes in child directories")
+            print(f"{total_count} total notes overall")
+    else:
+        Note.append(
+            NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params)
+        )
+
+
+def cmd_last(ctx):
+    """MOST_RECENTLY_WRITTEN_HERE: `jot last` / `jot last N` / `jot last ~N`."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) == 1:
+        # only display the most recently created note in this PWD
+        last_note = None
+        with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
+            for inst in nc:
+                last_note = inst
+        if last_note is None:
+            print("No notes to show.")
+        else:
+            printout(last_note, time_only=args.d)
+    elif len(args.additional_args) == 2:
+        # only display the most recently created n notes in this PWD
+        from collections import deque
+
+        record_count_to_show = 1
+        user_tilde_given = False
+        try:
+            record_count_to_show = int(args.additional_args[1])
+        except ValueError:
+            # if user includes ~ (tilde), show ONLY the one note, counting backwards
+            if args.additional_args[1].startswith("~"):
+                record_count_to_show = int(args.additional_args[1][1:])
+                user_tilde_given = True
+
+        last_notes = deque(maxlen=record_count_to_show)
+        with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
+            for inst in nc:
+                last_notes.append(inst)
+
+        if not user_tilde_given:
+            for inst in last_notes:
+                printout(inst, time_only=args.d)
+        else:
+            try:
+                printout(last_notes[-record_count_to_show], time_only=args.d)
+            except IndexError:
+                pass
+    else:
+        _arity_error(args)
+
+
+def cmd_head(ctx):
+    """MOST_RECENTLY_WRITTEN_ALLTIME: `jot head` / `jot head N` / `jot head ~N`."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) == 1:
+        # only display the most recently created note in this PWD
+        last_note = None
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            for inst in nc:
+                last_note = inst
+        if last_note is None:
+            print("No notes to show.")
+        else:
+            printout(last_note, time_only=args.d)
+    elif len(args.additional_args) == 2:
+        # only display the most n recently, of all locations
+        from collections import deque
+
+        record_count_to_show = 1
+        user_tilde_given = False
+        try:
+            record_count_to_show = int(args.additional_args[1])
+        except ValueError:
+            # if user includes ~ (tilde), show ONLY the one note, counting backwards
+            if args.additional_args[1].startswith("~"):
+                record_count_to_show = int(args.additional_args[1][1:])
+                user_tilde_given = True
+
+        last_notes = deque(maxlen=record_count_to_show)
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            for inst in nc:
+                last_notes.append(inst)
+
+        if not user_tilde_given:
+            for inst in last_notes:
+                printout(inst, time_only=args.d)
+        else:
+            try:
+                printout(last_notes[-record_count_to_show], time_only=args.d)
+            except IndexError:
+                pass
+    else:
+        _arity_error(args)
+
+
+def cmd_pop(ctx):
+    """DELETE_MOST_RECENT_PWD: delete the newest note in this pwd."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    # always deletes the most recently created note in this PWD
+    try:
+        Note.pop(NOTEFILE, getcwd())
+        Note.commit(NOTEFILE)
+    except FileNotFoundError:
+        print(f"No notefile found at {NOTEFILE}")
+        sys.exit(1)
+    except TypeError:
+        print(f"No note to pop for this path in {NOTEFILE}")
+        sys.exit(2)
+
+
+def cmd_home(ctx):
+    """HOMENOTES: show $HOME notes, or write a piped note there."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    # if simply typed, show home notes
+    # if piped to, save as home note
+    if sys.stdin.isatty():
+        with NoteContext(
+            NOTEFILE, (SearchType.DIRECTORY, environ["HOME"])
+        ) as nc:
+            for inst in nc:
+                printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes in current directory")
+    else:
+        params["pwd"] = environ["HOME"]
+        Note.append(
+            NOTEFILE,
+            Note.jot(flatten_pipe(sys.stdin.readlines()), **params),
+        )
+
+
+def cmd_dump(ctx):
+    """SHOW_ALL: show every note from everywhere."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    # show all notes, from everywhere, everywhen
+    with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+        for inst in nc:
+            printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes in total")
+
+
+def cmd_payload(ctx):
+    """MESSAGE_ONLY: message text only; `jot pl` or `jot pl <ts>`."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) == 1:
+        # returns the last message, message only (no pwd, no timestamp, no context).
+        last_note = None
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            for inst in nc:
+                last_note = inst
+        if last_note is None:
+            print("No notes to show.")
+        else:
+            printout(last_note, message_only=True)
+    elif len(args.additional_args) == 2:
+        # returns the message only (no pwd, no timestamp, no context).
+        # when provided a timestamp, any notes matching timestamp
+        # will be sent to stdout, concatenated in order of appearance
+        try:
+            flattened = int(args.additional_args[1])
+        except ValueError:
+            print(
+                f"jot: expected a numeric timestamp, got '{args.additional_args[1]}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if flattened:  # if truthy, e.g., timestamp, use it for search
+            with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
+                for inst in nc:
+                    printout(inst, message_only=True)
+        else:  # if not truthy, display pwd matches without headers
+            # the fallback behavior of finding a non truthy value is not
+            # expected to happen normally. this would be providing
+            # a deliberately nonuseful value: |jot pl ""
+            # the actual implementation of payload without timestamp
+            # should be handled in # ONE USER-PROVIDED PARAMETER SHORTCUTS
+
+            # always displays the most recently created note in this PWD
+            last_note = None
+            with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
+                for inst in nc:
+                    last_note = inst
+            if last_note is None:
+                print("No notes to show.")
+            else:
+                printout(last_note, message_only=True)
+    else:
+        _arity_error(args)
+
+
+def cmd_zzz(ctx):
+    """SLEEPING_CAT: nap with a kitten."""
+    args = ctx.args
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    def alternate_last_n_lines(text, n):
+        import time
+
+        lines = text.strip().split("\n")
+        # Print all but the last 'n' lines
+        for line in lines[:-n]:
+            print(line)
+
+        while True:
+            for i in range(-n, 0):
+                # Print one of the last 'n' lines
+                print(lines[i], end="\r")
+                time.sleep(1)
+
+                # Clear the line
+                print(" " * len(lines[i]), end="\r")
+
+    TWOCAT = r"""_____________________________________
+\            |\      _,,,---,,_      \\
+ \           /,`.-'`'    -.  ;-;;,_   \\
+  \         |,4-  ) )-,_..;\ (  `'-'   \\
+   \ ZzZ   '---''(_/--'  `-'\_)         \\
+   \ zZ    '---''(_/--'  `-'\_)         \\
+   \ Z     '---''(_/--'  `-'\_)         \\
+   \   Z   '---''(_/--'  `-'\_)         \\
+   \  Zz   '---''(_/--'  `-'\_)         \\
+"""  # credits felix lee
+
+    alternate_last_n_lines(TWOCAT, 5)
+
+
+def cmd_mcp(ctx):
+    """START_MCP_SERVER: serve notes over MCP stdio via catjot_mcp."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    # Delegate to the standalone MCP server (catjot_mcp.py).  Kept in
+    # its own module so this file stays copy-one-file usable and no
+    # blocking stdio server loop lands in the CLI; the import is lazy
+    # so a missing catjot_mcp.py degrades to a message, not a crash.
+    try:
+        import catjot_mcp
+    except ImportError:
+        print(
+            "jot mcp requires catjot_mcp.py alongside catjot.py.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # The server binds CATJOT_FILE itself; pass the CLI-resolved path
+    # explicitly so both honour the same override.  Writes stay
+    # opt-in via CATJOT_MCP_WRITES=1 (read-only by default).
+    catjot_mcp.serve(
+        notefile=NOTEFILE,
+        allow_writes=environ.get("CATJOT_MCP_WRITES") == "1",
+    )
+
+
+def cmd_scoop(ctx):
+    """BULK_MANAGE_NOTES: bulk delete/cherry-pick records in $EDITOR."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    params = ctx.params()
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    import tempfile
+    import subprocess
+    import os
+
+    records = []  # will consist of (timestamp, message[0])
+    with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+        for inst in nc:
+            records.append(
+                (
+                    inst.now,
+                    inst.pwd.ljust(25),
+                    inst.message.split("\n")[0].strip(),
+                )
+            )
+
+    with tempfile.NamedTemporaryFile(mode="w+t", delete=False) as f:
+        f.write(
+            f"# Prefix any timestamp with 'd' to delete all notes matching this timestamp\n"
+            f"# Prefix any timestamp with 'c' or 'p' to catenate / cherry-pick notes matching this timestamp\n"
+        )
+        for record in records:
+            f.write(f"{record[0]}\t{record[1]}\t{record[2]}\n")
+        temp_file_name = f.name
+
+    preferred_editor = os.environ.get(
+        "EDITOR", "vim"
+    )  # Default to vim if EDITOR is not set
+    subprocess.run([preferred_editor, temp_file_name])
+
+    to_delete = []
+    to_cat = []
+    with open(temp_file_name, "r") as f:
+        lines = f.readlines()
+        for line in lines:
+            try:
+                if line.startswith("d"):
+                    to_delete.append(int(line[1:].split("\t")[0].strip()))
+                elif line.startswith("c") or line.startswith("p"):
+                    to_cat.append(int(line[1:].split("\t")[0].strip()))
+            except ValueError:
+                pass  # if instruction line is delete, or too much of the line (not retaining timestamp)
+
+    os.unlink(temp_file_name)
+
+    ret_notes = []
+    for record_ts in to_cat:
+        with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
+            ret_notes.extend(nc)
+
+    for record_ts in to_delete:
+        with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
+            for inst in nc:
+                print(f"Removing records matching timestamp: {record_ts}")
+                Note.delete(NOTEFILE, record_ts)
+                Note.commit(NOTEFILE)
+
+    if len(ret_notes):
+        # return at the end a space-separated list of the picked notes
+        from time import time
+
+        retval = "\n".join(str(n.now) for n in ret_notes)
+        params["now"] = int(time())
+        params["tag"] = params.get("tag", f"bundle-{params['now']}")
+        params["context"] = "bundled notes from jot scoop"
+        Note.append(NOTEFILE, Note.jot(retval, **params))
+
+
+def cmd_stray(ctx):
+    """NOTES_REFERENCING_ABSENT_DIRS: notes whose pwd no longer exists."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    import os
+
+    with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+        matches = 0
+        for inst in nc:
+            if not os.path.exists(inst.pwd):
+                matches += 1
+                printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{matches} stray notes among")
+            print(f"{len(nc)} notes in total")
+
+
+def cmd_graphql(ctx):
+    """GRAPHQL: query notes with k:v pairs from a pipe, or pwd tree."""
+    args = ctx.args
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    # allow reading from "cat|jot ql" with k:v pairs space separated:
+    # pwd /home/willy
+    # -> {"pwd": "/home/willy"}
+    # when invoked without a pipe, e.g., "jot ql", it gives all notes+child notes of the pwd
+
+    # Trimmed projection: omit pwd/now fields the CLI doesn't display.
+    CLI_QUERY = """
+    query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
+      notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
+        tag
+        context
+        message
+      }
+    }
+    """
+    parsed_vars = {}
+    if sys.stdin.isatty():  # jot ql
+        parsed_vars = {"pwdtree": getcwd()}
+    else:  # cat | jot ql
+        for line in sys.stdin:
+            # Strip whitespace and split by a single space
+            line = line.strip()
+            if line:
+                # Split only on the first space to allow spaces in values
+                key, value = line.split(" ", 1)
+                parsed_vars[key] = value
+
+    from pprint import pprint
+
+    pprint(parsed_vars)
+    pprint(
+        catjot_graphql().execute_query(parsed_vars, query=CLI_QUERY).data
+    )
+
+
+def cmd_newsr(ctx):
+    """CREATE_SPACED_REPETITION: create a spaced-repetition note."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    print("Enter note prompt/hint:")
+    prompt = flatten_pipe(sys.stdin.readlines())  # this matches context
+    print("Enter answer:")
+    answer = flatten_pipe(sys.stdin.readlines())
+    Note.append(
+        NOTEFILE, Note.jot(answer, context=prompt, pwd="/spaced_repetition")
+    )
+
+
+def cmd_sr(ctx):
+    """ITERATE_SPACED_REPETITIONS: run today's spaced-repetition reviews."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    from datetime import datetime, timedelta
+
+    def next_interval(number, intervals=[1, 2, 4, 7, 12]):
+        """Finds the next interval based on the input number and a sorted intervals list."""
+        # Check if the number is greater than or equal to the largest interval
+        if number >= intervals[-1]:
+            return intervals[-1]
+
+        # Loop through intervals to find the next interval
+        for i in range(len(intervals)):
+            if intervals[i] == number:
+                # Return the next interval if it exists
+                return (
+                    intervals[i + 1]
+                    if i + 1 < len(intervals)
+                    else intervals[-1]
+                )
+            elif intervals[i] > number:
+                # Return the first interval greater than the input number
+                return intervals[i]
+
+        # Fallback, though we expect to return within the loop
+        return intervals[0]
+
+    def calculate_next_review(current_timestamp, days_until_next):
+        """Calculate the next review timestamp based on the current timestamp, review level, and interval list.
+
+        Args:
+        current_timestamp (int): The current timestamp in epoch format.
+        review_level (int): The level of days to adjust timestamp for
+
+        Returns:
+        int: The next scheduled review timestamp in epoch format.
+        """
+        # Calculate the next review date by adding the interval in days to the current date
+        next_review_date = datetime.fromtimestamp(
+            current_timestamp
+        ) + timedelta(days=days_until_next)
+
+        # Return the timestamp for the next review
+        return int(next_review_date.timestamp())
+
+    import copy
+    from random import randint
+    from time import time
+    from datetime import datetime, timedelta
+
+    with NoteContext(
+        NOTEFILE, (SearchType.TREE, "/spaced_repetition")
+    ) as nc:
+        for inst in nc:
+            if (
+                time() < inst.now
+            ):  # if current time has not yet reached note ts
+                continue
+
+            try:
+                current_interval = int(inst.pwd.split("/")[-1])
+            except ValueError:
+                current_interval = 1
+
+            try:
+                print_ascii_cat_with_text(inst.context, "", "type below:")
+                user_input = flatten_pipe(sys.stdin.readlines())
+            except KeyboardInterrupt:
+                break
+            except IndexError:
+                print("no notes remain for today")
+            else:
+                new_obj = copy.deepcopy(inst)
+
+                date_time = datetime.fromtimestamp(time())
+                start_of_day = datetime(
+                    date_time.year, date_time.month, date_time.day
+                )
+                start_of_day_ts = int(start_of_day.timestamp()) + randint(
+                    1, 3600
+                )
+                # add up to an hour to reduce collisions but
+                # still keep close to the new day.
+
+                if user_input.strip() == inst.message.strip():
+                    next_int = next_interval(current_interval)
+                    new_obj.now = calculate_next_review(
+                        start_of_day_ts, next_int
+                    )
+                    new_obj.pwd = f"/spaced_repetition/{next_int}"
+                    print(
+                        "✓ Next note appearance:",
+                        datetime.fromtimestamp(new_obj.now),
+                    )
+                else:
+                    new_obj.now = calculate_next_review(
+                        start_of_day_ts, next_interval(0)
+                    )
+                    new_obj.pwd = f"/spaced_repetition/0"
+
+                    print_ascii_cat_with_text(
+                        inst.message.strip(),
+                        "is the correct answer",
+                        f"✗ Next note appearance: {datetime.fromtimestamp(new_obj.now)}",
+                    )
+                Note.append(NOTEFILE, new_obj)
+                Note.delete(NOTEFILE, int(inst.now))
+                Note.commit(NOTEFILE)
+        else:  # at end of iterating notes
+            print("Done for today")
+
+
+def cmd_llm(ctx):
+    """LLM: agentic grounded Q&A over the notefile via run_tool_loop."""
+    args = ctx.args
+    if len(args.additional_args) != 1:
+        _arity_error(args)
+    if sys.stdin.isatty():  # jot llm
+        print_ascii_cat_with_text(
+            "Hi, what can I help you with today? ",
+            "Enter your prompt and hit Control-D to submit. \n",
+        )
+
+        while True:
+            try:
+                query = flatten_pipe(sys.stdin.readlines())
+                if not query:
+                    return
+            except KeyboardInterrupt:
+                return
+            else:
+                answer = run_tool_loop(query)
+                print_ascii_cat_with_text(
+                    query, answer, intro_color=OutputColors.CHAT_ME
+                )
+    else:
+        query = flatten_pipe(sys.stdin.readlines())
+        answer = run_tool_loop(query)
+        print_ascii_cat_with_text(
+            query, answer, intro_color=OutputColors.CHAT_ME
+        )
+
+
+def cmd_match(ctx):
+    """MATCH_NOTE_NAIVE: case-sensitive message search."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # match if "term [+term2] [..]" exists in any line of the note
+    flattened = flatten(args.additional_args[1:])
+    with NoteContext(NOTEFILE, (SearchType.MESSAGE, flattened)) as nc:
+        for inst in nc:
+            printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes matching '{flattened}'")
+
+
+def cmd_search(ctx):
+    """MATCH_NOTE_NAIVE_I: case-insensitive message search."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # match if "term [+term2] [..]" exists in any line of the note
+    flattened = flatten(args.additional_args[1:])
+    with NoteContext(NOTEFILE, (SearchType.MESSAGE_I, flattened)) as nc:
+        for inst in nc:
+            printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes matching '{flattened}'")
+
+
+def cmd_ts(ctx):
+    """MATCH_TIMESTAMP: show notes matching a timestamp."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # match if timestamp matches!
+    try:
+        flattened = int(flatten(args.additional_args[1:]))
+    except ValueError:
+        print(
+            f"jot: expected a numeric timestamp, got '{flatten(args.additional_args[1:])}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
+        for inst in nc:
+            printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes matching '{flattened}'")
+
+
+def cmd_remove(ctx):
+    """REMOVE_BY_TIMESTAMP: delete notes matching a timestamp."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # delete any notes matching the provided timestamp
+    flattened = 0
+    try:
+        flattened = int(flatten(args.additional_args[1:]))
+    except ValueError:
+        print("Invalid input, like having an alpha in a numeric")
+        sys.exit(2)
+
+    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
+        for inst in nc:
+            Note.delete(NOTEFILE, int(args.additional_args[1]))
+            Note.commit(NOTEFILE)
+
+
+def cmd_show_tag(ctx):
+    """SHOW_TAG: show notes with the given tag."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # show all notes with tag
+    flattened = args.additional_args[1]
+    with NoteContext(NOTEFILE, (SearchType.TAG, flattened)) as nc:
+        for inst in nc:
+            printout(inst, time_only=args.d)
+
+        if not args.d:
+            print(f"{Note.LABEL_SEP}")
+            print(f"{len(nc)} notes matching '{flattened}'")
+
+
+def cmd_sbs(ctx):
+    """SIDE_BY_SIDE: transcription practice against an existing note."""
+    args = ctx.args
+    NOTEFILE = ctx.notefile
+    if len(args.additional_args) != 2:
+        _arity_error(args)
+    # prints a note and allows you to rewrite the line/accept line as-is
+    # Acceptable Input:
+    # <matched input> = matched input kept
+    # <input comprised only of strip()'ed chars, including blank line> = keep original input
+    # ' ' = delete line
+    # <anything else> = keep new input
+    import os
+    from math import ceil
+
+    last_note = "No notes to show.\n"
+    last_mark = " "
+
+    if args.additional_args[1] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
+        # only display the most recently created note in this PWD
+        with NoteContext(
+            NOTEFILE, (SearchType.DIRECTORY, os.getcwd())
+        ) as nc:
+            for inst in nc:
+                last_note = inst
+    elif (
+        args.additional_args[1]
+        in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]
+    ):
+        # last written note
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            for inst in nc:
+                last_note = inst
+    else:
+        try:
+            user_timestamp = int(args.additional_args[1])
+        except ValueError:
+            print(
+                f"jot: expected a numeric timestamp, got '{args.additional_args[1]}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
+            for inst in nc:
+                last_note = inst
+                # falls back to very last note written if provided int
+                # doesnt match any existing note
+                if inst.now == user_timestamp:
+                    break
+
+    try:
+        if not last_note.message.strip():  # falsy message
+            print("No notes to side-by-side.")
+            sys.exit(3)
+    except AttributeError:  # missing attribute
+        print("No notes to side-by-side.")
+        sys.exit(3)
+
+    newnote_lines = []
+    MARKS = {
+        "check": "✓",  # indicates for unchanged lines, typed
+        "circle": "⊕",  # indicates for unchanged lines, untyped (empty line)
+        "x": "✗",  # indicates changed line from original
+    }
+
+    longest_line_length = max(
+        len(line) for line in last_note.message.split("\n")
+    )
+    terminal_width = os.get_terminal_size().columns
+    print(f"max line length: {longest_line_length}")
+    print(f"terminal_width : {terminal_width}")
+
+    min_left_side_width = max(
+        ceil(longest_line_length / 10) * 10, 35
+    )  # Round up to the nearest 10, or 35 min
+    if (
+        terminal_width >= (min_left_side_width * 2) + 3
+    ):  # last mark, pipe sep, last char
+        for line in last_note.message.split("\n"):
+            print(
+                f"{line.rstrip().ljust(min_left_side_width)}{last_mark}|",
+                end="",
+            )
+            usr_in = input()
+            if line.rstrip() == usr_in.rstrip():  # line matches...
+                last_mark = MARKS["check"]
+                newnote_lines.append(line + "\n")  # ...preserve original
+            elif usr_in == " ":  # if the line is a single space...
+                last_mark = MARKS[
+                    "x"
+                ]  # ... throw it away (by not appending it)
+            elif (
+                not usr_in.strip()
+            ):  # if the user provided line is effectively blank...
+                last_mark = MARKS["circle"]
+                newnote_lines.append(line + "\n")  # ...preserve original
+            else:
+                # value is changed from original, keep provided value
+                last_mark = MARKS["x"]
+                newnote_lines.append(usr_in.rstrip() + "\n")
+        addl_context = f"rewritten note from {last_note.now}"
+        new_note = {
+            "message": "".join(newnote_lines),
+            "pwd": last_note.pwd,
+            "now": None,
+            "tag": last_note.tag,
+            "context": (
+                addl_context
+                if not last_note.context
+                else f"{last_note.context};{addl_context}"
+            ),
+        }
+        Note.append(NOTEFILE, Note.jot(**new_note))
+    else:
+        print(
+            f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting"
+        )
+        sys.exit(2)
+
+
+
+# One entry per non-chat/convo SHORTCUTS action.  "CHAT"/"CONVO" are resolved
+# before this registry because they accept any arity; "AMEND" has aliases but
+# never had a dispatch branch (the -a flag path handles amending).
+COMMANDS = {
+    "MOST_RECENTLY_WRITTEN_ALLTIME": cmd_head,
+    "MOST_RECENTLY_WRITTEN_HERE": cmd_last,
+    "MATCH_NOTE_NAIVE": cmd_match,
+    "MATCH_NOTE_NAIVE_I": cmd_search,
+    "DELETE_MOST_RECENT_PWD": cmd_pop,
+    "BULK_MANAGE_NOTES": cmd_scoop,
+    "NOTES_REFERENCING_ABSENT_DIRS": cmd_stray,
+    "SHOW_ALL": cmd_dump,
+    "MATCH_TIMESTAMP": cmd_ts,
+    "REMOVE_BY_TIMESTAMP": cmd_remove,
+    "HOMENOTES": cmd_home,
+    "SHOW_TAG": cmd_show_tag,
+    "MESSAGE_ONLY": cmd_payload,
+    "SIDE_BY_SIDE": cmd_sbs,
+    "SLEEPING_CAT": cmd_zzz,
+    "GRAPHQL": cmd_graphql,
+    "CREATE_SPACED_REPETITION": cmd_newsr,
+    "ITERATE_SPACED_REPETITIONS": cmd_sr,
+    "LLM": cmd_llm,
+    "START_MCP_SERVER": cmd_mcp,
+}
+
+
 def main():
     """CLI entry point — parse arguments and dispatch to the appropriate action.
 
@@ -2176,16 +3698,21 @@ def main():
        - 2 args → two-word shortcuts (match, search, ts, remove, tag, payload,
          sbs, head+N, last+N, …).
 
-    **Key helper closures** (defined inside main):
+    **Key helpers** (module scope):
 
     - ``flatten(arg_lst)``   – joins positional args with spaces (for queries).
     - ``flatten_pipe(arg_lst)`` – joins lines from stdin preserving newlines.
     - ``printout(note_obj, message_only, time_only)`` – formats a single note
       for display according to active flags.
+    - ``COMMANDS`` – registry mapping SHORTCUTS actions to module-level
+      ``cmd_*`` handlers; each handler receives a ``Ctx``.
 
-    **Environment variable override**: if ``CATJOT_FILE`` is set and non-empty
-    it replaces ``Note.NOTEFILE`` for this invocation (file is touch-created if
-    it doesn't yet exist).
+    **Notefile override**: ``-f/--notefile PATH`` forces the jotfile for this
+    invocation, superseding ``CATJOT_FILE``; it also rebinds ``Note.NOTEFILE``
+    so the LLM/tool-layer paths (``ContextBundle``, ``run_tool_loop``) honour
+    it.  Otherwise, if ``CATJOT_FILE`` is set and non-empty it replaces the
+    notefile for the command branches only.  Either way the file is
+    touch-created if it doesn't yet exist.  Precedence: flag > env > ~/.catjot.
 
     **LLM subcommands** (``jot chat``, ``jot convo``, ``jot llm``):
     - ``chat``  – one-shot: build a single-turn messages list, call
@@ -2262,6 +3789,13 @@ def main():
         const="context",
         help="search notes by context / read pipe into context as amendment",
     )
+    parser.add_argument(
+        "-f",
+        "--notefile",
+        type=str,
+        default=None,
+        help="use this jotfile for all reads/writes (supersedes CATJOT_FILE)",
+    )
     parser.add_argument("additional_args", nargs="*", help="argument values")
     parser.add_argument(
         "-d", action="store_true", help="only return (date)/timestamps for match"
@@ -2270,1277 +3804,52 @@ def main():
     args = parser.parse_args()
 
     NOTEFILE = Note.NOTEFILE
-    import sys
 
-    if "CATJOT_FILE" in environ:
+    if args.notefile:
+        # explicit flag supersedes CATJOT_FILE and reaches every code path:
+        # rebind the class attribute (as catjot_mcp.bind_notefile does) so
+        # ContextBundle / run_tool_loop / _all_tags honour it too
+        Note.NOTEFILE = args.notefile
+        NOTEFILE = args.notefile
+        with open(NOTEFILE, "a") as file:
+            pass
+    elif "CATJOT_FILE" in environ:
         # the environment variable will always supercede $HOME default when set
         if environ["CATJOT_FILE"]:  # truthy test for env that exists but unset
             NOTEFILE = environ["CATJOT_FILE"]
             with open(NOTEFILE, "a") as file:
                 pass
+    ctx = Ctx(args, NOTEFILE)
 
-    # helper variables for all CLI handling
-
-    def flatten(arg_lst):
-        return " ".join(arg_lst).rstrip()
-
-    def flatten_pipe(arg_lst):
-        return "".join(arg_lst).rstrip()
-
-    def printout(note_obj, message_only=False, time_only=args.d):
-        if message_only:
-            print(note_obj.message, end="")
-        elif time_only:
-            print(note_obj.now)
-        else:  # normal display
-            print(Note.REC_TOP)
-            print(note_obj, end="")
-            print(Note.REC_BOT)
-
-    params = {}
-    if args.c:
-        params["context"] = flatten(args.additional_args)
-    if args.t:
-        params["tag"] = args.t
-    if args.p:
-        params["pwd"] = args.p
     if args.a and (args.c or args.t or args.p):
-        # amend engaged, and at least one amendable value provided
-        # Accepted Usage:
-        # jot -ac this is how i feel
-        # jot -at personal_feelings
-        # jot -ap /home/user
-        # jot -ac "this is how i feel" -t "personal_feelings"
-        # jot -ac "this is how i feel" -t "personal_feelings" -p /home/user
-
-        if sys.stdin.isatty():  # interactive tty, not a pipe!
-            # accept all attrs to change and complete amendment
-            Note.amend(NOTEFILE, **params)
-            Note.commit(NOTEFILE)
-        else:  # pipe always interpreted as context, never pwd/tag
-            # Accepted Usage:
-            # | jot -act "celebration_notes"
-            # | jot -acp "/home/user"
-            # piped data will be a ''.joined string, maintaining newlines
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            params["context"] = piped_data  # overwrite anything in args
-            Note.amend(NOTEFILE, **params)
-            Note.commit(NOTEFILE)
-        exit(0)  # end logic for amending
+        cmd_amend_flags(ctx)
     # context-related functionality
     elif args.c:
-        if sys.stdin.isatty():  # interactive tty, no pipe!
-            # jot -c observations
-            # not intending to amend instead means match by context field
-            with NoteContext(NOTEFILE, (SearchType.CONTEXT_I, params["context"])) as nc:
-                for inst in nc:
-                    printout(inst)
-        else:  # yes pipe!
-            # | jot -c musings
-            # write new note with provided context from arg
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, Note.jot(piped_data, **params))
-    # tagging-related functionality
-    elif args.t and not set(args.additional_args) & set(
-        ["continue", "sum", "summary", "summarize", "convo", "chat", "scoop"]
-    ):
-        # special case "summarize" implies convo
-        # and should continue to the SHORTCUTS below
-        # with no actions necessary here
-        # also special case "continue" allows dropping past this specific elif
-        # and allows evaluation below for IS_CONVO
-        # continue only works with [tags]
-        if sys.stdin.isatty():  # interactive tty, no pipe!
-            # jot -t project2
-            # not intending to amend instead means match by tag field
-            with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                for inst in nc:
-                    printout(inst)
-        else:  # yes pipe!
-            # | jot -t project4
-            # new note with tag set to [project4]
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, Note.jot(piped_data, **params))
+        cmd_flag_context(ctx)
+    # tagging-related functionality (see _TAG_FLAG_SKIP for the verb carve-outs)
+    elif args.t and not set(args.additional_args) & _TAG_FLAG_SKIP:
+        cmd_flag_tag(ctx)
     # pwd-related functionality
     elif args.p:
-        if sys.stdin.isatty():  # interactive tty, no pipe!
-            # jot -p /home/user
-            # not intending to amend instead means match by pwd field
-            with NoteContext(NOTEFILE, (SearchType.DIRECTORY, params["pwd"])) as nc:
-                for inst in nc:
-                    printout(inst)
-        else:  # yes pipe!
-            piped_data = flatten_pipe(sys.stdin.readlines())
-            Note.append(NOTEFILE, Note.jot(piped_data, **params))
+        cmd_flag_pwd(ctx)
     else:
-        # for all other cases where no argparse argument is provided
-        # START: USER-EDITABLE AREA
-        # this section can be freely customized for all strings
-        # in the right-hand side lists.
-        SHORTCUTS = {
-            "MOST_RECENTLY_WRITTEN_ALLTIME": ["HEAD", "head", "h"],
-            "MOST_RECENTLY_WRITTEN_HERE": ["last", "l"],
-            "MATCH_NOTE_NAIVE": ["match", "m"],
-            "MATCH_NOTE_NAIVE_I": ["search", "s", "mi"],
-            "DELETE_MOST_RECENT_PWD": ["pop", "p"],
-            "BULK_MANAGE_NOTES": ["scoop", "cherry-pick"],
-            "NOTES_REFERENCING_ABSENT_DIRS": ["str", "stra", "stray", "strays"],
-            "SHOW_ALL": ["dump", "display", "d"],
-            "MATCH_TIMESTAMP": ["timestamp", "ts"],
-            "REMOVE_BY_TIMESTAMP": ["remove", "r"],
-            "HOMENOTES": ["home"],
-            "SHOW_TAG": ["tagged", "tag", "t"],
-            "AMEND": ["amend", "a"],
-            "MESSAGE_ONLY": ["payload", "pl"],
-            "SIDE_BY_SIDE": ["sidebyside", "sbs", "rewrite", "transcribe"],
-            "SLEEPING_CAT": ["zzz"],
-            "GRAPHQL": ["graph", "graphql", "ql"],
-            "CREATE_SPACED_REPETITION": ["newsr"],
-            "ITERATE_SPACED_REPETITIONS": ["sr"],
-            "CHAT": ["chat", "catgpt", "c"],
-            "LLM": ["llm"],
-            "START_MCP_SERVER": ["mcp"],
-            "CONVO": [
-                "cat",
-                "catenate",
-                "convo",
-                "continue",
-                "talk",
-                "sum",
-                "summary",
-                "summarize",
-            ],
-        }
-
-        # Default prompt to start jot chat & jot convo with
-        from os import getenv
-
-        CATGPT_ROLE = getenv(
-            "openai_api_sysrole",
-            """You're proudly a cat assistant here to help the user in any way you can.""",
-        )
-        # END: USER-EDITABLE AREA
-
-        IS_CHAT = False
-        IS_CONVO = False  # continuing conversation mode
-        try:
-            IS_CHAT = args.additional_args[0] in SHORTCUTS["CHAT"]
-            IS_CONVO = args.additional_args[0] in SHORTCUTS["CONVO"]
-        except IndexError:  # because no args were provided
-            pass
-
-        if IS_CHAT:
-            # gpt-related functionality
-            # INTRO AND TEXT are both are sent, in that order, to the GPT prompt.
-            # ChatGPT recommends asking the query (intro) before providing the data (message)
-            #
-            # 1- jot chat
-            #               intro=<usertyped>,
-            #               text=,
-            # 2- jot chat 1719967764
-            #               intro=,
-            #               text=note,
-            # 3- jot chat 1719967764 what is this about?
-            #               intro='what is this about?',
-            #               text=note,
-            # 4- jot chat when is national take your cat to work day?
-            #               intro='when is...',
-            #               text=,
-            # 5- echo "tell me about national cat day" | jot chat
-            #               intro='tell me about...',
-            #               text=,
-            # 6- echo "tell me about this file" | jot chat 1719967764
-            #               intro='tell me about this file',
-            #               text=note,
-            # 7- cat requests | jot chat
-            #               intro=requests
-            #               text=,
-            # 8- cat requests | jot chat 1719967764
-            #               intro=requests,
-            #               text=note,
-            # 9- cat broken.jot | jot chat how many notes are there?
-            #               intro='how many notes...',
-            #               text=broken.jot,
-            # 10- cat broken.jot | jot chat 1719967764 how many notes are there?
-            #               intro='how many notes...',
-            #               text=note+broken.jot,
-
-            intro = ""
-            txt = ""
-
-            all_args = list(args.additional_args)
-            all_args.pop(0)
-            timestamp_tgt = all_args[0] if all_args else ""
-
-            if timestamp_tgt.isdigit():
-                all_args.pop(0)
-                with NoteContext(
-                    NOTEFILE, (SearchType.TIMESTAMP, int(timestamp_tgt))
-                ) as nc:
-                    txt = f"\n\n".join([str(inst) for inst in nc])
-            intro = " ".join(all_args)  # join together everything after 'chat'
-
-            if sys.stdin.isatty():  # interactive tty, no pipe!
-                if (
-                    timestamp_tgt.isdigit() and not txt
-                ):  # requested note but wasnt found
-                    print_ascii_cat_with_text(
-                        "Uh oh, you requested a timestamp with no matching note. "
-                        "Try another timestamp and try again.",
-                        "",
-                    )
-                    sys.exit(1)
-                elif not txt and not intro:
-                    intro = flatten_pipe(sys.stdin.readlines())
-            else:  # not interactive tty, all pipe!
-                # routes 5,6,7,8,9,10: fill in the blank, pref intro
-                if not txt and not intro:
-                    intro = flatten_pipe(sys.stdin.readlines())
-                elif txt and not intro:
-                    intro = flatten_pipe(sys.stdin.readlines())
-                elif not txt and intro:
-                    txt = flatten_pipe(sys.stdin.readlines())
-                elif txt and intro:
-                    txt_append = flatten_pipe(sys.stdin.readlines())
-                    txt = (
-                        "### FILE 1 ###"
-                        + "\n\n"
-                        + txt
-                        + "\n\n### FILE 2 ###\n\n"
-                        + txt_append
-                    )
-
-            params["tag"] = params.get("tag", "catgpt")
-
-            full_sendout = f"{intro}\n\n{txt}"
-
-            if len(args.additional_args) and args.additional_args[0] in ["home"]:
-                params["pwd"] = environ["HOME"]
-
-            if is_binary_string(full_sendout):
-                print_ascii_cat_with_text(
-                    "Uh oh, the pipe I received seems to be binary data but -gpt accepts only text. "
-                    "Try another file that is text-based, instead.",
-                    "",
-                )
-                sys.exit(1)
-            elif len(full_sendout.encode("utf-8")) > 512000:
-                # 512000 bytes is an estimation of 128000  * 4 bytes
-                # a real tokenizer might be better, but this approximation
-                # should be sufficient and cost-proTECtive ($0.15/million tokens)
-                print_ascii_cat_with_text(
-                    "Uh oh, the pipe I received seems to have too much data. "
-                    f"It has exceeded the 512000 character context limit (data size: {len(full_sendout)})",
-                    "",
-                )
-                sys.exit(1)
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": CATGPT_ROLE,
-                },
-                {
-                    "role": "user",
-                    "content": full_sendout,
-                },
-            ]
-
-            response = ""
-            if args.w:  # wall of text preferred
-                response = send_prompt_to_endpoint(
-                    messages, model_name=args.m, mode="full"
-                )
-
-                if response:
-                    retval = response["choices"][0]["message"]["content"]
-                    endline = return_footer(response)
-                    print_ascii_cat_with_text(
-                        intro, retval, endline, intro_color=OutputColors.CHAT_ME
-                    )
-                    Note.append(NOTEFILE, Note.jot(retval, **params))
-                else:
-                    print("Failed to get response from OpenAI API.")
+        verb = args.additional_args[0] if args.additional_args else None
+        if verb in SHORTCUTS["CHAT"]:
+            cmd_chat(ctx)
+        elif verb in SHORTCUTS["CONVO"]:
+            cmd_convo(ctx)
+        elif verb is None:
+            cmd_default(ctx)
+        else:
+            handler = COMMANDS.get(_canonical(verb))
+            if handler is not None:
+                handler(ctx)
             else:
-                import time
+                # approved fix: a typo'd verb errors instead of silently
+                # doing nothing (and silently discarding any piped stdin)
+                print(f"jot: unknown command '{verb}'", file=sys.stderr)
+                sys.exit(2)
 
-                print_ascii_cat_with_text(
-                    intro, "", "", intro_color=OutputColors.CHAT_ME
-                )
-
-                response_generator = send_prompt_to_endpoint(
-                    messages, model_name=args.m, mode="stream"
-                )
-
-                for char in response_generator:
-                    print(char, end="", flush=True)
-                    response += char
-                    time.sleep(0.01)
-                print()
-
-                if response:
-                    Note.append(NOTEFILE, Note.jot(response, **params))
-
-                    if Note.USE_COLORIZATION:
-                        print(
-                            f"{OutputColors.CHAT_END.value}stop.{AnsiColor.RESET.value}"
-                        )
-                    else:
-                        print(f"stop.")
-                else:
-                    print("Failed to get response from OpenAI API.")
-        elif IS_CONVO:
-            # gpt-related functionality
-            # Starts a conversation with a GPT;
-            # Conversations include yours and the GPTs conversations for RESUBMISSION BACK,
-            # which means the context grows on every single submission. This can get expensive.
-            # Take note of the prompt/output token counts.
-            # Starting a new conversation will, naturally, reset this count.
-            from time import time
-
-            now = int(time())
-
-            SYS_ROLE_TRIGGER = "SYSTEM:"
-            if not set(args.additional_args) & set(
-                ["sum", "summary", "summarize", "continue"]
-            ):
-                print_ascii_cat_with_text(
-                    "Hi, what can I help you with today? ",
-                    "Enter your prompt and hit Control-D to submit. \n"
-                    + f"If you have pre-prompt instructions, start the line with '{SYS_ROLE_TRIGGER}'",
-                )
-
-            note_count = 0
-            notable_notes = []  # first and last note for reference
-            messages = []
-            user_input = ""
-
-            if "continue" in args.additional_args:
-                provided_args = list(args.additional_args)
-                provided_args.remove("continue")
-                timestamp = (
-                    int(provided_args[0])
-                    if len(provided_args) and provided_args[0].isdigit()
-                    else 0
-                )
-
-                if timestamp and params.get("tag", ""):
-                    # INPUT: timestamp and a tag
-                    # OUTPUT: select by tag, include up to timestamp, truncate after
-                    # jot -t convo-1234567 continue 2345678
-                    with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                        value_matched = False
-                        notable_notes.append(nc[0])
-                        for inst in nc:
-                            if timestamp:
-                                if inst.now == timestamp:
-                                    value_matched = True
-                                    notable_notes.append(inst)
-                                elif value_matched:
-                                    break  # hits only after timestamp is hit AND all matching timestamps
-                            messages.append({"role": "user", "content": inst.context})
-                            messages.append(
-                                {"role": "assistant", "content": inst.message}
-                            )
-                            note_count += 1
-                elif not timestamp and params.get("tag", ""):
-                    # INPUT: accept a tag and NOT a timestamp
-                    # OUTPUT: select by tag
-                    # jot -t convo-1234567 continue
-                    with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                        notable_notes.append(nc[0])
-                        notable_notes.append(nc[-1])
-                        for inst in nc:
-                            messages.append({"role": "user", "content": inst.context})
-                            messages.append(
-                                {"role": "assistant", "content": inst.message}
-                            )
-                            timestamp = inst.now
-                            note_count += 1
-                elif timestamp and not params.get("tag", ""):
-                    # INPUT: accepting a timestamp and NOT a tag
-                    # OUTPUT: select by tag, include up to timestamp, truncate after
-                    # jot continue 2345678
-                    # determine tag based on timestamp
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, timestamp)) as nc:
-                        for inst in nc:
-                            if inst.now == timestamp:
-                                params["tag"] = inst.tag
-                                break
-
-                    # now that we have a tag to work with
-                    if not params.get("tag", ""):
-                        print("No valid tag or timestamp provided, aborting...")
-                        exit(1)
-                    else:
-                        with NoteContext(
-                            NOTEFILE, (SearchType.TAG, params["tag"])
-                        ) as nc:
-                            value_matched = False
-                            notable_notes.append(nc[0])
-                            for inst in nc:
-                                if inst.now == timestamp:
-                                    notable_notes.append(inst)
-                                    value_matched = True
-                                elif value_matched:
-                                    break  # hits only after timestamp is hit AND all matching timestamps
-                                messages.append(
-                                    {"role": "user", "content": inst.context}
-                                )
-                                messages.append(
-                                    {"role": "assistant", "content": inst.message}
-                                )
-                                note_count += 1
-                else:
-                    print("No valid tag or timestamp provided, aborting...")
-                    exit(1)
-
-                composite_string = (
-                    "timestamp | context (30)                 | message (30)\n"
-                    "----------|------------------------------|------------------------------\n"
-                )
-                for nn in notable_notes:
-                    composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
-
-                print_ascii_cat_with_text(
-                    f"{note_count} notes included as context from conversation chain: {params.get('tag', '')}",
-                    composite_string,
-                    "PROMPT:",
-                )
-
-            elif args.t and set(args.additional_args) & set(
-                ["sum", "summary", "summarize"]
-            ):
-                previous = []
-                previous.append(
-                    {
-                        "role": "system",
-                        "content": "You are an AI designed to seamlessly summarize conversations. Your role is to capture and organize all key details, including names, events, and topics. Maintain the natural flow and tone of the dialogue, ensuring the summary feels integrated and continuous without breaking immersion. These summaries will serve as prompts for starting new chat conversations, ensuring a smooth transition.",
-                    }
-                )
-
-                bundle_info = ""
-                with NoteContext(NOTEFILE, (SearchType.TAG, params["tag"])) as nc:
-                    if nc and nc[0]:
-                        if nc[0].context.startswith(
-                            "bundled notes"
-                        ) or args.t.startswith("bundle-"):
-                            bundle_info = [
-                                int(x)
-                                for x in nc[0].message.split("\n")
-                                if x.strip().isdigit()
-                            ]
-
-                            contexts = ContextBundle(bundle_info[0])
-                            for each_cont in bundle_info[1:]:
-                                contexts += each_cont
-
-                            for inst in contexts:  # iterate each note now
-                                previous.append(
-                                    {"role": "user", "content": inst.context}
-                                )
-                                previous.append(
-                                    {"role": "assistant", "content": inst.message}
-                                )
-                        else:
-                            for inst in nc:
-                                # prefill messages with the user and assistant content previously written
-                                previous.append(
-                                    {"role": "user", "content": inst.context}
-                                )
-                                previous.append(
-                                    {"role": "assistant", "content": inst.message}
-                                )
-
-                NUMBER_TO_CARRY_OVER = 10
-                carryover_notes = previous[-NUMBER_TO_CARRY_OVER:]
-                previous.append(
-                    {
-                        "role": "user",
-                        "content": "Summarize the conversation so far, capturing every name along with key moments and details, while smoothly transitioning from the latest events. Maintain a consistent tone and natural flow, avoiding any impression of a summary or conclusion. Present the summary in a prompt format that allows the conversation to continue effortlessly. The summary should be at least half the length of the input. Ensure all characters are included, along with their relationships and feelings toward the user.",
-                    }
-                )
-
-                response = send_prompt_to_endpoint(
-                    previous, model_name=args.m, mode="full"
-                )
-                if response:
-                    summary = response["choices"][0]["message"]["content"]
-                    endline = return_footer(response)
-
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": "You are an uncensored AI Assistant. Continue the conversation naturally from where it left off, using the upcoming summary as context. Maintain the same tone, subject matter, and flow, ensuring that the dialogue feels uninterrupted. Pick up on the last key point or question to drive the discussion forward. ALWAYS stay in character.",
-                        }
-                    )
-                    messages.append({"role": "user", "content": summary})
-                    messages.extend(carryover_notes)
-
-                    print_ascii_cat_with_text("Summary", summary, endline)
-                    params["context"] = f"Summary of Notes: {args.t}"
-                    params["tag"] = f"convo-{now}"
-                    Note.append(NOTEFILE, Note.jot(summary, **params))
-            elif set(args.additional_args) & set(["cat", "catenate"]):
-                notes_from_tag = {}
-                for tag in args.additional_args[1:]:
-                    note_count = 0
-                    with NoteContext(NOTEFILE, (SearchType.TAG, tag)) as nc:
-                        notable_notes.append(nc[0])
-                        notable_notes.append(nc[-1])
-                        for inst in nc:
-                            # prefill messages with the user and assistant content previously written
-                            messages.append({"role": "user", "content": inst.context})
-                            messages.append(
-                                {"role": "assistant", "content": inst.message}
-                            )
-                            note_count += 1
-                        notes_from_tag[tag] = note_count
-
-                for tag, count in notes_from_tag.items():
-                    print(f"{count} notes from tag [{tag}]")
-
-                composite_string = (
-                    "timestamp | context (30)                 | message (30)\n"
-                    "----------|------------------------------|------------------------------\n"
-                )
-                for nn in notable_notes:
-                    composite_string += f"{nn.now}|{nn.context[:30].strip():<30}|{nn.message[:30].strip()}\n"
-
-                print_ascii_cat_with_text(
-                    f"{sum(notes_from_tag.values())} notes included as context from conversation chain: {' '.join([f'[{arg}]' for arg in args.additional_args[1:]])}",
-                    composite_string,
-                )
-
-            # SUMMARY / CAT ends here, begins normal convo loop
-            while True:
-                try:
-                    user_input = flatten_pipe(sys.stdin.readlines())
-                    if not user_input:
-                        return
-                except KeyboardInterrupt:
-                    return
-
-                if user_input.startswith(SYS_ROLE_TRIGGER):
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": user_input[len(SYS_ROLE_TRIGGER) :],
-                        }
-                    )
-                else:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": user_input,
-                        }
-                    )
-
-                response = ""
-                params["context"] = user_input
-                params["tag"] = params.get("tag", f"convo-{now}")
-
-                if args.w:  # wall of text preferred
-                    response = send_prompt_to_endpoint(
-                        messages, model_name=args.m, mode="full"
-                    )
-
-                    if response:
-                        retval = response["choices"][0]["message"]["content"]
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": retval,
-                            }
-                        )
-                        endline = return_footer(response)
-                        print_ascii_cat_with_text(
-                            user_input,
-                            retval,
-                            endline,
-                            intro_color=OutputColors.CHAT_ME,
-                        )
-                        Note.append(NOTEFILE, Note.jot(retval, **params))
-                    else:
-                        print("Failed to get response from OpenAI API.")
-                else:
-                    import time
-
-                    print_ascii_cat_with_text(
-                        user_input, "", "", intro_color=OutputColors.CHAT_ME
-                    )
-
-                    response_generator = send_prompt_to_endpoint(
-                        messages, model_name=args.m, mode="stream"
-                    )
-
-                    for char in response_generator:
-                        print(char, end="", flush=True)
-                        response += char
-                        time.sleep(0.01)
-                    print()
-
-                    if response:
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": response,
-                            }
-                        )
-                        Note.append(NOTEFILE, Note.jot(response, **params))
-
-                        if Note.USE_COLORIZATION:
-                            print(
-                                f"{OutputColors.CHAT_END.value}stop. {AnsiColor.RESET.value}"
-                            )
-                        else:
-                            print(f"stop.")
-                    else:
-                        print("Failed to get response from OpenAI API.")
-        # ZERO USER-PROVIDED PARAMETER SHORTCUTS
-        elif len(args.additional_args) == 0:
-            # show all notes originating from this PWD
-            if sys.stdin.isatty():
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    match_count = 0
-                    non_match_count = 0
-                    total_count = 0
-                    for inst in nc:
-                        total_count += 1
-                        if getcwd() == inst.pwd:
-                            match_count += 1
-                            printout(inst)
-                        else:
-                            non_match_count += 1
-
-                if not args.d:
-                    print(f"{Note.LABEL_SEP}")
-                    print(f"{match_count} notes in current directory")
-                    print(f"{non_match_count} notes in child directories")
-                    print(f"{total_count} total notes overall")
-            else:
-                Note.append(
-                    NOTEFILE, Note.jot(flatten_pipe(sys.stdin.readlines()), **params)
-                )
-        # SINGLE USER-PROVIDED PARAMETER SHORTCUTS
-        elif len(args.additional_args) == 1:
-            if args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
-                # only display the most recently created note in this PWD
-                last_note = None
-                with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
-                    for inst in nc:
-                        last_note = inst
-                if last_note is None:
-                    print("No notes to show.")
-                else:
-                    printout(last_note)
-            elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]:
-                # only display the most recently created note in this PWD
-                last_note = None
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    for inst in nc:
-                        last_note = inst
-                if last_note is None:
-                    print("No notes to show.")
-                else:
-                    printout(last_note)
-            elif args.additional_args[0] in SHORTCUTS["DELETE_MOST_RECENT_PWD"]:
-                # always deletes the most recently created note in this PWD
-                try:
-                    Note.pop(NOTEFILE, getcwd())
-                    Note.commit(NOTEFILE)
-                except FileNotFoundError:
-                    print(f"No notefile found at {NOTEFILE}")
-                    sys.exit(1)
-                except TypeError:
-                    print(f"No note to pop for this path in {NOTEFILE}")
-                    sys.exit(2)
-            elif args.additional_args[0] in SHORTCUTS["HOMENOTES"]:
-                # if simply typed, show home notes
-                # if piped to, save as home note
-                if sys.stdin.isatty():
-                    with NoteContext(
-                        NOTEFILE, (SearchType.DIRECTORY, environ["HOME"])
-                    ) as nc:
-                        for inst in nc:
-                            printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes in current directory")
-                else:
-                    params["pwd"] = environ["HOME"]
-                    Note.append(
-                        NOTEFILE,
-                        Note.jot(flatten_pipe(sys.stdin.readlines()), **params),
-                    )
-            elif args.additional_args[0] in SHORTCUTS["SHOW_ALL"]:
-                # show all notes, from everywhere, everywhen
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    for inst in nc:
-                        printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes in total")
-            elif args.additional_args[0] in SHORTCUTS["MESSAGE_ONLY"]:
-                # returns the last message, message only (no pwd, no timestamp, no context).
-                last_note = None
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    for inst in nc:
-                        last_note = inst
-                if last_note is None:
-                    print("No notes to show.")
-                else:
-                    printout(last_note, message_only=True)
-            elif args.additional_args[0] in SHORTCUTS["SLEEPING_CAT"]:
-
-                def alternate_last_n_lines(text, n):
-                    import time
-
-                    lines = text.strip().split("\n")
-                    # Print all but the last 'n' lines
-                    for line in lines[:-n]:
-                        print(line)
-
-                    while True:
-                        for i in range(-n, 0):
-                            # Print one of the last 'n' lines
-                            print(lines[i], end="\r")
-                            time.sleep(1)
-
-                            # Clear the line
-                            print(" " * len(lines[i]), end="\r")
-
-                TWOCAT = r"""_____________________________________
-\            |\      _,,,---,,_      \\
- \           /,`.-'`'    -.  ;-;;,_   \\
-  \         |,4-  ) )-,_..;\ (  `'-'   \\
-   \ ZzZ   '---''(_/--'  `-'\_)         \\
-   \ zZ    '---''(_/--'  `-'\_)         \\
-   \ Z     '---''(_/--'  `-'\_)         \\
-   \   Z   '---''(_/--'  `-'\_)         \\
-   \  Zz   '---''(_/--'  `-'\_)         \\
-"""  # credits felix lee
-
-                alternate_last_n_lines(TWOCAT, 5)
-            elif args.additional_args[0] in SHORTCUTS["START_MCP_SERVER"]:
-                # Delegate to the standalone MCP server (catjot_mcp.py).  Kept in
-                # its own module so this file stays copy-one-file usable and no
-                # blocking stdio server loop lands in the CLI; the import is lazy
-                # so a missing catjot_mcp.py degrades to a message, not a crash.
-                try:
-                    import catjot_mcp
-                except ImportError:
-                    print(
-                        "jot mcp requires catjot_mcp.py alongside catjot.py.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-                # The server binds CATJOT_FILE itself; pass the CLI-resolved path
-                # explicitly so both honour the same override.  Writes stay
-                # opt-in via CATJOT_MCP_WRITES=1 (read-only by default).
-                catjot_mcp.serve(
-                    notefile=NOTEFILE,
-                    allow_writes=environ.get("CATJOT_MCP_WRITES") == "1",
-                )
-            elif args.additional_args[0] in SHORTCUTS["BULK_MANAGE_NOTES"]:
-                import tempfile
-                import subprocess
-                import os
-
-                records = []  # will consist of (timestamp, message[0])
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    for inst in nc:
-                        records.append(
-                            (
-                                inst.now,
-                                inst.pwd.ljust(25),
-                                inst.message.split("\n")[0].strip(),
-                            )
-                        )
-
-                with tempfile.NamedTemporaryFile(mode="w+t", delete=False) as f:
-                    f.write(
-                        f"# Prefix any timestamp with 'd' to delete all notes matching this timestamp\n"
-                        f"# Prefix any timestamp with 'c' or 'p' to catenate / cherry-pick notes matching this timestamp\n"
-                    )
-                    for record in records:
-                        f.write(f"{record[0]}\t{record[1]}\t{record[2]}\n")
-                    temp_file_name = f.name
-
-                preferred_editor = os.environ.get(
-                    "EDITOR", "vim"
-                )  # Default to vim if EDITOR is not set
-                subprocess.run([preferred_editor, temp_file_name])
-
-                to_delete = []
-                to_cat = []
-                with open(temp_file_name, "r") as f:
-                    lines = f.readlines()
-                    for line in lines:
-                        try:
-                            if line.startswith("d"):
-                                to_delete.append(int(line[1:].split("\t")[0].strip()))
-                            elif line.startswith("c") or line.startswith("p"):
-                                to_cat.append(int(line[1:].split("\t")[0].strip()))
-                        except ValueError:
-                            pass  # if instruction line is delete, or too much of the line (not retaining timestamp)
-
-                os.unlink(temp_file_name)
-
-                ret_notes = []
-                for record_ts in to_cat:
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
-                        ret_notes.extend(nc)
-
-                for record_ts in to_delete:
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, record_ts)) as nc:
-                        for inst in nc:
-                            print(f"Removing records matching timestamp: {record_ts}")
-                            Note.delete(NOTEFILE, record_ts)
-                            Note.commit(NOTEFILE)
-
-                if len(ret_notes):
-                    # return at the end a space-separated list of the picked notes
-                    from time import time
-
-                    retval = "\n".join(str(n.now) for n in ret_notes)
-                    params["now"] = int(time())
-                    params["tag"] = params.get("tag", f"bundle-{params['now']}")
-                    params["context"] = "bundled notes from jot scoop"
-                    Note.append(NOTEFILE, Note.jot(retval, **params))
-
-            elif args.additional_args[0] in SHORTCUTS["NOTES_REFERENCING_ABSENT_DIRS"]:
-                import os
-
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    matches = 0
-                    for inst in nc:
-                        if not os.path.exists(inst.pwd):
-                            matches += 1
-                            printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{matches} stray notes among")
-                        print(f"{len(nc)} notes in total")
-            elif args.additional_args[0] in SHORTCUTS["GRAPHQL"]:
-                # allow reading from "cat|jot ql" with k:v pairs space separated:
-                # pwd /home/willy
-                # -> {"pwd": "/home/willy"}
-                # when invoked without a pipe, e.g., "jot ql", it gives all notes+child notes of the pwd
-
-                # Trimmed projection: omit pwd/now fields the CLI doesn't display.
-                CLI_QUERY = """
-                query ($pwd: String, $now: Int, $tag: [String], $context: String, $message: String, $pwdtree: String, $logic: String) {
-                  notes(pwd: $pwd, now: $now, tag: $tag, context: $context, message: $message, pwdtree: $pwdtree, logic: $logic) {
-                    tag
-                    context
-                    message
-                  }
-                }
-                """
-                parsed_vars = {}
-                if sys.stdin.isatty():  # jot ql
-                    parsed_vars = {"pwdtree": getcwd()}
-                else:  # cat | jot ql
-                    for line in sys.stdin:
-                        # Strip whitespace and split by a single space
-                        line = line.strip()
-                        if line:
-                            # Split only on the first space to allow spaces in values
-                            key, value = line.split(" ", 1)
-                            parsed_vars[key] = value
-
-                from pprint import pprint
-
-                pprint(parsed_vars)
-                pprint(
-                    catjot_graphql().execute_query(parsed_vars, query=CLI_QUERY).data
-                )
-            elif args.additional_args[0] in SHORTCUTS["CREATE_SPACED_REPETITION"]:
-                print("Enter note prompt/hint:")
-                prompt = flatten_pipe(sys.stdin.readlines())  # this matches context
-                print("Enter answer:")
-                answer = flatten_pipe(sys.stdin.readlines())
-                Note.append(
-                    NOTEFILE, Note.jot(answer, context=prompt, pwd="/spaced_repetition")
-                )
-            elif args.additional_args[0] in SHORTCUTS["ITERATE_SPACED_REPETITIONS"]:
-                from datetime import datetime, timedelta
-
-                def next_interval(number, intervals=[1, 2, 4, 7, 12]):
-                    """Finds the next interval based on the input number and a sorted intervals list."""
-                    # Check if the number is greater than or equal to the largest interval
-                    if number >= intervals[-1]:
-                        return intervals[-1]
-
-                    # Loop through intervals to find the next interval
-                    for i in range(len(intervals)):
-                        if intervals[i] == number:
-                            # Return the next interval if it exists
-                            return (
-                                intervals[i + 1]
-                                if i + 1 < len(intervals)
-                                else intervals[-1]
-                            )
-                        elif intervals[i] > number:
-                            # Return the first interval greater than the input number
-                            return intervals[i]
-
-                    # Fallback, though we expect to return within the loop
-                    return intervals[0]
-
-                def calculate_next_review(current_timestamp, days_until_next):
-                    """Calculate the next review timestamp based on the current timestamp, review level, and interval list.
-
-                    Args:
-                    current_timestamp (int): The current timestamp in epoch format.
-                    review_level (int): The level of days to adjust timestamp for
-
-                    Returns:
-                    int: The next scheduled review timestamp in epoch format.
-                    """
-                    # Calculate the next review date by adding the interval in days to the current date
-                    next_review_date = datetime.fromtimestamp(
-                        current_timestamp
-                    ) + timedelta(days=days_until_next)
-
-                    # Return the timestamp for the next review
-                    return int(next_review_date.timestamp())
-
-                import copy
-                from random import randint
-                from time import time
-                from datetime import datetime, timedelta
-
-                with NoteContext(
-                    NOTEFILE, (SearchType.TREE, "/spaced_repetition")
-                ) as nc:
-                    for inst in nc:
-                        if (
-                            time() < inst.now
-                        ):  # if current time has not yet reached note ts
-                            continue
-
-                        try:
-                            current_interval = int(inst.pwd.split("/")[-1])
-                        except ValueError:
-                            current_interval = 1
-
-                        try:
-                            print_ascii_cat_with_text(inst.context, "", "type below:")
-                            user_input = flatten_pipe(sys.stdin.readlines())
-                        except KeyboardInterrupt:
-                            break
-                        except IndexError:
-                            print("no notes remain for today")
-                        else:
-                            new_obj = copy.deepcopy(inst)
-
-                            date_time = datetime.fromtimestamp(time())
-                            start_of_day = datetime(
-                                date_time.year, date_time.month, date_time.day
-                            )
-                            start_of_day_ts = int(start_of_day.timestamp()) + randint(
-                                1, 3600
-                            )
-                            # add up to an hour to reduce collisions but
-                            # still keep close to the new day.
-
-                            if user_input.strip() == inst.message.strip():
-                                next_int = next_interval(current_interval)
-                                new_obj.now = calculate_next_review(
-                                    start_of_day_ts, next_int
-                                )
-                                new_obj.pwd = f"/spaced_repetition/{next_int}"
-                                print(
-                                    "✓ Next note appearance:",
-                                    datetime.fromtimestamp(new_obj.now),
-                                )
-                            else:
-                                new_obj.now = calculate_next_review(
-                                    start_of_day_ts, next_interval(0)
-                                )
-                                new_obj.pwd = f"/spaced_repetition/0"
-
-                                print_ascii_cat_with_text(
-                                    inst.message.strip(),
-                                    "is the correct answer",
-                                    f"✗ Next note appearance: {datetime.fromtimestamp(new_obj.now)}",
-                                )
-                            Note.append(NOTEFILE, new_obj)
-                            Note.delete(NOTEFILE, int(inst.now))
-                            Note.commit(NOTEFILE)
-                    else:  # at end of iterating notes
-                        print("Done for today")
-            elif args.additional_args[0] in SHORTCUTS["LLM"]:
-                if sys.stdin.isatty():  # jot llm
-                    print_ascii_cat_with_text(
-                        "Hi, what can I help you with today? ",
-                        "Enter your prompt and hit Control-D to submit. \n",
-                    )
-
-                    while True:
-                        try:
-                            query = flatten_pipe(sys.stdin.readlines())
-                            if not query:
-                                return
-                        except KeyboardInterrupt:
-                            return
-                        else:
-                            answer = run_tool_loop(query)
-                            print_ascii_cat_with_text(
-                                query, answer, intro_color=OutputColors.CHAT_ME
-                            )
-                else:
-                    query = flatten_pipe(sys.stdin.readlines())
-                    answer = run_tool_loop(query)
-                    print_ascii_cat_with_text(
-                        query, answer, intro_color=OutputColors.CHAT_ME
-                    )
-
-        # TWO USER-PROVIDED PARAMETER SHORTCUTS
-        elif len(args.additional_args) == 2:
-            if args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE"]:
-                # match if "term [+term2] [..]" exists in any line of the note
-                flattened = flatten(args.additional_args[1:])
-                with NoteContext(NOTEFILE, (SearchType.MESSAGE, flattened)) as nc:
-                    for inst in nc:
-                        printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes matching '{flattened}'")
-            elif args.additional_args[0] in SHORTCUTS["MATCH_NOTE_NAIVE_I"]:
-                # match if "term [+term2] [..]" exists in any line of the note
-                flattened = flatten(args.additional_args[1:])
-                with NoteContext(NOTEFILE, (SearchType.MESSAGE_I, flattened)) as nc:
-                    for inst in nc:
-                        printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes matching '{flattened}'")
-            elif args.additional_args[0] in SHORTCUTS["MATCH_TIMESTAMP"]:
-                # match if timestamp matches!
-                flattened = int(flatten(args.additional_args[1:]))
-                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
-                    for inst in nc:
-                        printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes matching '{flattened}'")
-            elif args.additional_args[0] in SHORTCUTS["REMOVE_BY_TIMESTAMP"]:
-                # delete any notes matching the provided timestamp
-                flattened = 0
-                try:
-                    flattened = int(flatten(args.additional_args[1:]))
-                except ValueError:
-                    print("Invalid input, like having an alpha in a numeric")
-                    exit(2)
-
-                with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
-                    for inst in nc:
-                        Note.delete(NOTEFILE, int(args.additional_args[1]))
-                        Note.commit(NOTEFILE)
-            elif args.additional_args[0] in SHORTCUTS["SHOW_TAG"]:
-                # show all notes with tag
-                flattened = args.additional_args[1]
-                with NoteContext(NOTEFILE, (SearchType.TAG, flattened)) as nc:
-                    for inst in nc:
-                        printout(inst)
-
-                    if not args.d:
-                        print(f"{Note.LABEL_SEP}")
-                        print(f"{len(nc)} notes matching '{flattened}'")
-            elif args.additional_args[0] in SHORTCUTS["MESSAGE_ONLY"]:
-                # returns the message only (no pwd, no timestamp, no context).
-                # when provided a timestamp, any notes matching timestamp
-                # will be sent to stdout, concatenated in order of appearance
-                flattened = int(args.additional_args[1])
-                if flattened:  # if truthy, e.g., timestamp, use it for search
-                    with NoteContext(NOTEFILE, (SearchType.TIMESTAMP, flattened)) as nc:
-                        for inst in nc:
-                            printout(inst, message_only=True)
-                else:  # if not truthy, display pwd matches without headers
-                    # the fallback behavior of finding a non truthy value is not
-                    # expected to happen normally. this would be providing
-                    # a deliberately nonuseful value: |jot pl ""
-                    # the actual implementation of payload without timestamp
-                    # should be handled in # ONE USER-PROVIDED PARAMETER SHORTCUTS
-
-                    # always displays the most recently created note in this PWD
-                    last_note = None
-                    with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
-                        for inst in nc:
-                            last_note = inst
-                    if last_note is None:
-                        print("No notes to show.")
-                    else:
-                        printout(last_note, message_only=True)
-            elif args.additional_args[0] in SHORTCUTS["SIDE_BY_SIDE"]:
-                # prints a note and allows you to rewrite the line/accept line as-is
-                # Acceptable Input:
-                # <matched input> = matched input kept
-                # <input comprised only of strip()'ed chars, including blank line> = keep original input
-                # ' ' = delete line
-                # <anything else> = keep new input
-                import os
-                from math import ceil
-
-                last_note = "No notes to show.\n"
-                last_mark = " "
-
-                if args.additional_args[1] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
-                    # only display the most recently created note in this PWD
-                    with NoteContext(
-                        NOTEFILE, (SearchType.DIRECTORY, os.getcwd())
-                    ) as nc:
-                        for inst in nc:
-                            last_note = inst
-                elif (
-                    args.additional_args[1]
-                    in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]
-                ):
-                    # last written note
-                    with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                        for inst in nc:
-                            last_note = inst
-                else:
-                    user_timestamp = int(args.additional_args[1])
-                    with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                        for inst in nc:
-                            last_note = inst
-                            # falls back to very last note written if provided int
-                            # doesnt match any existing note
-                            if inst.now == user_timestamp:
-                                break
-
-                try:
-                    if not last_note.message.strip():  # falsy message
-                        print("No notes to side-by-side.")
-                        exit(3)
-                except AttributeError:  # missing attribute
-                    print("No notes to side-by-side.")
-                    exit(3)
-
-                newnote_lines = []
-                MARKS = {
-                    "check": "✓",  # indicates for unchanged lines, typed
-                    "circle": "⊕",  # indicates for unchanged lines, untyped (empty line)
-                    "x": "✗",  # indicates changed line from original
-                }
-
-                longest_line_length = max(
-                    len(line) for line in last_note.message.split("\n")
-                )
-                terminal_width = os.get_terminal_size().columns
-                print(f"max line length: {longest_line_length}")
-                print(f"terminal_width : {terminal_width}")
-
-                min_left_side_width = max(
-                    ceil(longest_line_length / 10) * 10, 35
-                )  # Round up to the nearest 10, or 35 min
-                if (
-                    terminal_width >= (min_left_side_width * 2) + 3
-                ):  # last mark, pipe sep, last char
-                    for line in last_note.message.split("\n"):
-                        print(
-                            f"{line.rstrip().ljust(min_left_side_width)}{last_mark}|",
-                            end="",
-                        )
-                        usr_in = input()
-                        if line.rstrip() == usr_in.rstrip():  # line matches...
-                            last_mark = MARKS["check"]
-                            newnote_lines.append(line + "\n")  # ...preserve original
-                        elif usr_in == " ":  # if the line is a single space...
-                            last_mark = MARKS[
-                                "x"
-                            ]  # ... throw it away (by not appending it)
-                        elif (
-                            not usr_in.strip()
-                        ):  # if the user provided line is effectively blank...
-                            last_mark = MARKS["circle"]
-                            newnote_lines.append(line + "\n")  # ...preserve original
-                        else:
-                            # value is changed from original, keep provided value
-                            last_mark = MARKS["x"]
-                            newnote_lines.append(usr_in.rstrip() + "\n")
-                    addl_context = f"rewritten note from {last_note.now}"
-                    new_note = {
-                        "message": "".join(newnote_lines),
-                        "pwd": last_note.pwd,
-                        "now": None,
-                        "tag": last_note.tag,
-                        "context": (
-                            addl_context
-                            if not last_note.context
-                            else f"{last_note.context};{addl_context}"
-                        ),
-                    }
-                    Note.append(NOTEFILE, Note.jot(**new_note))
-                else:
-                    print(
-                        f"The terminal is not sufficiently wide to match double the width of the longest line in the note. Aborting"
-                    )
-                    exit(2)
-            elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_ALLTIME"]:
-                # only display the most n recently, of all locations
-                from collections import deque
-
-                record_count_to_show = 1
-                user_tilde_given = False
-                try:
-                    record_count_to_show = int(args.additional_args[1])
-                except ValueError:
-                    # if user includes ~ (tilde), show ONLY the one note, counting backwards
-                    if args.additional_args[1].startswith("~"):
-                        record_count_to_show = int(args.additional_args[1][1:])
-                        user_tilde_given = True
-
-                last_notes = deque(maxlen=record_count_to_show)
-                with NoteContext(NOTEFILE, (SearchType.ALL, "")) as nc:
-                    for inst in nc:
-                        last_notes.append(inst)
-
-                if not user_tilde_given:
-                    for inst in last_notes:
-                        printout(inst)
-                else:
-                    try:
-                        printout(last_notes[-record_count_to_show])
-                    except IndexError:
-                        pass
-            elif args.additional_args[0] in SHORTCUTS["MOST_RECENTLY_WRITTEN_HERE"]:
-                # only display the most recently created n notes in this PWD
-                from collections import deque
-
-                record_count_to_show = 1
-                user_tilde_given = False
-                try:
-                    record_count_to_show = int(args.additional_args[1])
-                except ValueError:
-                    # if user includes ~ (tilde), show ONLY the one note, counting backwards
-                    if args.additional_args[1].startswith("~"):
-                        record_count_to_show = int(args.additional_args[1][1:])
-                        user_tilde_given = True
-
-                last_notes = deque(maxlen=record_count_to_show)
-                with NoteContext(NOTEFILE, (SearchType.DIRECTORY, getcwd())) as nc:
-                    for inst in nc:
-                        last_notes.append(inst)
-
-                if not user_tilde_given:
-                    for inst in last_notes:
-                        printout(inst)
-                else:
-                    try:
-                        printout(last_notes[-record_count_to_show])
-                    except IndexError:
-                        pass
 
 
 if __name__ == "__main__":
