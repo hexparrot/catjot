@@ -62,9 +62,11 @@ _SLASH_EXACT = frozenset(
     ["/quit", "/mood", "/attn", "/prompt", "/timing"]
 )
 # /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
-# yomi take a name arg — all prefix-matched by the unknown-command guard.
+# yomi take a name arg; /alias takes an optional name list — all prefix-matched
+# by the unknown-command guard.
 _SLASH_PREFIX = (
-    "/objects", "/yomi", "/construct", "/location", "/people", "/stats", "/debug"
+    "/objects", "/yomi", "/construct", "/location", "/people", "/stats", "/debug",
+    "/alias",
 )
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
@@ -75,13 +77,6 @@ _SYSTEM_REFRESH_TEMPERATURE = 0.9
 # step-1 prompt shape and wants its own A/B.
 _BG_SEED = os.environ.get("RPJOT_BG_SEED", "") == "1"
 _BG_REFRESH = os.environ.get("RPJOT_BG_REFRESH", "") == "1"
-# MC aliases for third-person self-movement + the record_event MC gate
-# (e.g. RPJOT_MC_ALIASES=bartholomew,bart). Unset = first-person/mc-slug only.
-_MC_ALIASES = frozenset(
-    a.strip().lower()
-    for a in os.environ.get("RPJOT_MC_ALIASES", "").split(",")
-    if a.strip()
-)
 # Stream step-3 prose to the console token-by-token (perceived latency:
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
@@ -165,7 +160,7 @@ _HELP_TEXT = (
     "  ++ / +++     — ask for a longer / much longer reply (standalone token)\n"
     "Commands: /quit, /people [full], /location [full], /objects [name], "
     "/construct <name>, /stats [full], /timing, /debug <description>, /mood, "
-    "/attn, /yomi <name>, /prompt [text]"
+    "/attn, /yomi <name>, /prompt [text], /alias [names...]"
 )
 
 
@@ -1032,10 +1027,6 @@ def game_loop(engine, seed_summaries=False):
     engine.seed_enabled = _BG_SEED
     engine.scene_mover_enabled = _SCENE_MOVER
     engine.mc_rel_nudge_enabled = _MC_REL_NUDGE
-    engine.mc_aliases = engine.mc_aliases | _MC_ALIASES
-    # rpjot's logger, not play's: the alias set must land in the session
-    # debug file so an under-firing gate is diagnosable from the log alone.
-    _rpjot_module.logger.info("[MC] alias set: %s", sorted(engine.mc_aliases))
     bg_thread = None
     if _STREAM:
         engine.prose_stream_cb = make_stream_printer(engine)
@@ -1076,6 +1067,20 @@ def game_loop(engine, seed_summaries=False):
                 if _is_full
                 else summarize_location(engine)
             )
+            continue
+
+        if _cmd0 == "/alias":
+            # No args reads the live set; args rewrite it wholesale (the jot is
+            # last-write-wins, so restating without a name is how you drop one).
+            if not _cmd_args:
+                print(
+                    "MC aliases: "
+                    + ", ".join(sorted(engine.mc_aliases))
+                    + "\nUsage: /alias <name> [name ...]  (replaces the set)"
+                )
+                continue
+            names = [n.strip(",") for n in user_input.split()[1:]]
+            print("MC aliases: " + ", ".join(sorted(engine.set_mc_aliases(names))))
             continue
 
         if _cmd0 == "/construct":

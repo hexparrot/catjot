@@ -407,6 +407,7 @@ TAG_SCENE = "scene:"  # scene:escort-to-bedroom
 TAG_CONS = "cons:"  # cons:aversion-to-water
 TAG_OBJ = "obj:"  # obj:iron-key    (object identity; OBJECT_TOOLING §2)
 TAG_ADJ = "adj:"  # adj:manor.foyer.drawing-room  (MOVEMENT_TREE §3.0: room edge)
+TAG_ALIAS = "alias:"  # alias:bartholomew — a name the player uses for a cast slug
 
 PWD_RULES = "/system/rules"
 PWD_WORLD = "/story/location"
@@ -2185,11 +2186,15 @@ class RPJotEngine:
         self._prose_streamed: bool = False
         self.main_character = main_character
         # MC alias set (lowercase) for third-person self-movement detection
-        # and the record_event MC-present gate. The play loop extends it from
-        # RPJOT_MC_ALIASES; it always contains the mc slug itself. Empty env =
-        # legacy behavior (first-person only, exp:mc only) — safe but
+        # and the record_event MC-present gate. Loaded from the alias jot at
+        # PWD_CHARS/{mc} (see _load_aliases_from_notes) so the set travels with
+        # the save instead of the shell; it always contains the mc slug itself.
+        # No jot = legacy behavior (first-person only, exp:mc only) — safe but
         # under-fires on third-person players.
-        self.mc_aliases: frozenset = frozenset({main_character.lower()})
+        self.mc_aliases: frozenset = frozenset(
+            {main_character.lower()}
+        ) | self._load_aliases_from_notes(main_character)
+        logger.info("[MC] alias set: %s", sorted(self.mc_aliases))
         self.session = SessionState(
             location=location,
             people_present=people_present or set(),
@@ -2209,6 +2214,68 @@ class RPJotEngine:
             self.main_character,
             len(self.npc_tracker.all()),
         )
+
+    @staticmethod
+    def _load_aliases_from_notes(slug: str) -> frozenset:
+        """Read a character's player-facing aliases from their alias jot.
+
+        The jot lives at PWD_CHARS/{slug} and carries the full alias set as
+        `alias:` tag words (`alias:bartholomew alias:bart`). Last write wins —
+        the newest alias-bearing note under that pwd is the whole set, so
+        rewriting it is also how an alias is removed (an append-only notefile
+        has no delete verb). Returns an empty set when no such jot exists,
+        which is the legacy mc-slug-only behavior.
+
+        Static and note-only: it runs from __init__ before session/npc_tracker
+        exist, so it must not touch engine state.
+        """
+        newest = None
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_CHARS}/{slug}")
+        ) as nc:
+            for note in nc:
+                if not any(w.startswith(TAG_ALIAS) for w in note.tag.split()):
+                    continue
+                if newest is None or note.now >= newest.now:
+                    newest = note
+        if newest is None:
+            return frozenset()
+        return frozenset(
+            body
+            for w in newest.tag.split()
+            if w.startswith(TAG_ALIAS) and (body := w[len(TAG_ALIAS):].lower())
+        )
+
+    def set_mc_aliases(self, aliases) -> frozenset:
+        """Persist the MC's alias set as a jot and apply it to this session.
+
+        Writes the complete set (mc slug included) so the note is self-contained
+        for _load_aliases_from_notes, then updates the live engine so the change
+        takes effect on the next turn without a restart. Returns the new set.
+        """
+        clean = frozenset(
+            s
+            for s in (
+                re.sub(r"[^a-z0-9-]+", "-", a.strip().lower()).strip("-")
+                for a in aliases
+            )
+            if s
+        ) | {self.main_character.lower()}
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=(
+                    "Player-facing names for the main character: "
+                    + ", ".join(sorted(clean))
+                ),
+                tag=" ".join(f"{TAG_ALIAS}{a}" for a in sorted(clean)),
+                context="mc aliases",
+                pwd=f"{PWD_CHARS}/{self.main_character}",
+            ),
+        )
+        self.mc_aliases = clean
+        logger.info("[MC] alias set rewritten: %s", sorted(clean))
+        return clean
 
     def _preload_npc_tracker_from_notes(self, location: str) -> None:
         """Scan PWD_CHARS in the notes file and register every established character.

@@ -5204,6 +5204,80 @@ class TestStationaryClassifier(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 12f-ter. Alias jot — where mc_aliases comes from
+# ---------------------------------------------------------------------------
+
+
+class TestAliasJot(unittest.TestCase):
+    """The alias set is loaded from a jot, not the environment.
+
+    It has to survive a restart the way the rest of the save does, so the
+    contract is: set_mc_aliases writes it, a fresh engine on the same notefile
+    reads it back, and the newest jot is the WHOLE set (last write wins, since
+    an append-only notefile has no delete verb).
+    """
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def test_no_jot_is_legacy_mc_slug_only(self):
+        self.assertEqual(_make_engine().mc_aliases, frozenset({"mc"}))
+
+    def test_set_then_reload_round_trips(self):
+        _make_engine().set_mc_aliases(["Bartholomew", "Bart"])
+        self.assertEqual(
+            _make_engine().mc_aliases, frozenset({"mc", "bartholomew", "bart"})
+        )
+
+    def test_mc_slug_is_always_included(self):
+        eng = _make_engine()
+        self.assertIn("mc", eng.set_mc_aliases(["bartholomew"]))
+
+    def test_names_are_slugified(self):
+        eng = _make_engine()
+        self.assertEqual(
+            eng.set_mc_aliases(["Mr. Wentworth"]), frozenset({"mc", "mr-wentworth"})
+        )
+
+    def test_rewrite_drops_an_alias(self):
+        # Same-second writes are the common case (two /alias calls in a row);
+        # the reader must still take the LAST one appended, not the first.
+        _make_engine().set_mc_aliases(["bartholomew", "bart"])
+        _make_engine().set_mc_aliases(["bartholomew"])
+        self.assertEqual(_make_engine().mc_aliases, frozenset({"mc", "bartholomew"}))
+
+    def test_set_applies_live_without_restart(self):
+        eng = _make_engine()
+        eng.set_mc_aliases(["bartholomew"])
+        self.assertEqual(eng.mc_aliases, frozenset({"mc", "bartholomew"}))
+
+    def test_alias_collapses_cast_name_to_mc(self):
+        eng = _make_engine()
+        eng.set_mc_aliases(["bartholomew"])
+        self.assertEqual(eng._normalize_person_slug("Bartholomew"), "mc")
+
+    def test_alias_opens_the_record_event_mc_gate(self):
+        # The live 2026-08-04 [LOCDRIFT] "(no MC tag — session unmoved)": an
+        # exp:bartholomew event at a new room left the session behind.
+        eng = _make_engine(location="manor/exterior")
+        eng.set_mc_aliases(["bartholomew"])
+        eng._tool_record_event(
+            "Bartholomew arrives and questions the housekeeper.",
+            "exp:bartholomew exp:mrs-halloway",
+            location="manor/exterior/front-door",
+        )
+        self.assertEqual(eng._pending_loc_hint, "manor/exterior/front-door")
+
+
+# ---------------------------------------------------------------------------
 # 12f-bis. Third-person self-movement (mc_aliases branch)
 # ---------------------------------------------------------------------------
 
