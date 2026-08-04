@@ -174,9 +174,13 @@ watching every development carefully.""",
 # ════════════════════════════════════════════════════════════════
 print("Writing character profiles…")
 
-# Bartholomew / mc — the player character
+# The player character. Filed under the engine's own slug — every MC lookup
+# (POV context, exp:/know: tags, relationship pairs, people_present={"mc"})
+# keys on "mc", so a profile filed under the display name is a second identity
+# the engine cannot see. The names the player and the model actually use reach
+# it through the alias jot below.
 engine._tool_save_character(
-    name="bartholomew",
+    name="mc",
     description="""\
 Bartholomew Wentworth (Bart), 35, is the player character.  He arrived at
 Ravenswood Manor as the son of a servant in his early childhood and was
@@ -185,14 +189,11 @@ His memories of the manor and its people are warm but vague.""",
     tags="backstory mc player",
 )
 
-# Also index him under "mc" so session state (people_present={"mc"}) resolves.
-engine._tool_save_character(
-    name="mc",
-    description="""\
-"mc" is the engine identifier for the player character, Bartholomew Wentworth.
-See character profile for "bartholomew" for full details.""",
-    tags="backstory mc player bartholomew",
-)
+# Alias jot (rpjot.TAG_ALIAS): the whole set, newest such note wins. Read at
+# engine init into mc_aliases, which gates third-person self-movement, the
+# record_event MC location gate, and set_people_present normalization — so
+# "Bartholomew strides to the door" moves the session and exp:bart lands on mc.
+engine.set_mc_aliases(["bartholomew", "bart", "wentworth", "bartholomew-wentworth"])
 
 # Aurora
 engine._tool_save_character(
@@ -368,7 +369,7 @@ remembers Evie as the most powerful person he had ever seen as a child.
 
 He does not remember any of the daughters as individuals.  His memories of
 other staff and of his own parents at the manor are warm but fragmentary.""",
-    witnesses=["bartholomew"],
+    witnesses=["mc"],  # the MC's own memory — must tag exp:mc to reach their POV
     context="Bartholomew's personal memories of Ravenswood from childhood",
 )
 
