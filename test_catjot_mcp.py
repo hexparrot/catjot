@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import catjot
@@ -41,6 +42,8 @@ class MCPTestBase(unittest.TestCase):
         # hermetic registry: nothing from other test files leaks in
         catjot.TOOL_SCHEMAS.clear()
         catjot.TOOL_HANDLERS.clear()
+        # ...and hermetic id state: _unique_now remembers what it handed out
+        catjot_mcp._ISSUED_NOWS.clear()
         fd, self.notefile = tempfile.mkstemp(suffix=".jot")
         os.close(fd)
 
@@ -265,6 +268,53 @@ class TestWriteTool(MCPTestBase):
         on_disk = list(Note.iterate(self.notefile))
         self.assertEqual(len(on_disk), 1)
         self.assertEqual(on_disk[0].message.strip(), "note via MCP")
+
+    def test_create_note_same_second_ids_stay_unique(self):
+        # Regression: note identity is the one-second `now` stamp, and both
+        # search_notes (folds via seen.setdefault(note.now, ...)) and get_note
+        # (returns matches[0]) key off it.  A burst of creates inside one
+        # second used to hand every note the same id, so all but the first
+        # became invisible -- on disk, but unreachable by id and dropped from
+        # search.  An agent checkpointing a fan-out hits this every time.
+        self.start(allow_writes=True)
+        n = 12
+        ids = []
+        for i in range(n):
+            data, is_err = self.tool_result(
+                "create_note",
+                {"message": f"slice-{i}", "tag": "burst", "context": f"run:x/{i}"},
+            )
+            self.assertFalse(is_err)
+            ids.append(data["now"])
+
+        self.assertEqual(len(set(ids)), n, "ids collided within one second")
+        # every note is on disk...
+        self.assertEqual(len(list(Note.iterate(self.notefile))), n)
+        # ...individually addressable...
+        for i, ts in enumerate(ids):
+            got, is_err = self.tool_result("get_note", {"timestamp": ts})
+            self.assertFalse(is_err)
+            self.assertEqual(got["message"].strip(), f"slice-{i}")
+        # ...and none dropped by search's fold-by-id
+        found, is_err = self.tool_result(
+            "search_notes", {"field": "tag", "query": "burst"}
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(len(found), n)
+
+    def test_create_note_id_skips_ids_already_on_disk(self):
+        # Cross-process guard: separate stdio server spawns share one store, so
+        # _unique_now consults the file, not just its own issued set.
+        self.start(allow_writes=True)
+        taken = int(time.time())
+        Note.append(
+            self.notefile,
+            Note.jot("pre-existing", tag="burst", context="c", pwd="/tmp", now=taken),
+        )
+        catjot_mcp._ISSUED_NOWS.clear()  # as if a fresh process
+        data, is_err = self.tool_result("create_note", {"message": "new", "tag": "burst"})
+        self.assertFalse(is_err)
+        self.assertNotEqual(data["now"], taken)
 
     def test_create_note_whitespace_message_is_error(self):
         # Regression: a whitespace-only body used to slip past the non-empty
