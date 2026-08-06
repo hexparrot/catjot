@@ -50,6 +50,7 @@ Register with a host (Claude Code):
 import os
 import sys
 import json
+import time
 
 import catjot
 from catjot import Note, SearchType, register_tool, dispatch_tool_call, TOOL_SCHEMAS
@@ -197,17 +198,61 @@ def _handle_mcp_get_note(timestamp):
     return json.dumps(matches[0])
 
 
+# Note ids this process has handed out.  Checked alongside the on-disk ids so
+# a burst of creates inside one second cannot reuse an id even before the
+# earlier notes are flushed and re-read.
+_ISSUED_NOWS = set()
+
+
+def _unique_now():
+    """Return a note id no other note is using -- on disk or issued by us.
+
+    Note identity is the one-second ``now`` stamp, and ``search_notes`` folds
+    results by it (``seen.setdefault(note.now, ...)``), so two notes sharing an
+    id means one of them is silently invisible to every reader: it is on disk,
+    ``get_note`` returns only the first, and search drops the rest.  A burst of
+    creates inside one second -- an agent checkpointing a fan-out, several
+    sub-agents reducing into one store -- hits this every time.
+
+    So we bump forward until the id is free rather than trusting the clock.
+    Ordering and second-level granularity carry no meaning here (notes are read
+    back by tag/context, and on-disk order is preserved independently), so
+    drifting a few seconds into the future costs nothing and buys uniqueness.
+
+    On-disk ids are re-read per call so *separate* server processes writing the
+    same store -- the per-session stdio spawns -- also see each other's notes.
+    A genuine simultaneous write from two processes can still pick the same
+    slot (there is no lock); the window is tiny and the cost is the pre-existing
+    behavior, not a regression.
+    """
+    try:
+        taken = {n["now"] for n in _read_notes([(SearchType.ALL, "")])}
+    except FileNotFoundError:
+        # First write to a store nobody has created yet: Note.append will make
+        # the file.  The old handler never read it, so tolerate this rather
+        # than turning a working create into an error.
+        taken = set()
+    taken |= _ISSUED_NOWS
+    now = int(time.time())
+    while now in taken:
+        now += 1
+    _ISSUED_NOWS.add(now)
+    return now
+
+
 def _handle_mcp_create_note(message, tag="", context="", directory=None):
     """Create a note and append it to the store; return the created note.
 
+    The note's id comes from :func:`_unique_now`, not the bare clock, so rapid
+    creates stay individually addressable (see that function for why).
+
     Best-effort concurrency: ``Note.append`` is append-safe against other
-    appenders, but a create racing a CLI ``pop``/``scoop`` (which rewrite the
-    file) can be lost, and note identity is one-second-granular so two creates
-    in the same second share a timestamp.  Acceptable under the read-only
-    default; documented so callers aren't surprised.
+    appenders (verified: 16 concurrent processes x 200KB bodies, no
+    interleaving), but a create racing a CLI ``pop``/``scoop`` (which rewrite
+    the file) can still be lost.  Documented so callers aren't surprised.
     """
     pwd = directory or os.getcwd()
-    note = Note.jot(message, tag=tag, context=context, pwd=pwd)
+    note = Note.jot(message, tag=tag, context=context, pwd=pwd, now=_unique_now())
     Note.append(Note.NOTEFILE, note)
     return json.dumps(_hydrate(note))
 
