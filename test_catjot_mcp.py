@@ -176,6 +176,41 @@ class TestReadTools(MCPTestBase):
         self.assertEqual(note["directory"], "/home/user/proj")
         self.assertIn("now", note)
 
+    def test_search_notes_batch_runs_every_query(self):
+        """The batch form answers N independent queries in one call, each item
+        tagged with the query that produced it."""
+        data, is_err = self.tool_result(
+            "search_notes", {"field": "tag", "queries": ["cats", "work"]}
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["batched_by"], "query")
+        by_q = {i["_batch_key"]: i["notes"] for i in data["batch"]}
+        self.assertEqual(by_q["cats"][0]["message"].strip(), "buy tabby food")
+        self.assertEqual(by_q["work"][0]["message"].strip(), "fix the parser bug")
+
+    def test_search_notes_batch_dedups_queries(self):
+        data, _ = self.tool_result(
+            "search_notes", {"field": "tag", "queries": ["cats", "cats"]}
+        )
+        self.assertEqual(data["count"], 1)
+
+    def test_search_notes_batch_matches_singular_results(self):
+        """A batched query must return exactly what the singular call returns --
+        the batch form is a round-trip optimization, never a semantic change."""
+        single, _ = self.tool_result(
+            "search_notes", {"field": "tag", "query": "cats"}
+        )
+        batched, _ = self.tool_result(
+            "search_notes", {"field": "tag", "queries": ["cats"]}
+        )
+        self.assertEqual(batched["batch"][0]["notes"], single)
+
+    def test_search_notes_requires_a_query(self):
+        data, is_err = self.tool_result("search_notes", {"field": "tag"})
+        self.assertTrue(is_err)
+        self.assertIn("error", data)
+
     def test_search_notes_unknown_field(self):
         data, is_err = self.tool_result("search_notes", {"field": "bogus", "query": "x"})
         self.assertTrue(is_err)

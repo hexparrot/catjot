@@ -157,11 +157,34 @@ def _read_notes(criteria, logic="and"):
     return [_hydrate(n) for n in Note.match(Note.NOTEFILE, criteria, logic=logic)]
 
 
-def _handle_mcp_search_notes(field, query):
+def _search_one(st, query, term_cache):
+    """Notes matching one query string, OR-combining its whitespace-split terms.
+
+    ``term_cache`` memoizes term -> matched notes for the life of a single call,
+    so a batch whose queries share terms (subjects usually do — "alice" recurs
+    across a roster sweep) reads the notefile once per DISTINCT term rather than
+    once per query.
+    """
+    seen = {}
+    for word in query.split():
+        if word not in term_cache:
+            term_cache[word] = list(Note.match(Note.NOTEFILE, [(st, word)], logic="or"))
+        for note in term_cache[word]:
+            seen.setdefault(note.now, note)
+    return [_hydrate(n) for n in seen.values()]
+
+
+def _handle_mcp_search_notes(field, query=None, queries=None):
     """Search one note field and return the full matching notes as JSON.
 
     OR-combines whitespace-split terms within the field, de-duplicating by
     timestamp while preserving on-disk order.
+
+    ``queries`` is the batch form: several independent searches of the SAME
+    field in one call, answered as ``{"batch": [...]}`` with each item tagged
+    ``_batch_key``. The consult-first protocol checks the notebook per subject
+    before an investigation, which is inherently N-wide; without this it costs N
+    round-trips and N notefile reads.
     """
     st = _FIELD_SEARCH_TYPES.get(field)
     if st is None:
@@ -171,11 +194,29 @@ def _handle_mcp_search_notes(field, query):
                 "hint": "field must be one of: " + ", ".join(_FIELD_SEARCH_TYPES),
             }
         )
-    seen = {}
-    for word in query.split():
-        for note in Note.match(Note.NOTEFILE, [(st, word)], logic="or"):
-            seen.setdefault(note.now, note)
-    return json.dumps([_hydrate(n) for n in seen.values()])
+    term_cache = {}
+    if queries is not None:
+        if isinstance(queries, str):
+            queries = [queries]
+        wanted, seen_q = [], set()
+        for q in queries:
+            if q is None or q in seen_q:
+                continue
+            seen_q.add(q)
+            wanted.append(q)
+        return json.dumps(
+            {
+                "batch": [
+                    {"_batch_key": q, "notes": _search_one(st, q, term_cache)}
+                    for q in wanted
+                ],
+                "count": len(wanted),
+                "batched_by": "query",
+            }
+        )
+    if query is None:
+        return json.dumps({"error": "pass either 'query' or 'queries'"})
+    return json.dumps(_search_one(st, query, term_cache))
 
 
 def _handle_mcp_list_notes(directory, tree=False):
@@ -271,7 +312,12 @@ def register_note_tools(allow_writes=False):
             "notes. A note has four searchable fields — 'tag' (space-separated "
             "labels), 'context' (the command or summary that produced the "
             "note), 'message' (the free-form body), and 'directory' (the path "
-            "it was written from). Whitespace-separated terms are OR-combined."
+            "it was written from). Whitespace-separated terms are OR-combined. "
+            "BATCH: pass 'queries' (a list) instead of 'query' to run several "
+            "independent searches of the same field in ONE call — use this when "
+            "consulting the notebook about several subjects before an "
+            "investigation. Results come back as batch[], each tagged "
+            "_batch_key with its query."
         ),
         parameters={
             "type": "object",
@@ -285,8 +331,16 @@ def register_note_tools(allow_writes=False):
                     "type": "string",
                     "description": "Space-separated search terms.",
                 },
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Batch form: several independent queries, each a "
+                        "space-separated term set. Use instead of 'query'."
+                    ),
+                },
             },
-            "required": ["field", "query"],
+            "required": ["field"],
         },
         handler=_handle_mcp_search_notes,
     )
