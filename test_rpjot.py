@@ -90,19 +90,35 @@ def _base_messages(system_content=None):
 
 # Token-count-aware text generators for threshold tests.
 # Using realistic English so the pre-tokenizer produces ~12 tokens/chunk.
-_CHUNK = "The manor's old stones whispered secrets to the night wind. "  # ~12 tok
+_CHUNK = "The manor's old stones whispered secrets to the night wind. "
+
+# ...but "~12" only holds for the regex pre-tokenizer.  `regex` is an optional
+# dependency (the project is stdlib+requests), and without it rpjot falls back
+# to chars//4, which prices this same chunk at 15 tokens.  Threshold tests that
+# hardcoded 12 therefore overshot by 25% under the fallback and asserted against
+# a payload that had already blown the cap.  Measure the chunk instead of
+# assuming it, so the generators track whichever tokenizer is installed.
+_CHUNK_TOKS = _msg_toks({"role": "user", "content": _CHUNK})
+
+
+def _reps_for(toks: int) -> int:
+    """Chunk count whose token cost is >= *toks* (ceiling)."""
+    return max(1, -(-toks // _CHUNK_TOKS))
+
+
+def _reps_under(toks: int) -> int:
+    """Chunk count whose token cost stays <= *toks* (floor)."""
+    return max(1, toks // _CHUNK_TOKS)
 
 
 def _text_over_soft(extra_toks: int = 200) -> str:
     """Return text with ≥ CONTEXT_MAX_TOKS + extra_toks tokens."""
-    reps = max(1, (CONTEXT_MAX_TOKS + extra_toks + 11) // 12)
-    return _CHUNK * reps
+    return _CHUNK * _reps_for(CONTEXT_MAX_TOKS + extra_toks)
 
 
 def _text_over_hard(extra_toks: int = 200) -> str:
     """Return text with ≥ CONTEXT_HARD_LIMIT_TOKS + extra_toks tokens."""
-    reps = max(1, (CONTEXT_HARD_LIMIT_TOKS + extra_toks + 11) // 12)
-    return _CHUNK * reps
+    return _CHUNK * _reps_for(CONTEXT_HARD_LIMIT_TOKS + extra_toks)
 
 
 def _over_limit_text() -> str:
@@ -1528,10 +1544,20 @@ class TestLocaleGraph(unittest.TestCase):
     def test_speculate_writes_nothing_without_endpoint(self):
         # I7: speculate_locale STAGES only; with a room drift but no endpoint the
         # call fails and NOTHING is staged or written.
+        from unittest.mock import patch
+
         self.engine.init_pipeline()
         self.engine._room_drift = ["scriptorium"]
         self.engine._room_drift_text = "a scriptorium beyond the pantry"
-        self.engine.speculate_locale()
+        # "without endpoint" has to be enforced, not assumed.  call_llm reads
+        # openai_api_url from the environment, so anyone with a local endpoint
+        # exported (a dev box running vllm) got a REAL completion here, staged a
+        # seed, and failed this test -- while this class promises "zero LLM".
+        # Drop the var for the duration so the precondition is the test's, not
+        # the shell's; patch.dict restores it on exit.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("openai_api_url", None)
+            self.engine.speculate_locale()
         self.assertIsNone(self.engine._locale_seed)  # no seed staged (no endpoint)
 
     def test_speculate_no_drift_no_seed(self):
@@ -1838,7 +1864,7 @@ class TestGuardPayload(unittest.TestCase):
 
     def _make_big_tool_msg(self, toks):
         """Tool-result message whose content is approximately `toks` tokens."""
-        reps = max(1, (toks + 11) // 12)
+        reps = _reps_for(toks)
         return {"role": "tool", "tool_call_id": "x", "content": _CHUNK * reps}
 
     def test_under_threshold_returns_same_list(self):
@@ -1853,7 +1879,9 @@ class TestGuardPayload(unittest.TestCase):
         eng = self._engine()
         capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         target_toks = int(capacity * 0.87)
-        reps = max(1, (target_toks + 11) // 12)
+        # floor, not ceiling: this test asserts the payload is UNDER the cap,
+        # so rounding up could tip it over and trigger the very trim it denies.
+        reps = _reps_under(target_toks)
         msgs = [{"role": "user", "content": _CHUNK * reps}]
         result = eng._guard_payload(msgs)
         self.assertIs(result, msgs)
@@ -1922,7 +1950,7 @@ class TestGuardPayload(unittest.TestCase):
 
     def _assistant_tool_call_msg(self, arg_toks):
         """Assistant message whose weight lives entirely in tool_calls arguments."""
-        reps = max(1, (arg_toks + 11) // 12)
+        reps = _reps_for(arg_toks)
         big_args = json.dumps({"description": _CHUNK * reps, "tags": "exp:player"})
         return {
             "role": "assistant",
@@ -5766,9 +5794,10 @@ class TestHygiene(unittest.TestCase):
     def _user_msg_at_pct(self, low_pct):
         cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         low = low_pct * cap
-        reps = int(low / 12)
+        reps = _reps_under(int(low))
+        # step by one chunk: +5 could overshoot the 90-99% band into a trim
         while _msg_toks({"role": "user", "content": _CHUNK * reps}) < low:
-            reps += 5
+            reps += 1
         return {"role": "user", "content": _CHUNK * reps}
 
     def test_guard_90pct_history_only_logs_no_trimmable(self):
