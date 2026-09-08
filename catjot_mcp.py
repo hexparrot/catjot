@@ -48,6 +48,7 @@ Register with a host (Claude Code):
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -298,12 +299,216 @@ def _handle_mcp_create_note(message, tag="", context="", directory=None):
     return json.dumps(_hydrate(note))
 
 
+# ── note_claim: the life-notebook jot, built server-side ──────────────────────
+#
+# The low-level create_note asks the caller for a directory, a tag string and a
+# fully escaped multi-line body.  Small local models emit that unreliably (a
+# 30B will answer "done" without ever having emitted the call), so the whole
+# structure the `life-notebook` skill specifies -- directory precedence, tag
+# grammar, VERDICT/CONFIDENCE/EVIDENCE/REPLAY body -- is built here in Python
+# from a handful of plain fields instead.  The skill's contract is the spec:
+# the minimum jot is verdict + subject_type + subject.
+
+# subject_type -> the subdirectory under <store-dir>/life/ that owns it.
+_CLAIM_SUBJECT_DIRS = {
+    "person": "people",
+    "place": "places",
+    "event": "events",
+    "era": "eras",
+    "topic": "topics",
+}
+
+# subject_type -> the colon-namespaced tag slot for it, when one exists.  Only
+# person/place/topic have an entity namespace; event and era are located by
+# their directory, and any cross-cutting facet rides in `entities`.
+_CLAIM_ENTITY_TAGS = {"person": "person", "place": "place", "topic": "topic"}
+
+_CLAIM_KINDS = ("claim", "lead", "story")
+_CLAIM_CONFIDENCES = ("strong", "plausible")
+
+_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_YEAR_RE = re.compile(r"^\d{4}$")
+
+
+def _claim_error(msg):
+    """Shape one note_claim rejection like every other tool error here."""
+    return json.dumps({"error": f"note_claim: {msg}"})
+
+
+def _as_list(value):
+    """Accept a list, a lone string, or nothing for a repeatable field.
+
+    Small models routinely send a bare string where the schema says array; a
+    silently-dropped tool tag is worse than accommodating that here.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [str(v) for v in value if str(v).strip()]
+
+
+def _life_root():
+    """Return the ``life/`` tree for the store this server is bound to.
+
+    Derived from the bound notefile rather than hard-coded, so each workspace's
+    store maps to its own subtree (workspace-recall/.catjot ->
+    workspace-recall/life/) and a test store lands in its own tmpdir.
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(Note.NOTEFILE)), "life")
+
+
+def _claim_directory(subject_type, subject, date):
+    """Build the virtual pwd for a finding, or raise ValueError with the fix.
+
+    One note per finding, filed under its PRIMARY facet -- so the directory is
+    a pure function of (subject_type, subject, date) and the caller never hand-
+    spells a path that a typo could hide from list_notes.
+    """
+    if subject_type not in _CLAIM_SUBJECT_DIRS:
+        raise ValueError(
+            f"subject_type must be one of {'|'.join(_CLAIM_SUBJECT_DIRS)}, got {subject_type!r}"
+        )
+    root = os.path.join(_life_root(), _CLAIM_SUBJECT_DIRS[subject_type])
+
+    if subject_type == "era":
+        # An era is the year itself; accept it from either field.
+        year = subject if _YEAR_RE.match(subject) else (date or "")
+        if not _YEAR_RE.match(year):
+            raise ValueError("an era note needs a 4-digit year as 'subject' (or as 'date')")
+        return os.path.join(root, year)
+
+    if not _SLUG_RE.match(subject):
+        raise ValueError(
+            f"subject {subject!r} is not a slug: lowercase ascii and hyphens only, no '/' or '#'"
+        )
+
+    if subject_type == "event":
+        # events/<yyyy-mm-dd>-<slug>, the first day of the event window.
+        if not _DATE_RE.match(date or ""):
+            raise ValueError("an event note needs 'date' as YYYY-MM-DD (the first day of the window)")
+        return os.path.join(root, f"{date}-{subject}")
+
+    return os.path.join(root, subject)
+
+
+def _claim_tags(kind, subject_type, subject, confidence, absence, tools, entities):
+    """Build the tag string: kind, then confidence/polarity, entities, tools.
+
+    Confidence and the `absence` polarity are claim-only per the skill's rubric
+    (a one-signal finding is a lead and carries no confidence).  They are
+    dropped rather than rejected on a lead/story: the note is still correct
+    without them, and a hard error here would cost a jot.
+    """
+    tags = [kind]
+    if kind == "claim":
+        if confidence:
+            tags.append(confidence.split()[0])
+        if absence:
+            tags.append("absence")
+
+    slot = _CLAIM_ENTITY_TAGS.get(subject_type)
+    if slot:
+        tags.append(f"{slot}:{subject}")
+    for entity in entities:
+        if entity not in tags:
+            tags.append(entity)
+    for tool in tools:
+        tag = f"tool:{tool}"
+        if tag not in tags:
+            tags.append(tag)
+    return " ".join(tags)
+
+
+def _claim_body(verdict, confidence, kind, evidence, replay, next_step):
+    """Render the life-notebook body template for one finding."""
+    lines = [f"VERDICT: {verdict.strip()}"]
+    if confidence and kind == "claim":
+        lines.append(f"CONFIDENCE: {confidence.strip()}")
+    if evidence:
+        lines.append("EVIDENCE:")
+        lines.extend(f"  {line.strip()}" for line in evidence)
+    if replay:
+        lines.append(f"REPLAY: {replay.strip()}")
+    if next_step:
+        lines.append(f"NEXT: {next_step.strip()}")
+    return "\n".join(lines)
+
+
+def _handle_mcp_note_claim(
+    verdict,
+    subject_type,
+    subject,
+    kind="claim",
+    confidence=None,
+    date=None,
+    tools=None,
+    entities=None,
+    evidence=None,
+    replay=None,
+    next_step=None,
+    absence=False,
+):
+    """Jot one life-notebook finding from plain fields; return the built note.
+
+    Everything structural is derived here, so the caller supplies only what it
+    actually knows.  Rejections are error strings (the module convention) and
+    name the fix, since the model sees them inside its own tool loop.
+    """
+    if not str(verdict).strip():
+        return _claim_error("'verdict' must be a non-empty one-sentence finding")
+
+    kind = (kind or "claim").strip().lower()
+    if kind not in _CLAIM_KINDS:
+        return _claim_error(f"kind must be one of {'|'.join(_CLAIM_KINDS)}, got {kind!r}")
+
+    if confidence:
+        head = str(confidence).strip().split()[0].lower()
+        if head not in _CLAIM_CONFIDENCES:
+            return _claim_error(
+                f"confidence must start with {'|'.join(_CLAIM_CONFIDENCES)}, got {confidence!r}"
+            )
+        confidence = f"{head}{str(confidence).strip()[len(head):]}"
+
+    entities = _as_list(entities)
+    for entity in entities:
+        slot, _, value = entity.partition(":")
+        if slot not in _CLAIM_ENTITY_TAGS or not _SLUG_RE.match(value):
+            return _claim_error(
+                f"entity {entity!r} must be person:<key>, place:<slug> or topic:<slug>"
+            )
+
+    subject_type = str(subject_type).strip().lower()
+    subject = str(subject).strip()
+    try:
+        directory = _claim_directory(subject_type, subject, (date or "").strip())
+    except ValueError as exc:
+        return _claim_error(str(exc))
+
+    tag = _claim_tags(
+        kind, subject_type, subject, confidence, absence, _as_list(tools), entities
+    )
+    message = _claim_body(
+        verdict, confidence, kind, _as_list(evidence), replay, next_step
+    )
+    note = Note.jot(
+        message,
+        tag=tag,
+        context=(replay or "").strip(),
+        pwd=directory,
+        now=_unique_now(),
+    )
+    Note.append(Note.NOTEFILE, note)
+    return json.dumps(_hydrate(note))
+
+
 def register_note_tools(allow_writes=False):
     """Register the MCP note tools into catjot's shared registry.
 
-    Read tools are always registered; ``create_note`` only when *allow_writes*
-    is set — a read-only default is the safe posture for a surface an external
-    model drives.
+    Read tools are always registered; the write pair — ``create_note`` and the
+    high-level ``note_claim`` — only when *allow_writes* is set: a read-only
+    default is the safe posture for a surface an external model drives.
     """
     register_tool(
         name="search_notes",
@@ -413,6 +618,112 @@ def register_note_tools(allow_writes=False):
                 "required": ["message"],
             },
             handler=_handle_mcp_create_note,
+        )
+        register_tool(
+            name="note_claim",
+            description=(
+                "Jot ONE life-notebook finding (a claim, lead, or story) into "
+                "catjot from plain fields. PREFER THIS over create_note for any "
+                "finding: the server builds the directory, the tag string, and "
+                "the VERDICT/CONFIDENCE/EVIDENCE/REPLAY body for you, so you "
+                "never hand-spell a path or an escaped multi-line message. The "
+                "minimum jot is verdict + subject_type + subject; add the rest "
+                "only when you actually have it."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "description": "The finding in one sentence (required).",
+                    },
+                    "subject_type": {
+                        "type": "string",
+                        "enum": list(_CLAIM_SUBJECT_DIRS),
+                        "description": (
+                            "The finding's PRIMARY facet, which decides where it "
+                            "is filed. Precedence when several fit: event > "
+                            "person > place > era > topic."
+                        ),
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": (
+                            "The subject's people.yaml key or lowercase-hyphen "
+                            "slug; for subject_type='era', the 4-digit year."
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": list(_CLAIM_KINDS),
+                        "description": (
+                            "claim = a corroborated verdict; lead = one unproven "
+                            "thread with a NEXT step; story = the one synthesis "
+                            "note for an event. Defaults to claim."
+                        ),
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "description": (
+                            "Claims only: 'strong' (3+ converging signals) or "
+                            "'plausible' (2), optionally followed by ' - <which "
+                            "signals carried it>'. A one-signal finding is a lead "
+                            "and takes no confidence."
+                        ),
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": (
+                            "YYYY-MM-DD, the first day of the window - REQUIRED "
+                            "for subject_type='event'. A 4-digit year for an era."
+                        ),
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The detamonogatari tool names that produced the "
+                            "finding, e.g. ['did_i_go']; tagged tool:<name>."
+                        ),
+                    },
+                    "entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Cross-cutting facets this note is ALSO about, "
+                            "already namespaced: person:<key>, place:<slug>, "
+                            "topic:<slug>. Tags are the cross-cutting axis - add "
+                            "them here rather than duplicating the note."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "One line per exhibit: '<8hex uid> <index> "
+                            "<yyyy-mm-dd> <one-phrase role>'."
+                        ),
+                    },
+                    "replay": {
+                        "type": "string",
+                        "description": (
+                            "The single cheapest call that re-verifies this, as a "
+                            "pasteable literal, e.g. did_i_go(place=\"Reno\"). "
+                            "Also the dedup key - search it before jotting."
+                        ),
+                    },
+                    "next_step": {
+                        "type": "string",
+                        "description": "Leads only: the concrete call that would promote or refute it.",
+                    },
+                    "absence": {
+                        "type": "boolean",
+                        "description": "True for a corroborated did-NOT-happen verdict; adds the 'absence' tag.",
+                    },
+                },
+                "required": ["verdict", "subject_type", "subject"],
+            },
+            handler=_handle_mcp_note_claim,
         )
 
 

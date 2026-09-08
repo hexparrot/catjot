@@ -147,6 +147,7 @@ class TestToolListing(MCPTestBase):
         names = {t["name"] for t in resp["result"]["tools"]}
         self.assertEqual(names, {"search_notes", "list_notes", "get_note"})
         self.assertNotIn("create_note", names)
+        self.assertNotIn("note_claim", names)
 
     def test_allow_writes_exposes_create_note(self):
         self.start(allow_writes=True)
@@ -155,6 +156,7 @@ class TestToolListing(MCPTestBase):
         )
         names = {t["name"] for t in resp["result"]["tools"]}
         self.assertIn("create_note", names)
+        self.assertIn("note_claim", names)
 
 
 class TestReadTools(MCPTestBase):
@@ -391,6 +393,231 @@ class TestWriteTool(MCPTestBase):
         self.start(allow_writes=False)
         _, is_err = self.tool_result("create_note", {"message": "x"})
         self.assertTrue(is_err)  # unknown tool
+
+
+class TestNoteClaim(MCPTestBase):
+    """note_claim builds the life-notebook structure the skill specifies.
+
+    The point of this tool is that a small local model supplies only plain
+    fields, so every test here asserts something the *caller* did not spell:
+    the directory, the tag string, or the body template.
+    """
+
+    def claim(self, **kwargs):
+        return self.tool_result("note_claim", kwargs)
+
+    def life(self, *parts):
+        """The expected life/ path for this test's temp store."""
+        return os.path.join(
+            os.path.dirname(os.path.abspath(self.notefile)), "life", *parts
+        )
+
+    def test_minimum_jot_builds_directory_tag_and_body(self):
+        self.start(allow_writes=True)
+        data, is_err = self.claim(
+            verdict="Ada moved to Reno in 2019.",
+            subject_type="person",
+            subject="ada-lovelace",
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(data["directory"], self.life("people", "ada-lovelace"))
+        self.assertEqual(data["tag"], "claim person:ada-lovelace")
+        self.assertEqual(data["message"].strip(), "VERDICT: Ada moved to Reno in 2019.")
+        self.assertEqual(len(list(Note.iterate(self.notefile))), 1)
+
+    def test_life_root_follows_the_bound_store(self):
+        # Each workspace's store owns its own life/ subtree, so the root is
+        # derived from the notefile rather than hard-coded to workspace-recall.
+        self.start(allow_writes=True)
+        data, _ = self.claim(
+            verdict="x", subject_type="topic", subject="woodworking"
+        )
+        self.assertTrue(data["directory"].startswith(os.path.dirname(self.notefile)))
+        self.assertEqual(data["directory"], self.life("topics", "woodworking"))
+
+    def test_event_files_under_date_prefixed_slug(self):
+        self.start(allow_writes=True)
+        data, is_err = self.claim(
+            verdict="3-night coast trip with Ada.",
+            subject_type="event",
+            subject="coast-trip",
+            date="2019-06-14",
+            confidence="strong - geo anchor + photos + purchases",
+            tools=["did_i_go"],
+            entities=["person:ada-lovelace", "place:cedar-harbor"],
+            evidence=["a1b2c3d4 geo_locations 2019-06-15 overnight anchor"],
+            replay='did_i_go(place="Cedar Harbor")',
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(data["directory"], self.life("events", "2019-06-14-coast-trip"))
+        # kind, confidence word, cross-cutting entities, then producing tools
+        self.assertEqual(
+            data["tag"],
+            "claim strong person:ada-lovelace place:cedar-harbor tool:did_i_go",
+        )
+        self.assertEqual(
+            data["message"].strip().splitlines(),
+            [
+                "VERDICT: 3-night coast trip with Ada.",
+                "CONFIDENCE: strong - geo anchor + photos + purchases",
+                "EVIDENCE:",
+                "  a1b2c3d4 geo_locations 2019-06-15 overnight anchor",
+                'REPLAY: did_i_go(place="Cedar Harbor")',
+            ],
+        )
+
+    def test_event_without_date_is_rejected_with_the_fix(self):
+        # The date is structural (it is half the directory name), so this is
+        # one of the few things the server cannot supply for the caller.
+        self.start(allow_writes=True)
+        data, is_err = self.claim(
+            verdict="x", subject_type="event", subject="coast-trip"
+        )
+        self.assertTrue(is_err)
+        self.assertIn("YYYY-MM-DD", data["error"])
+        self.assertEqual(list(Note.iterate(self.notefile)), [])
+
+    def test_era_takes_the_year_from_subject_or_date(self):
+        self.start(allow_writes=True)
+        by_subject, _ = self.claim(
+            verdict="2019 was the travel year.", subject_type="era", subject="2019"
+        )
+        self.assertEqual(by_subject["directory"], self.life("eras", "2019"))
+        by_date, _ = self.claim(
+            verdict="2020 was the quiet year.",
+            subject_type="era",
+            subject="2020",
+            date="2020",
+        )
+        self.assertEqual(by_date["directory"], self.life("eras", "2020"))
+        bad, is_err = self.claim(
+            verdict="x", subject_type="era", subject="the-nineties"
+        )
+        self.assertTrue(is_err)
+        self.assertIn("4-digit year", bad["error"])
+
+    def test_replay_becomes_the_context_dedup_key(self):
+        # context is what the consult-first protocol searches before re-running
+        # an expensive chain, so it has to be the literal call, not a summary.
+        self.start(allow_writes=True)
+        self.claim(
+            verdict="Ada was in Reno.",
+            subject_type="person",
+            subject="ada-lovelace",
+            replay='did_i_go(place="Reno")',
+        )
+        found, is_err = self.tool_result(
+            "search_notes", {"field": "context", "query": "did_i_go"}
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["context"], 'did_i_go(place="Reno")')
+
+    def test_lead_drops_confidence_but_keeps_next_step(self):
+        # A one-signal finding IS a lead and carries no confidence tag; the
+        # rubric word is silently dropped rather than costing the jot.
+        self.start(allow_writes=True)
+        data, is_err = self.claim(
+            verdict="Possible 2021 Reno visit.",
+            subject_type="person",
+            subject="ada-lovelace",
+            kind="lead",
+            confidence="strong",
+            next_step='structured_search(query="booking")',
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(data["tag"], "lead person:ada-lovelace")
+        self.assertNotIn("CONFIDENCE", data["message"])
+        self.assertIn('NEXT: structured_search(query="booking")', data["message"])
+
+    def test_absence_is_a_claim_polarity(self):
+        self.start(allow_writes=True)
+        data, _ = self.claim(
+            verdict="No Japan trip in 2020.",
+            subject_type="place",
+            subject="japan",
+            confidence="plausible",
+            absence=True,
+        )
+        self.assertEqual(data["tag"], "claim plausible absence place:japan")
+        # ...and only for claims: a lead cannot be an absence verdict
+        lead, _ = self.claim(
+            verdict="Maybe no Japan trip.",
+            subject_type="place",
+            subject="japan",
+            kind="lead",
+            absence=True,
+        )
+        self.assertEqual(lead["tag"], "lead place:japan")
+
+    def test_repeatable_fields_accept_a_bare_string(self):
+        # Small models routinely send a string where the schema says array; a
+        # silently-dropped tool tag is worse than accommodating that.
+        self.start(allow_writes=True)
+        data, is_err = self.claim(
+            verdict="x",
+            subject_type="person",
+            subject="ada-lovelace",
+            tools="sweep",
+            evidence="a1b2c3d4 chat_messages 2019-01-02 first contact",
+        )
+        self.assertFalse(is_err)
+        self.assertIn("tool:sweep", data["tag"])
+        self.assertIn("  a1b2c3d4 chat_messages", data["message"])
+
+    def test_duplicate_tags_collapse(self):
+        self.start(allow_writes=True)
+        data, _ = self.claim(
+            verdict="x",
+            subject_type="person",
+            subject="ada-lovelace",
+            entities=["person:ada-lovelace"],
+            tools=["sweep", "sweep"],
+        )
+        self.assertEqual(data["tag"], "claim person:ada-lovelace tool:sweep")
+
+    def test_malformed_inputs_are_named_errors_not_notes(self):
+        self.start(allow_writes=True)
+        for kwargs, expected in [
+            ({"verdict": "  ", "subject_type": "person", "subject": "ada"}, "verdict"),
+            ({"verdict": "x", "subject_type": "person", "subject": "Ada Lovelace"}, "slug"),
+            ({"verdict": "x", "subject_type": "pet", "subject": "rex"}, "subject_type"),
+            ({"verdict": "x", "subject_type": "person", "subject": "ada", "kind": "hunch"}, "kind"),
+            ({"verdict": "x", "subject_type": "person", "subject": "ada", "confidence": "certain"}, "confidence"),
+            ({"verdict": "x", "subject_type": "person", "subject": "ada", "entities": ["dog:rex"]}, "entity"),
+        ]:
+            with self.subTest(expected=expected):
+                data, is_err = self.claim(**kwargs)
+                self.assertTrue(is_err)
+                self.assertIn(expected, data["error"])
+        self.assertEqual(list(Note.iterate(self.notefile)), [])
+
+    def test_missing_required_field_is_caught_before_the_handler(self):
+        self.start(allow_writes=True)
+        data, is_err = self.claim(verdict="x", subject_type="person")
+        self.assertTrue(is_err)
+        self.assertIn("subject", data["error"])
+
+    def test_note_claim_is_write_gated(self):
+        self.start(allow_writes=False)
+        data, is_err = self.claim(
+            verdict="x", subject_type="person", subject="ada-lovelace"
+        )
+        self.assertTrue(is_err)
+        self.assertIn("unknown tool", data["error"])
+
+    def test_back_to_back_jots_stay_addressable(self):
+        # Same guarantee create_note gained: a session checkpointing several
+        # findings in one second must not make all but the first invisible.
+        self.start(allow_writes=True)
+        ids = []
+        for i in range(6):
+            data, is_err = self.claim(
+                verdict=f"finding {i}", subject_type="person", subject=f"person-{i}"
+            )
+            self.assertFalse(is_err)
+            ids.append(data["now"])
+        self.assertEqual(len(set(ids)), 6)
 
 
 class TestStdioSubprocess(MCPTestBase):
