@@ -79,6 +79,8 @@ Appearance: Aurora wears her dark hair scraped into a flawless low chignon, not 
 
 Manner: She speaks low and clipped and never once raises her voice; the effect is that everyone else lowers theirs to hear her. She prefers to remain standing while others sit, steeples her fingers when she listens, and is rarely without a ledger or a folded document close at hand. Her tell is a small muscle that flickers along her jaw when her control slips, gone before most people notice it. And underneath the fortress there is something few ever reach—a buried, bone-deep tenderness, exhausted from being spent on a family that mistakes her vigilance for coldness.
 
+History: The betrayal that forged her was not the fortune-hunting fiancé everyone assumes—it was the year she trusted an urbane family solicitor who quietly bled three accounts dry before she caught it, and by then not all of it could be recovered. She has never told her mother the true figure, and she balances every ledger herself now, twice, trusting no hand but her own. She also keeps a private book no accountant would recognize: a running tally of what each person under this roof owes the Bellvues—debts of money and debts of loyalty alike—and she can tell you to the day when each one came due.
+
 
 
 ^-^
@@ -95,6 +97,8 @@ Appearance: Age has only refined Evie. Her auburn hair, now threaded with delibe
 
 Manner: Her voice is honeyed and musical and unhurried, and she has a way of touching your forearm as she speaks that makes you feel chosen. She pours the tea herself rather than letting the staff do it, watching your face over the rim of the cup. Her tell is a half-second in which the warmth simply blinks off—the eyes going flat and arithmetical while she calculates—before the smile returns as though it never left. Yet beneath the performance is something real and unperformed: a genuine grief, and a loneliness so complete that she has forgotten it is not the natural state of things.
 
+History: The family she guards was built by trade—a scandal buried under a well-timed marriage, an alliance bought by spending a daughter's happiness, a name kept spotless at a cost only she has ever tallied. She married Mr. Bellvue for the legacy and not for love, and she has never quite forgiven him for dying before she could decide whether, after all those decades, she had come to love him after all. The grief she permits no one to witness is not tidy or occasional; it arrives at odd hours and finds her alone in his study, among his things, where the honeyed voice is of no use to anyone.
+
 
 ^-^
 Directory:/story/character
@@ -108,12 +112,14 @@ Appearance: Luna is all warm disarray—honey-blonde waves worn loose, usually w
 
 Manner: She talks brightly and fast and laughs too loudly, a laugh she deploys like a door swinging shut whenever a conversation edges toward anything true. She drapes herself over furniture rather than sitting in it and changes the subject the instant it turns to her. Her tell is that the laugh goes brittle and thin the moment anyone calls her shallow or empty-headed. What she guards so frantically is this: the talent is genuine, better than anyone in the family suspects, and her deepest terror is that someone will finally look closely and decide there was nothing there after all.
 
+History: There were two years at a city art school the family refers to, when it refers to them at all, as "Luna's little adventure"—two years in which she was, briefly and genuinely, taken seriously by people who had never heard the name Bellvue. The man who ended them was a gallerist who praised her work, borrowed the family name to underwrite a show, and disappeared with both the money and her nerve. She had painted his portrait once, in love; when it curdled she painted it over in a single coat of black, and the ruined canvas still hangs in her studio with its face turned to the wall. Somewhere behind it is one painting she believes is truly, undeniably good—and which no living person has been permitted to see.
+
 
 ^-^
 Directory:/story/character
 Date:1725999780
-Tag:character-backstory cassidy_lemon cassidy help
-Context:Cassidy Lemon's background and motivations
+Tag:character-backstory cassidy_thorne cassidy help
+Context:Cassidy Thorne's background and motivations
 Message:Cassidy is a sharp-tongued, alluring assistant who knows more than she lets on. Having been the Bellvues' right-hand woman for years, she’s fiercely protective of the family's secrets. She views Bartholomew as a potential disruptor, someone who could unearth things best left buried, and she's ready to counter any moves he makes.
 Backstory: Cassidy grew up poor and clawed her way into the Bellvue’s inner circle by outsmarting everyone around her. She’s seen the dark side of wealth and power, making her cynical and highly suspicious of outsiders, particularly those who seem too eager to fit in.
 
@@ -123,12 +129,14 @@ Appearance: Cassidy keeps her dark hair in a razor-sharp bob that ends in a clea
 
 Manner: She is dry and fast and sardonic, and she makes sure the last word in any exchange is hers. She works a room from its edges—she gravitates to walls, to doorways, to the sightline that takes in every exit—and answers a raised eyebrow with a raised eyebrow. Her tell is the opposite of most people's: when she has decided you are a genuine threat she becomes very still and very, very polite, the sarcasm draining out of her voice entirely. Beneath the armor there is exactly one crack, and it is fierce and near-total: her loyalty to Evie, the only person who ever bet on her, is the single thing she will not be cynical about.
 
+History: Before she was a Thorne of any consequence she was a girl in a let room three streets from a debtors' court, learning young that information keeps longer than money and cuts deeper. She talked her way into a temporary post in the Bellvue offices and simply never left, making herself indispensable one quietly buried problem at a time until the family could no longer remember how they had managed without her. There is exactly one document she has never shown Evie—kept not quite as leverage and not quite as insurance, and she has never entirely decided which, only that a woman who came up as she did does not surrender her last card to anyone, however much she loves them.
+
 
 ^-^
 Directory:/story/character
 Date:1725999840
-Tag:character-backstory winnie_belmonte winnie
-Context:Winnie Belmonte's background and motivations
+Tag:character-backstory winnie_marsh winnie
+Context:Winnie Marsh's background and motivations
 Message:The youngest sister, Winnie, is a grieving widow who returned to Ravenswood Manor after her husband's death. She’s emotionally closed off and suspicious of anyone new, fearing they might pry into her tragic past or use her vulnerability against her. Her grief has made her cynical about new relationships, and she struggles to trust outsiders' intentions.
 Backstory: Winnie’s marriage was arranged by her mother, Evie, to a man who turned out to be abusive and unfaithful. His death was a relief, but it left Winnie deeply scarred and mistrustful of anyone who tries to get close, particularly newcomers with unknown motives. His name was Duke and he died nearly four years earlier, prompting Winnie to return home.
 
@@ -136,24 +144,28 @@ Appearance: Winnie was once the radiant one, and you can still see the ghost of 
 
 Manner: She speaks softly and rarely, and she flinches—a small, involuntary thing—whenever a voice is raised anywhere near her. She hovers at the thresholds of rooms rather than entering them fully and holds her own elbows as though she is cold. Her tell is a bright, brittle hostess's smile she produces to deflect any question that comes too close, a smile with nothing behind it. But every so often, when she forgets to be afraid, a dry and startling wit slips out—quick, funny, a little cruel—and you catch a flash of the sharp, alive woman who existed before Duke.
 
+History: Marsh was Duke's name, and she keeps it the way she keeps the ring—not out of love but because taking it off would require her to explain why, and explaining is the one thing she cannot yet do. What she has told no one is the true shape of his cruelty: not the drink or the other women, which the family half-guessed and quietly forgave him, but the patient daily project he made of teaching her to want less, say less, be less, until she could no longer tell where his voice ended and her own began. The wit that escapes her now, in the unguarded moments, is the last intact piece of the girl he never quite finished dismantling—and she is, very slowly, beginning to notice it is still there.
+
 
 ^-^
 Directory:/story/character
 Date:1725999875
-Tag:character-backstory bastard sam
-Context:Sam's background and motivations
-Message:Sam, or Samantha, is the humbled, illegitimate child, often overlooked but dangerously ambitious. Her life on the fringes of the Bellvue family has made her bitter and resentful, especially toward anyone who might take what little she has. She sees Bartholomew as another obstacle in her quest for recognition, making her secretly antagonistic.
+Tag:character-backstory bastard sam croft
+Context:Sam Croft's background and motivations
+Message:Sam Croft, or Samantha Croft, is the humbled, illegitimate child, often overlooked but dangerously ambitious. Her life on the fringes of the Bellvue family has made her bitter and resentful, especially toward anyone who might take what little she has. She sees Bartholomew as another obstacle in her quest for recognition, making her secretly antagonistic.
 Backstory: Sam has spent her life in the shadow of her legitimate siblings, always yearning for the acceptance she never received. The constant rejection has made her ruthless, and she’s determined to prove herself, even if it means manipulating or eliminating those who stand in her way.
 
 Appearance: Sam is, by careful design, forgettable. She wears plain, practical clothes in colors that don't hold the eye—drab and serviceable—and keeps her hair pulled back and out of the way. Her hands are chapped and working hands, the only part of her that tells the truth about how much she actually does. People's gazes slide off her and settle on whoever is standing beside her, which is exactly how she has learned to survive.
 
 Manner: She is soft-spoken, deferential, endlessly agreeable—"of course," "right away," "whatever you need"—and she makes herself small in a room, listening from its edges, remembering everything. Her tell lasts only half a second: when she is slighted or dismissed, her face goes cold and adult and unmistakably intelligent, before the meek mask drops back over it. What the family has never bothered to notice is that she is genuinely competent, more capable than any of them, and that she knows the house—its passages, its schedules, its secrets—better than anyone alive.
 
+History: She took the name Croft from her mother, because the name Bellvue was never going to be offered—she learned that once and for all at eleven, standing forgotten in a doorway while the family settled her future in the third person, as though she were a piece of furniture being moved to a colder room. She has been useful and invisible ever since, and she has spent the invisibility carefully. There is not a service stair, a spare key, a delivery hour, or a standing private arrangement in this house that Sam Croft has not quietly committed to memory; she knows who is where, and when, and why, better than the woman who runs the staff—and no one has ever thought to wonder what she might do with it.
+
 
 ^-^
 Directory:/story/location
 Date:1726003498
-Tag:home ravenwood-manor cottage backyard cozy remote
+Tag:home manor cottage backyard cozy remote
 Context:Cottage House at Ravenwood Manor
 Message:In the far depths of Ravenwood Manors backyard, there exists a tiny, detached cottage complete with living necessities like a bedroom, kitchenette, and bathroom. There is a single door entry way at the front. The cottage house is surrounded by well-kept flower walls and a tidy picket fence. It is cozy and remote.
 
@@ -163,7 +175,7 @@ Low afternoon light comes through small mullioned windows and lies in warm squar
 ^-^
 Directory:/story/location
 Date:1726003872
-Tag:secret garden ravenwood manor backyard hedges remote secluded compromised
+Tag:secret garden manor backyard hedges remote secluded compromised
 Context:Secret Garden
 Message:In the far depths of the Ravenwood manor backyard is a secret garden with high, dense hedges. It feels very remote, and there is only one entryway into it. Stationed here is a chest full of outdoor-activity objects, such as picnic blankets and lap trays, along with weather-protected containers for food utensils. These are maintained by the waitstaff so any guest here can trust it is tidy, clean, and ready for use.
 
@@ -187,7 +199,7 @@ There are three building-height garage doors that open. Inside the garage are al
 ^-^
 Directory:/story/location/description
 Date:1726006467
-Tag:ravenwood-manor facade cobblestone driveway ironwork original
+Tag:manor facade cobblestone driveway ironwork original
 Context:Front Entrance of Ravenwoods Manor
 Message:Ravenswood Manor looms as a towering relic of Gothic architecture, its dark stone facade both grand and foreboding. The mansion features a central spire flanked by two smaller turrets, each crowned with pointed roofs adorned with intricate ironwork. An enormous semi-circle driveway, lined with cracked cobblestones, leads to a grand staircase and a set of heavy oak doors framed by pointed arches. Above the entrance, a vast rose-shaped window with dark stained glass adds a touch of color to the otherwise somber structure.
 
@@ -298,6 +310,8 @@ Appearance: A tall, straight-backed woman of late middle age in unrelieved black
 
 Manner: She speaks in measured, formal sentences and misses nothing; her disapproval is delivered entirely through a lengthening silence and a very slightly raised chin. Her tell is that she softens, almost imperceptibly, toward anyone she judges to be honestly hardworking--having been staff her whole life, she reserves her real contempt for the idle, whatever their birth.
 
+History: She began in this same house as a scullery girl of fourteen, more than forty years ago, and rose through every rank below stairs by being the last to leave and the first to know--she has served three generations of Bellvues and buried two of them. She remembers precisely who was kind to the frightened girl she once was and who was not, and though she would never say so aloud, that private ledger still quietly governs how far each member of the family may presume upon her.
+
 ^-^
 Directory:/story/character/staff/housekeeper
 Date:1726008720
@@ -308,6 +322,8 @@ Message:She commands the rooms, the linens, and the daughters' floors--the intim
 Appearance: A round, brisk, capable woman of middle years with reddened knuckles and forearms, her sleeves pushed up and a pencil tucked behind one ear. Her apron is always crisp at the start of the day and honestly rumpled by the end of it; she smells of clean linen and lavender water.
 
 Manner: Warm and rapid and endlessly busy, she talks to herself as she works and treats the whole house as her ongoing responsibility. Her tell is a sudden guardedness--the chatter stops, the eyes go careful--the moment a conversation strays toward one of the family's private matters, which she guards more fiercely than she lets on.
+
+History: It was Dot who carried up the morning tray and was first into the room the day Mr. Bellvue was found, and it was Dot who stripped and remade the bed afterward--and she has never said, to family or physician, that the linens told a less tidy story than a heart that simply stopped in its sleep. She keeps that observation folded away with the same brisk care she gives the sheets, and it is the true reason the chatter dies the instant anyone's talk drifts toward that particular morning.
 
 ^-^
 Directory:/story/character/staff/cook
@@ -320,6 +336,8 @@ Appearance: A broad, strong woman with flour permanently worked into the creases
 
 Manner: Loud, generous, and quick to laugh in her own domain, quick also to scold anyone who reaches for a dish before it is ready. Her tell is that her hospitality is also her intelligence-gathering: she feeds people precisely so they will linger and talk, and she remembers every word said over her table.
 
+History: Bess learned this kitchen from the cook before her, a woman turned out without a character over a scandal Bess will only ever half-tell, and she inherited along with the copper pans a single recipe she makes but has never once written down. Her long table below stairs is where the household truly assembles, and more than once the downstairs has learned a Bellvue secret over her stew a full day before the family upstairs imagined anyone knew--she feeds gossip as deliberately as she feeds people, and forgets neither.
+
 ^-^
 Directory:/story/character/staff/mechanic
 Date:1726008740
@@ -330,6 +348,8 @@ Message:She is the resident mechanic referenced in the car garage lore--the one 
 Appearance: Lean and wiry in practical coveralls, sleeves rolled to the elbow, with short-cropped hair and a permanent trace of grease along one forearm no amount of scrubbing quite removes. Her eyes are sharp and assessing, and she has a habit of wiping her hands on a rag whether or not they need it.
 
 Manner: Blunt, economical of speech, more comfortable with an engine than with conversation; she answers questions in as few words as the question allows. Her tell is that she comes fully alive--fluent, animated, almost tender--the instant the talk turns to the cars themselves, which she loves more plainly than she loves most people.
+
+History: There is one car in that garage Frankie was told, years ago and without a word of explanation, that she was never to open up or take out--and being Frankie, she has of course looked, and what she found beneath its seat she has told no one. She also keeps, in grease-pencil under a wheel arch where no one would ever think to read, her own quiet log of the cars' comings and goings, including one midnight departure and dawn return she was firmly instructed to forget and has never reported to a living soul.
 
 ^-^
 Directory:/story/character/staff/driver
@@ -342,6 +362,8 @@ Appearance: Trim and precise in a tailored dark driving coat and gloves, dark ha
 
 Manner: Watchful and discreet, she speaks little and observes much, holding doors and offering an arm with unhurried courtesy. Her tell is a flicker of dry amusement at the corner of her mouth when a passenger says something they believe is private--she hears everything said in her cars and forgets none of it.
 
+History: Nadia has made exactly one drive she will not speak of--an odd-hours errand for Evie alone, to an address she has since worked to strike from her own memory as thoroughly as she can manage--and she carried in her back seat that night a passenger who wept the entire way and, at the end of it, took both her hands and swore her to silence. She kept the promise. She keeps all of them; discretion is the whole of her value to this house and, she has come to suspect, the whole of her safety in it.
+
 ^-^
 Directory:/story/character/staff/gardener
 Date:1726008760
@@ -353,4 +375,160 @@ Appearance: Sun-weathered and strong, in earth-stained canvas and a wide-brimmed
 
 Manner: Slow-spoken and unhurried, she measures her words the way she measures the seasons and is far more at ease among plants than among people. Her tell is that she notices everything that passes through her gardens--every visitor, every trampled bed--and says nothing of it unless asked directly, holding the grounds' secrets as patiently as she holds their soil.
 
+History: It was Iris who planted the hedge that hides the secret garden, seedling by seedling some thirty years ago on Evie's own instruction, and so she alone knows exactly how it grew and exactly which second-floor window looks cleanly down into that supposedly private green--a thing she has never once volunteered to anyone. She has spent a lifetime watching who slips into her gardens hoping to be unseen and, more quietly still, watching who goes up to that window to see them.
+
+
+^-^
+Directory:/story/location/manor/grand-foyer
+Date:1726008800
+Tag:grand-foyer foyer entrance-hall manor gothic
+Context:The grand foyer of Ravenswood Manor
+Message:Beyond the great oak doors the foyer opens two full storeys into a cathedral hush, a checkerboard of black and white marble underfoot worn to a shine down the centre where a century of feet have crossed it. A double staircase sweeps up and divides beneath a chandelier of unlit crystal, and the walls are hung floor to cornice with Bellvue ancestors in oil, dim behind their varnish. The housekeeper will tell you, if pressed, that the painted eyes follow a visitor from door to stair; she does not entirely mean it as a joke. Cold air pools here even in summer, carrying the smell of beeswax and old stone, and every word spoken rises and thins and returns a half-second later from somewhere up near the ceiling.
+
+^-^
+Directory:/story/location/manor/library
+Date:1726008810
+Tag:library books archive manor gothic
+Context:The library of Ravenswood Manor
+Message:Two galleried storeys of shelving climb to a painted ceiling gone brown with age, ringed by a narrow iron balcony reached by rolling ladders that shriek along their rails. The air is dry and close and smells of vellum, dust, and pipe-smoke decades stale, and the tall windows are curtained against the light that would fade the spines. A cold hearth big enough to stand in anchors the far wall; beside it a single glass-fronted cabinet is kept locked, its key on no ring the staff carry, and behind the glass sit the family papers no daughter has ever been invited to read. Sound falls dead among the books, so that the room feels less quiet than deafened.
+
+^-^
+Directory:/story/location/manor/conservatory
+Date:1726008820
+Tag:conservatory glasshouse winter-garden manor gothic
+Context:The conservatory of Ravenswood Manor
+Message:A cage of white-painted iron and misted glass juts from the east side of the house, and the garden inside it has been let run a little wild—ferns gone rank and shoulder-high, a lemon tree that no longer fruits, condensation tracking down the panes in slow beads. The light comes green and underwater through the leaves, and the air is warm and wet and thick with the smell of soil and growing things even when the rest of the house is cold. Wicker chairs stand in a loose ring at the centre, their cushions gone soft with damp. It is the one room where voices instinctively drop, and confidences, once begun here, are difficult to stop.
+
+^-^
+Directory:/story/location/manor/ballroom
+Date:1726008830
+Tag:ballroom parquet chandelier manor gothic
+Context:The ballroom of Ravenswood Manor
+Message:The ballroom has not been danced in for years, and every surface wears a pale shroud of dust-sheeting—chairs, mirrors, the shape of a covered grand piano all rendered ghostly and anonymous. Overhead a great chandelier hangs dark, its lustres greyed, and the parquet beneath spreads out in a herringbone once mirror-bright and now bloomed with a fine grey film that keeps every footprint. The sconces are unlit and the long windows shuttered, so the room holds its own perpetual dusk. The acoustics remember, though: a single note hummed here swells and hangs and returns like the ghost of an orchestra tuning far away.
+
+^-^
+Directory:/story/location/manor/dining-hall
+Date:1726008840
+Tag:dining-hall table precedence manor gothic
+Context:The formal dining hall of Ravenswood Manor
+Message:A single table of near-black oak runs the length of the hall, long enough to seat twenty and rarely set for more than five, its surface polished to a depth that swallows the candlelight rather than giving it back. Smoke-dimmed silver and dark family portraits line the walls above the wainscot, and a sideboard bears decanters kept full more from habit than thirst. Every meal taken here is a quiet theatre of precedence—who sits near the head, who is placed below the salt, who is seated with their back to the door. The room is built so that a word spoken low at one end reaches the other with perfect, uncomfortable clarity.
+
+^-^
+Directory:/story/location/manor/wine-cellar
+Date:1726008850
+Tag:wine-cellar undercroft vault manor gothic
+Context:The wine cellar beneath Ravenswood Manor
+Message:Stone stairs descend from behind the kitchen into a vaulted undercroft that stays candle-cool in every season, the brick furred with a soft pale bloom of age. Bottles lie racked in their hundreds along the walls, decades deep, labels foxed and unreadable in the low light, and the air is heavy with cork, must, and cold earth. The cook keeps this as her second kingdom and admits few to it. One stretch of racking along the north wall is not, on close inspection, quite a wall—it gives, very slightly, when leaned upon, and behind it the dark goes back further than the cellar has any business going.
+
+^-^
+Directory:/story/location/manor/chapel
+Date:1726008860
+Tag:chapel crypt deconsecrated manor gothic
+Context:The deconsecrated chapel at Ravenswood Manor
+Message:A small stone chapel stands off the east wing, deconsecrated a generation ago and never quite abandoned, its pews grey with dust and its altar bare but for the pale rectangle where something was long ago taken down. One stained window survives intact above it, throwing a slow wheel of red and blue across the flagstones as the day turns. Beneath the floor lies the Bellvue crypt, reached by a single iron-bound door, and the newest name cut into its cold slabs is Mr. Bellvue's, the letters still sharp and unweathered. The air smells of stone and snuffed wax, and even those who claim no faith lower their voices at the threshold.
+
+^-^
+Directory:/story/location/manor/evie-study
+Date:1726008870
+Tag:evie-study study bureau ledger manor gothic
+Context:Evie Bellvue's private study
+Message:Evie's study is small, warm, and all but impregnable—the one room in the house the butler guards as jealously as its mistress does, and no one crosses its threshold uninvited. A single lamp keeps it in amber half-light; the walls are lined with books that are actually read and a bureau whose roll-top is always, without exception, locked. Here are the ledgers that truly matter: not of money but of people—marriages brokered, debts forgiven, favours banked, a whole quiet architecture of alliance set down in Evie's own small hand. It is the only room in which the trigger meant for Bartholomew has ever been spoken aloud, and the walls are thick enough that it was never overheard.
+
+^-^
+Directory:/story/location/manor/east-wing-gallery
+Date:1726008880
+Tag:east-wing-gallery portraits corridor manor gothic
+Context:The east-wing portrait gallery of Ravenswood Manor
+Message:The east-wing gallery is a long upper corridor hung its whole length with Bellvues—generations of them receding into the dark in their heavy frames, the earliest so dim they are little more than a pale face and a pair of hands afloat in varnish. Near the far end one frame is covered over with cloth, and no one who lives here will explain it or quite meet your eye when it is mentioned. Runners of worn carpet hush the footsteps, and the windows look down onto the grounds. It is from a single window along this gallery, though very few know it, that the secret garden lies wholly and clearly exposed to anyone who cares to stand and watch.
+
+^-^
+Directory:/story/location/manor/kitchen
+Date:1726008890
+Tag:kitchen below-stairs hearth manor gothic
+Context:The kitchens of Ravenswood Manor
+Message:Below stairs the kitchen is the one indisputably living room in the house—vast, low-ceilinged, and blessedly warm, the great range never wholly cold and the copper hung in gleaming ranks along the walls. Steam and the smell of bread and stock and woodsmoke have soaked into the very plaster, and the long scrubbed deal table at the centre is where the household truly gathers, the place where the staff take their meals, their tea, and their gossip. Bunches of herbs and hung game dry from the blackened beams. Here, and only here, does the manor sound like somewhere people actually live rather than somewhere they are merely kept.
+
+^-^
+Directory:/story/character/aurora/quirks
+Date:1726008900
+Tag:quirk aurora
+Context:Aurora's signature quirk
+Message:When Aurora is truly calculating—weighing a risk, pricing a person—her thumb finds the antique signet ring on her right hand and turns it, slow full rotations, entirely without her noticing. Those who know her have learned to watch the ring rather than the face, because the face gives away nothing and the ring gives away everything. She stands while others sit, keeps a ledger or a folded document always within reach, and physically cannot leave a crooked picture or an unsquared stack of papers alone.
+
+^-^
+Directory:/story/character/evie/quirks
+Date:1726008910
+Tag:quirk evie
+Context:Evie's signature quirk
+Message:Evie pours the tea herself, always, waving off the staff, and she watches your face over the rim of her own cup as you drink—the small ceremony is how she takes your measure. She wears exactly one piece of heirloom jewelry each day, chosen to suit the person she means to charm or unsettle, and will recount its history only when the telling serves her. When she is truly listening, the warmth in her eyes blinks briefly, arithmetically off, then returns as though it had never gone anywhere at all.
+
+^-^
+Directory:/story/character/luna/quirks
+Date:1726008920
+Tag:quirk luna
+Context:Luna's signature quirk
+Message:Luna is forever barefoot indoors, her shoes abandoned two rooms back, and there is always paint on her somewhere she has forgotten—a streak on a knuckle, a cheekbone, the hem of a trailing sleeve. She drapes herself over furniture rather than sitting in it, and she laughs too loudly and too soon, a bright brittle laugh she swings shut like a door the instant a conversation turns toward anything true. Call her shallow or empty-headed and that laugh thins to nothing, just for a beat, before she recovers it.
+
+^-^
+Directory:/story/character/cassidy/quirks
+Date:1726008930
+Tag:quirk cassidy
+Context:Cassidy's signature quirk
+Message:Cassidy works every room from its edges, drifting to walls and doorways and whatever sightline takes in all the exits at once, a tablet held to her chest like a clipboard and a shield. She answers a raised eyebrow with a raised eyebrow and makes certain the last word in any exchange is hers. Her real tell runs backward from most people's: the moment she decides you are a genuine threat, the sarcasm drains entirely out of her and she becomes very still and very, very polite.
+
+^-^
+Directory:/story/character/winnie/quirks
+Date:1726008940
+Tag:quirk winnie
+Context:Winnie's signature quirk
+Message:Winnie flinches at any raised voice, a small involuntary thing she has never been able to school out of herself, and she hovers at the thresholds of rooms rather than entering them fully, holding her own elbows as though she is perpetually cold. Her sleeves are long and buttoned at the wrist whatever the season, and she has never once removed her wedding ring. When a question strays too close she produces a bright, brittle hostess's smile with nothing whatever behind it.
+
+^-^
+Directory:/story/character/sam/quirks
+Date:1726008950
+Tag:quirk sam
+Context:Sam's signature quirk
+Message:Sam makes herself small and forgettable by long practice—plain clothes in colours that do not hold the eye, a place at the edge of the room, an endless soft supply of "of course" and "right away"—all while she listens to everything and forgets none of it. The one crack in the disguise lasts half a second: slight her or dismiss her and her face goes briefly cold, adult, and unmistakably intelligent before the meek mask slides back down over it. Most people never catch it. The few who do are never quite easy around her again.
+
+^-^
+Directory:/story/character/aurora/memories
+Date:1726008960
+Tag:memory hook aurora
+Context:A conversation hook from Aurora's past
+Message:Aurora was engaged once, to a man everyone found charming and she found merely adequate—until she discovered, a fortnight before the wedding, that he had already quietly borrowed against her expected settlement. She returned the ring in person, said nothing to anyone of the reason, and has kept it these years in a locked drawer of her writing desk, taking it out perhaps once a year to remind herself what warmth cost the last time she allowed it. She cannot pass a jeweller's window without her step faltering, and she has never once explained why.
+
+^-^
+Directory:/story/character/evie/memories
+Date:1726008970
+Tag:memory hook evie
+Context:A conversation hook from Evie's past
+Message:The trigger sleeping in Bartholomew was planted by Evie's own hand, one long-ago afternoon in the nursery wing, over a servant's grave and biddable little boy—she remembers the exact quality of the light and the exact flatness of her own voice as she did it, and she has never been wholly certain whether what she feels about it now is guilt or merely the long memory of guilt. She has told no living soul. It is the thing she circles, in the small hours, in the study that still smells faintly of her late husband.
+
+^-^
+Directory:/story/character/luna/memories
+Date:1726008980
+Tag:memory hook luna
+Context:A conversation hook from Luna's past
+Message:There was a gallerist, in the city years, who told Luna her work was extraordinary and meant it just long enough to borrow the Bellvue name, mount a show, and vanish with the takings and her nerve alike. She painted his portrait while she loved him; when it soured she painted it out under one thick coat of black, and the ruined canvas still hangs in her studio with its face to the wall. Ask about her painting and she will deflect with a laugh—but somewhere in that studio is one piece she believes is genuinely good, and whoever she finally shows it to will matter to her more than she could bear to say.
+
+^-^
+Directory:/story/character/cassidy/memories
+Date:1726008990
+Tag:memory hook cassidy
+Context:A conversation hook from Cassidy's past
+Message:Cassidy remembers the precise afternoon that a younger, poorer, dressed-better-than-she-could-afford version of herself sat across a desk from Evie Bellvue expecting to be shown the door, and was instead—alone among all the candidates—simply believed. That single wager is the one thing in the world she will not be cynical about, and she has repaid it with a loyalty that frightens her a little. And yet she keeps one document Evie has never seen, and cannot quite say, even to herself, whether she keeps it out of fear or out of love.
+
+^-^
+Directory:/story/character/sam/memories
+Date:1726009010
+Tag:memory hook sam
+Context:A conversation hook from Sam's past
+Message:Sam was eleven the day she understood, finally and for good, that she would never be given the name Bellvue: she stood forgotten in a doorway while the family settled her future in the third person, discussing her prospects as though she were a piece of furniture to be moved somewhere colder. She did not cry. She simply began, that afternoon, to pay attention—and in the years since she has mapped every passage, spare key, schedule, and standing secret in the house into a quiet dossier the family has never once suspected the invisible girl was keeping.
+
+^-^
+Directory:/story/character/winnie/memories
+Date:1726009000
+Tag:memory hook winnie
+Context:A conversation hook from Winnie's past
+Message:The cruelty of Winnie's marriage was never the drink or the affairs, which the family half-knew and quietly forgave; it was the patient daily lesson Duke made of teaching her to want less and say less until she lost the border between his voice and her own. She has never described it to anyone, and is not certain she has the words. But now and then, when she forgets to be careful, the old wit surfaces—dry, quick, startlingly funny—and in those moments you glimpse the sharp and living woman he never quite managed to finish erasing.
 

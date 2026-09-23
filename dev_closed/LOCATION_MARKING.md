@@ -250,9 +250,11 @@ semantics stay owned by `navigate_to`. Every commit while a scene is active arms
 one-shot next-turn `begin_scene` DIRECTOR NOTE (minimal rotation pressure).
 
 **mc_aliases.** Production MC slug is literally `mc`, but models tag
-`exp:bartholomew` — every MC gate uses the engine's `mc_aliases` set (env
-`RPJOT_MC_ALIASES`, logged at game_loop start). Unset = legacy behavior (under-fires,
-never misfires). The same alias set drives the third-person branch of
+`exp:bartholomew` — every MC gate uses the engine's `mc_aliases` set, loaded at
+engine init from the alias jot at `/story/character/mc` (`alias:` tag words;
+newest such note is the whole set, last write wins) and rewritten in-session by
+`/alias`. Logged as `[MC] alias set:` at init. No jot = legacy behavior
+(under-fires, never misfires). The same alias set drives the third-person branch of
 `_is_stationary_turn` (`Bartholomew enters the gallery` → mobile; explicit
 `_MOVE_VERBS_3P` conjugations, no gerunds) and `set_people_present` name
 normalization.

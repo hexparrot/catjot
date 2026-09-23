@@ -346,7 +346,7 @@ def main():
     print(f"arms={ARM_NAMES}  corpusA={len(CORPUS_A)}  corpusB={len(CORPUS_B)}  "
           f"rounds={ROUNDS}  call_timeout={CALL_TIMEOUT}s\n")
 
-    engine = RPJotEngine(location="ravenwood-manor",
+    engine = RPJotEngine(location="manor",
                          people_present={"player", "evie"})
     engine.register_all_tools()
 

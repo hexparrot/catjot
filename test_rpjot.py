@@ -90,19 +90,35 @@ def _base_messages(system_content=None):
 
 # Token-count-aware text generators for threshold tests.
 # Using realistic English so the pre-tokenizer produces ~12 tokens/chunk.
-_CHUNK = "The manor's old stones whispered secrets to the night wind. "  # ~12 tok
+_CHUNK = "The manor's old stones whispered secrets to the night wind. "
+
+# ...but "~12" only holds for the regex pre-tokenizer.  `regex` is an optional
+# dependency (the project is stdlib+requests), and without it rpjot falls back
+# to chars//4, which prices this same chunk at 15 tokens.  Threshold tests that
+# hardcoded 12 therefore overshot by 25% under the fallback and asserted against
+# a payload that had already blown the cap.  Measure the chunk instead of
+# assuming it, so the generators track whichever tokenizer is installed.
+_CHUNK_TOKS = _msg_toks({"role": "user", "content": _CHUNK})
+
+
+def _reps_for(toks: int) -> int:
+    """Chunk count whose token cost is >= *toks* (ceiling)."""
+    return max(1, -(-toks // _CHUNK_TOKS))
+
+
+def _reps_under(toks: int) -> int:
+    """Chunk count whose token cost stays <= *toks* (floor)."""
+    return max(1, toks // _CHUNK_TOKS)
 
 
 def _text_over_soft(extra_toks: int = 200) -> str:
     """Return text with ≥ CONTEXT_MAX_TOKS + extra_toks tokens."""
-    reps = max(1, (CONTEXT_MAX_TOKS + extra_toks + 11) // 12)
-    return _CHUNK * reps
+    return _CHUNK * _reps_for(CONTEXT_MAX_TOKS + extra_toks)
 
 
 def _text_over_hard(extra_toks: int = 200) -> str:
     """Return text with ≥ CONTEXT_HARD_LIMIT_TOKS + extra_toks tokens."""
-    reps = max(1, (CONTEXT_HARD_LIMIT_TOKS + extra_toks + 11) // 12)
-    return _CHUNK * reps
+    return _CHUNK * _reps_for(CONTEXT_HARD_LIMIT_TOKS + extra_toks)
 
 
 def _over_limit_text() -> str:
@@ -119,23 +135,23 @@ class TestSessionState(unittest.TestCase):
     """SessionState.header() must produce a well-formed string."""
 
     def test_header_contains_plain_location(self):
-        s = SessionState(location="ravenwood", people_present={"player"})
+        s = SessionState(location="manor", people_present={"player"})
         h = s.header()
-        self.assertIn("location: ravenwood", h)
+        self.assertIn("location: manor", h)
         self.assertNotIn("loc:", h)
 
     def test_header_contains_present_names(self):
-        s = SessionState(location="ravenwood", people_present={"alice", "bob"})
+        s = SessionState(location="manor", people_present={"alice", "bob"})
         h = s.header()
         self.assertIn("alice", h)
         self.assertIn("bob", h)
 
     def test_header_empty_people_shows_none(self):
-        s = SessionState(location="ravenwood", people_present=set())
+        s = SessionState(location="manor", people_present=set())
         self.assertIn("none", s.header())
 
     def test_header_people_are_sorted(self):
-        s = SessionState(location="ravenwood", people_present={"zelda", "alice", "bob"})
+        s = SessionState(location="manor", people_present={"zelda", "alice", "bob"})
         h = s.header()
         self.assertLess(h.index("alice"), h.index("bob"))
         self.assertLess(h.index("bob"), h.index("zelda"))
@@ -241,7 +257,7 @@ class TestMessageConstruction(unittest.TestCase):
     """build_user_message and build_tool_result_message."""
 
     def setUp(self):
-        self.engine = RPJotEngine(location="ravenwood", people_present={"player"})
+        self.engine = RPJotEngine(location="manor", people_present={"player"})
 
     def test_build_user_message_role(self):
         msg = self.engine.build_user_message("I look around.")
@@ -501,7 +517,7 @@ class TestToolDispatch(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor",
+            location="manor",
             people={"player", "alice"},
         )
 
@@ -1528,10 +1544,20 @@ class TestLocaleGraph(unittest.TestCase):
     def test_speculate_writes_nothing_without_endpoint(self):
         # I7: speculate_locale STAGES only; with a room drift but no endpoint the
         # call fails and NOTHING is staged or written.
+        from unittest.mock import patch
+
         self.engine.init_pipeline()
         self.engine._room_drift = ["scriptorium"]
         self.engine._room_drift_text = "a scriptorium beyond the pantry"
-        self.engine.speculate_locale()
+        # "without endpoint" has to be enforced, not assumed.  call_llm reads
+        # openai_api_url from the environment, so anyone with a local endpoint
+        # exported (a dev box running vllm) got a REAL completion here, staged a
+        # seed, and failed this test -- while this class promises "zero LLM".
+        # Drop the var for the duration so the precondition is the test's, not
+        # the shell's; patch.dict restores it on exit.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("openai_api_url", None)
+            self.engine.speculate_locale()
         self.assertIsNone(self.engine._locale_seed)  # no seed staged (no endpoint)
 
     def test_speculate_no_drift_no_seed(self):
@@ -1838,7 +1864,7 @@ class TestGuardPayload(unittest.TestCase):
 
     def _make_big_tool_msg(self, toks):
         """Tool-result message whose content is approximately `toks` tokens."""
-        reps = max(1, (toks + 11) // 12)
+        reps = _reps_for(toks)
         return {"role": "tool", "tool_call_id": "x", "content": _CHUNK * reps}
 
     def test_under_threshold_returns_same_list(self):
@@ -1853,7 +1879,9 @@ class TestGuardPayload(unittest.TestCase):
         eng = self._engine()
         capacity = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         target_toks = int(capacity * 0.87)
-        reps = max(1, (target_toks + 11) // 12)
+        # floor, not ceiling: this test asserts the payload is UNDER the cap,
+        # so rounding up could tip it over and trigger the very trim it denies.
+        reps = _reps_under(target_toks)
         msgs = [{"role": "user", "content": _CHUNK * reps}]
         result = eng._guard_payload(msgs)
         self.assertIs(result, msgs)
@@ -1922,7 +1950,7 @@ class TestGuardPayload(unittest.TestCase):
 
     def _assistant_tool_call_msg(self, arg_toks):
         """Assistant message whose weight lives entirely in tool_calls arguments."""
-        reps = max(1, (arg_toks + 11) // 12)
+        reps = _reps_for(arg_toks)
         big_args = json.dumps({"description": _CHUNK * reps, "tags": "exp:player"})
         return {
             "role": "assistant",
@@ -2065,7 +2093,7 @@ class TestSafeDispatch(unittest.TestCase):
     def setUp(self):
         _use_scratch_notefile(self)
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "alice"}
+            location="manor", people={"player", "alice"}
         )
 
     def _assert_error_json(self, result):
@@ -2175,7 +2203,7 @@ class TestSafeDispatch(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            engine = _make_engine(location="ravenwood-manor", people={"player"})
+            engine = _make_engine(location="manor", people={"player"})
             engine.init_pipeline()
             step2 = [{"role": "system", "content": "rules"}]
             canonical, think = engine._compliance_step.run(
@@ -2205,7 +2233,7 @@ class TestHistoryCompaction(unittest.TestCase):
         return _CHUNK * reps
 
     def _engine_with_stub(self):
-        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine = _make_engine(location="manor", people={"player"})
         self.condense_inputs = []
 
         def stub_condense(raw_text, focus_hint=""):
@@ -2340,11 +2368,11 @@ class TestCastDrift(unittest.TestCase):
     """Named-but-absent NPCs must be detected (never auto-added to the cast)."""
 
     def _engine(self, people):
-        return _make_engine(location="ravenwood-manor", people=people)
+        return _make_engine(location="manor", people=people)
 
     def test_mentioned_but_absent_npc_warns(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC action]: I look around", "Evie beckons you closer from the doorway."
         )
@@ -2353,7 +2381,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_present_npc_no_warning(self):
         eng = self._engine({"player", "evie"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC speaks aloud]: hello", "Evie smiles warmly at you."
         )
@@ -2362,7 +2390,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_known_absent_but_unmentioned_no_warning(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_cast_drift(
             "[MC action]: I sit down", "The room is empty and still."
         )
@@ -2378,7 +2406,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_word_boundary_avoids_substring_false_positive(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("eve", "Eve", location="ravenwood-manor")
+        eng.npc_tracker.register("eve", "Eve", location="manor")
         # 'eventually' contains 'eve' but must not match on a word boundary.
         warnings = eng._scan_cast_drift(
             "[MC action]: I wait", "Eventually the clock chimes; nobody appears."
@@ -2387,7 +2415,7 @@ class TestCastDrift(unittest.TestCase):
 
     def test_warning_clears_when_cast_resolves(self):
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         eng._scan_cast_drift("x", "Evie appears in the hall.")
         self.assertTrue(eng._cast_warnings)
         eng.session.people_present.add("evie")
@@ -2398,7 +2426,7 @@ class TestCastDrift(unittest.TestCase):
         # The unified _scan_drift("cast", ...) seam (Phase 0d) must produce the
         # exact same warnings as the underlying _scan_cast_drift.
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         warnings = eng._scan_drift(
             "cast", "[MC action]: I look", "Evie beckons from the doorway."
         )
@@ -2409,7 +2437,7 @@ class TestCastDrift(unittest.TestCase):
         # No room-drift scanner exists yet; an unknown kind is a harmless no-op
         # and must not touch _cast_warnings.
         eng = self._engine({"player"})
-        eng.npc_tracker.register("evie", "Evie", location="ravenwood-manor")
+        eng.npc_tracker.register("evie", "Evie", location="manor")
         eng._scan_drift("cast", "x", "Evie appears.")
         before = list(eng._cast_warnings)
         self.assertEqual(eng._scan_drift("room", "x", "Evie appears."), [])
@@ -2473,7 +2501,7 @@ class TestLocationDriftObservability(unittest.TestCase):
     """LOCDRIFT warnings surface in headers + /stats; [REMARK] always logs."""
 
     def _engine(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return eng
 
@@ -2551,7 +2579,7 @@ class TestZeroCanonicalNudge(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng = _make_engine(location="manor", people={"player"})
             eng.init_pipeline()
             step2 = [{"role": "system", "content": "rules"}]
             canonical, think = eng._compliance_step.run(
@@ -2688,7 +2716,7 @@ class TestTimingTelemetry(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -2786,7 +2814,7 @@ class TestTimingTelemetry(unittest.TestCase):
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
         try:
-            eng = _make_engine(location="ravenwood-manor", people={"player"})
+            eng = _make_engine(location="manor", people={"player"})
             eng.init_pipeline()
             eng._safe_dispatch = lambda handlers, name, args: json.dumps(
                 {"character": "x", "followup_instruction": "use this profile"}
@@ -2930,7 +2958,7 @@ class TestStep1DeltaMode(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -3182,7 +3210,7 @@ class TestSpeculativeSeed(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         eng.seed_enabled = True
         return rpjot_module, original, eng, calls
@@ -3249,7 +3277,7 @@ class TestSpeculativeSeed(unittest.TestCase):
     # -- _consume_seed validation ------------------------------------------
 
     def _engine_with_seed(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         eng.seed_enabled = True
         eng._seed = {
@@ -3323,7 +3351,7 @@ class TestSeedRunTurn(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, calls
 
@@ -3669,7 +3697,7 @@ class TestCallLLMStreaming(unittest.TestCase):
         ]
         captured = {}
 
-        def fake_post(url, headers=None, json=None, stream=False):
+        def fake_post(url, headers=None, json=None, stream=False, timeout=None):
             captured["payload"] = json
             captured["stream_kw"] = stream
             return self._FakeResp(lines)
@@ -3693,7 +3721,7 @@ class TestCallLLMStreaming(unittest.TestCase):
 
         captured = {}
 
-        def fake_post(url, headers=None, json=None, stream=False):
+        def fake_post(url, headers=None, json=None, stream=False, timeout=None):
             captured["payload"] = json
             return self._FakeResp([])
 
@@ -3797,7 +3825,7 @@ class TestProseStreaming(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         return rpjot_module, original, eng, captured
 
@@ -3847,7 +3875,7 @@ class TestProseStreaming(unittest.TestCase):
 
         original = rpjot_module.call_llm
         rpjot_module.call_llm = fake_call_llm
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         chunks = []
         eng.prose_stream_cb = chunks.append
@@ -3884,6 +3912,78 @@ class TestProseStreaming(unittest.TestCase):
         self.assertIsNone(eng.prose_stream_cb)
 
 
+class TestProseRetry(unittest.TestCase):
+    """Step 3 is the only step whose LLM failure is fatal (LLMError aborts the
+    turn), so it opts into call_llm's transient retry — unlike steps 1-2, which
+    degrade gracefully and stay at retries=0."""
+
+    def _run_step3(self, eng):
+        return eng._prose_step.run(
+            "[MC action]: I wave",
+            "WORLD STATE: a room",
+            [],
+            [],
+            [{"role": "system", "content": "prose"}],
+        )
+
+    def test_step3_passes_prose_retry_attempts(self):
+        import rpjot as rpjot_module
+
+        captured = {}
+
+        def fake_call_llm(messages, **kwargs):
+            captured["retries"] = kwargs.get("retries")
+            return {"role": "assistant", "content": "The lamp gutters."}
+
+        original = rpjot_module.call_llm
+        rpjot_module.call_llm = fake_call_llm
+        eng = _make_engine(location="manor", people={"player"})
+        eng.init_pipeline()
+        try:
+            narrative = self._run_step3(eng)
+        finally:
+            rpjot_module.call_llm = original
+        self.assertEqual(narrative, "The lamp gutters.")
+        self.assertEqual(captured["retries"], rpjot_module.PROSE_RETRY_ATTEMPTS)
+        self.assertGreaterEqual(rpjot_module.PROSE_RETRY_ATTEMPTS, 1)
+
+    def test_transient_blip_on_nonstreaming_prose_is_retried(self):
+        # End-to-end through the REAL catjot.call_llm: a single connection reset
+        # on the non-streaming prose call must be retried, not fatal.
+        import os
+        import catjot
+        import requests
+        from unittest.mock import patch, MagicMock
+
+        eng = _make_engine(location="manor", people={"player"})
+        eng.init_pipeline()  # built offline before any endpoint is mocked
+
+        good = MagicMock()
+        good.raise_for_status = lambda: None
+        good.json = lambda: {
+            "choices": [
+                {"message": {"role": "assistant", "content": "The hall stills."}}
+            ]
+        }
+        post = MagicMock(
+            side_effect=[requests.exceptions.ConnectionError("reset"), good]
+        )
+        env = {
+            "openai_api_url": "http://localhost:9/v1/chat",
+            "openai_api_model": "test-model",
+        }
+        orig_backoff = catjot.LLM_RETRY_BACKOFF
+        catjot.LLM_RETRY_BACKOFF = 0
+        try:
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(catjot.requests, "post", post):
+                    narrative = self._run_step3(eng)
+        finally:
+            catjot.LLM_RETRY_BACKOFF = orig_backoff
+        self.assertEqual(post.call_count, 2)  # failed once, retried, succeeded
+        self.assertEqual(narrative, "The hall stills.")
+
+
 # ---------------------------------------------------------------------------
 # 12i. Compact-schema keep-list — _compact_step2_schemas (W7 / T3)
 # ---------------------------------------------------------------------------
@@ -3893,7 +3993,7 @@ class TestCompactSchemaKeepList(unittest.TestCase):
     """Critical argument contracts survive step-2 schema compaction."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.compact = {
             s["function"]["name"]: s for s in self.engine._compact_step2_schemas
         }
@@ -3991,7 +4091,7 @@ class TestConsolidatedDispatch(unittest.TestCase):
         fd, self._path = tempfile.mkstemp(suffix=".jot")
         os.close(fd)
         Note.NOTEFILE = self._path
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def tearDown(self):
         Note.NOTEFILE = self._saved_notefile
@@ -4123,6 +4223,84 @@ class TestConsolidatedDispatch(unittest.TestCase):
         note = self._last_note()
         self.assertIn("int:longing", note.tag.split())
         self.assertTrue(note.message.strip())
+
+
+# ---------------------------------------------------------------------------
+# 12e-3a. MC-relationship nudge (MC_REL) — _pending_mc_rel_nudge + injection
+# ---------------------------------------------------------------------------
+
+
+class TestMcRelNudge(unittest.TestCase):
+    """The DIRECTOR NOTE that gets the model to record the MC's own relationships.
+
+    Without it, the model only ever writes NPC↔NPC relationships, so
+    get_relationship_arc('mc', X) stays empty. Pure unit (no LLM).
+    """
+
+    def setUp(self):
+        _use_scratch_notefile(self)  # any writes go to a scratch .jot
+
+    def _engine(self, people={"mc", "evie"}):
+        from rpjot import MC_REL_MIN_TURNS
+
+        eng = _make_engine(location="manor", people=people)
+        eng.mc_rel_nudge_enabled = True
+        eng._turn_count = MC_REL_MIN_TURNS  # past the dwell gate
+        return eng
+
+    def test_pending_after_dwell_with_present_unrecorded_npc(self):
+        self.assertEqual(self._engine()._pending_mc_rel_nudge(), "evie")
+
+    def test_dwell_gate_suppresses_early_turns(self):
+        eng = self._engine()
+        eng._turn_count = 0
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_no_npc_present(self):
+        self.assertIsNone(self._engine(people={"mc"})._pending_mc_rel_nudge())
+
+    def test_per_scene_guard_fires_once(self):
+        eng = self._engine()
+        self.assertEqual(eng._pending_mc_rel_nudge(), "evie")
+        eng._mc_rel_nudge_shown.add(eng._rel_key("mc", "evie"))
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_disabled_flag_silences(self):
+        eng = self._engine()
+        eng.mc_rel_nudge_enabled = False
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_existing_rel_note_suppresses(self):
+        eng = self._engine()
+        eng._dispatch_step2(
+            "record_relationship",
+            json.dumps(
+                {
+                    "kind": "bond",
+                    "char_a": "mc",
+                    "char_b": "evie",
+                    "description": "wary mutual respect",
+                }
+            ),
+        )
+        self.assertIsNone(eng._pending_mc_rel_nudge())
+
+    def test_directive_injected_in_step2_content(self):
+        from rpjot import ComplianceStep
+
+        content = ComplianceStep(self._engine())._compose_step2_user_content(
+            "[MC action]: I nod to her", "WORLD STATE: x"
+        )
+        self.assertIn("record_relationship(char_a='mc', char_b='evie'", content)
+
+    def test_begin_scene_rearms_guard(self):
+        eng = self._engine()
+        eng._mc_rel_nudge_shown.add(eng._rel_key("mc", "evie"))
+        eng._dispatch_step2(
+            "begin_scene",
+            json.dumps({"name": "New Beat", "description": "a fresh scene begins"}),
+        )
+        self.assertEqual(eng._mc_rel_nudge_shown, set())
 
 
 # ---------------------------------------------------------------------------
@@ -4357,7 +4535,7 @@ class TestEntryCitation(unittest.TestCase):
         ]
         for s in seeds:
             Note.append(Note.NOTEFILE, Note.jot(**s))
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def tearDown(self):
         Note.NOTEFILE = self._saved_notefile
@@ -4461,14 +4639,14 @@ class TestEntryCitation(unittest.TestCase):
                 message="An iron key rests on the sill.",
                 tag=f"obj:iron-key ref:{self.T}",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=self.T + 600,
             ),
         )
         registry = self.engine._object_registry()
         self.assertIn("iron-key", registry)
         self.assertEqual(
-            registry["iron-key"]["residence"].get("room"), "ravenwood-manor"
+            registry["iron-key"]["residence"].get("room"), "manor"
         )
 
     # --- backlinks seam ---
@@ -4518,7 +4696,7 @@ class TestCitationCapture(unittest.TestCase):
                 message="The key sits on the mantel.",
                 tag="obj:iron-key",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=T + 200,
             ),
             dict(
@@ -4532,13 +4710,13 @@ class TestCitationCapture(unittest.TestCase):
                 message="The key changes hands again.",
                 tag="obj:iron-key",
                 context="sighting",
-                pwd=f"{PWD_WORLD}/ravenwood-manor",
+                pwd=f"{PWD_WORLD}/manor",
                 now=T + 400,
             ),
         ]
         for s in seeds:
             Note.append(Note.NOTEFILE, Note.jot(**s))
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.engine._turn_refs = []
 
     def tearDown(self):
@@ -4636,7 +4814,7 @@ class TestCitationStamps(unittest.TestCase):
                 now=self.T,
             ),
         )
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
         self.engine._turn_refs = [self.T]
 
     def tearDown(self):
@@ -4757,7 +4935,108 @@ class TestCitationStamps(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 12f. Sigil classification — play.classify_input (W8d / R4d)
+# 12f. Sigil segmentation — play.segment_input (mechanical splitter)
+# ---------------------------------------------------------------------------
+
+
+class TestSegmentInput(unittest.TestCase):
+    """The mechanical contract: one input line → ordered, typed thought segments.
+
+    Sigils (! @ ^ |) delimit ONLY when attached to the start of a token; `++`/
+    `+++` are standalone length meta-tokens; `*`/`"`/`'` are not sigils.
+    """
+
+    def _s(self, raw):
+        import play
+
+        return play.segment_input(raw)
+
+    def _kinds(self, raw):
+        return [(s.kind, s.text) for s in self._s(raw).segments]
+
+    # --- single sigils ---
+    def test_action_only(self):
+        self.assertEqual(self._kinds("!opens the door"), [("action", "opens the door")])
+
+    def test_attention_only(self):
+        self.assertEqual(self._kinds("@evie"), [("attention", "evie")])
+
+    def test_monologue_only(self):
+        self.assertEqual(self._kinds("^why is she here"), [("monologue", "why is she here")])
+
+    def test_default_speech_no_sigil(self):
+        self.assertEqual(self._kinds("hello everyone"), [("speech", "hello everyone")])
+
+    def test_dropped_sigils_are_literal_speech(self):
+        # `*` and a leading quote are no longer sigils → default speech, verbatim.
+        self.assertEqual(self._kinds("*waves"), [("speech", "*waves")])
+        self.assertEqual(self._kinds('"hello there"'), [("speech", '"hello there"')])
+
+    # --- multiple sigils split in order ---
+    def test_compound_splits_in_order(self):
+        segs = self._s('!draws sword @evie |aurora: "lets go!"')
+        self.assertEqual(
+            [(s.kind, s.text, s.speaker) for s in segs.segments],
+            [
+                ("action", "draws sword", None),
+                ("attention", "evie", None),
+                ("injection", '"lets go!"', "aurora"),
+            ],
+        )
+
+    def test_leading_speech_then_sigil(self):
+        self.assertEqual(
+            self._kinds("you'll regret this !steps back"),
+            [("speech", "you'll regret this"), ("action", "steps back")],
+        )
+
+    # --- attached-only rule: mid/end-word sigils are literal ---
+    def test_trailing_bang_is_not_a_sigil(self):
+        self.assertEqual(self._kinds("go! now"), [("speech", "go! now")])
+
+    def test_interior_quotes_do_not_split(self):
+        self.assertEqual(
+            self._kinds('!draws his sword "you\'ll regret this"'),
+            [("action", 'draws his sword "you\'ll regret this"')],
+        )
+
+    # --- narrative injection speaker parsing ---
+    def test_injection_with_speaker(self):
+        seg = self._s('|aurora: "lets go!"').segments[0]
+        self.assertEqual((seg.kind, seg.speaker, seg.text), ("injection", "aurora", '"lets go!"'))
+
+    def test_injection_without_speaker(self):
+        seg = self._s("|the wind howls through the hall").segments[0]
+        self.assertEqual((seg.kind, seg.speaker, seg.text), ("injection", None, "the wind howls through the hall"))
+
+    # --- reply-length meta tokens ---
+    def test_plus_plus_sets_level_1_and_is_stripped(self):
+        p = self._s("!draws sword ++")
+        self.assertEqual(p.length_level, 1)
+        self.assertEqual([(s.kind, s.text) for s in p.segments], [("action", "draws sword")])
+
+    def test_plus_plus_plus_sets_level_2(self):
+        p = self._s("+++ what happened here")
+        self.assertEqual(p.length_level, 2)
+        self.assertEqual([(s.kind, s.text) for s in p.segments], [("speech", "what happened here")])
+
+    def test_length_only_line_has_no_segments(self):
+        p = self._s("+++")
+        self.assertEqual((p.length_level, p.segments), (2, []))
+
+    def test_plus_inside_text_is_literal(self):
+        p = self._s("a++b and 2+2 stay literal")
+        self.assertEqual(p.length_level, 0)
+        self.assertEqual(self._kinds("a++b and 2+2 stay literal"), [("speech", "a++b and 2+2 stay literal")])
+
+    # --- empty / whitespace ---
+    def test_empty_and_whitespace(self):
+        self.assertEqual(self._s("").segments, [])
+        self.assertEqual(self._s("   ").segments, [])
+
+
+# ---------------------------------------------------------------------------
+# 12f. Sigil classification — play.classify_input (directive strings)
 # ---------------------------------------------------------------------------
 
 
@@ -4769,13 +5048,8 @@ class TestClassifyInput(unittest.TestCase):
 
         return play.classify_input(raw)
 
-    def test_speech_sigil(self):
-        out = self._c('"Hello there.')
-        self.assertTrue(out.startswith("[MC speaks aloud]"))
-        self.assertIn("Hello there.", out)
-
     def test_action_sigil(self):
-        out = self._c("*opens the heavy door")
+        out = self._c("!opens the heavy door")
         self.assertTrue(out.startswith("[MC action]"))
         self.assertIn("opens the heavy door", out)
 
@@ -4799,10 +5073,34 @@ class TestClassifyInput(unittest.TestCase):
         # granular-off — record_knowledge is the always-on core writer).
         self.assertIn("record_knowledge", out)
 
+    def test_injection_sigil_with_speaker(self):
+        out = self._c('|aurora: "lets go!"')
+        self.assertIn("[NARRATIVE INJECTION — aurora]", out)
+        self.assertIn('"lets go!"', out)
+        self.assertIn("canon this turn", out)
+
     def test_default_is_dialogue(self):
         out = self._c("hello everyone")
         self.assertIn("[MC — likely spoken aloud", out)
         self.assertIn("hello everyone", out)
+
+    def test_dropped_sigils_fall_through_to_speech(self):
+        # `*` and `"` are no longer sigils → default speech directive.
+        self.assertIn("[MC — likely spoken aloud", self._c("*opens the door"))
+        self.assertIn("[MC — likely spoken aloud", self._c('"Hello there."'))
+
+    def test_compound_emits_multiple_directives(self):
+        out = self._c("!draws sword @evie")
+        self.assertIn("[MC action]: draws sword", out)
+        self.assertIn("[MC attention", out)
+        # ordered: action block precedes the attention block
+        self.assertLess(out.index("[MC action]"), out.index("[MC attention"))
+
+    def test_reply_length_marker(self):
+        out = self._c("what now +++")
+        self.assertTrue(out.startswith("[REPLY LENGTH — much longer]"))
+        self.assertIn("[MC — likely spoken aloud", out)
+        self.assertNotIn("[REPLY LENGTH", self._c("what now"))
 
 
 # ---------------------------------------------------------------------------
@@ -4906,6 +5204,106 @@ class TestStationaryClassifier(unittest.TestCase):
         self.assertFalse(self._stat(""))
         self.assertFalse(self._stat(None))
 
+    # --- multi-segment: any action-move block makes the whole turn mobile ---
+    def test_compound_mobile_when_a_later_action_moves(self):
+        import play
+
+        # attention block first, then an [MC action] that is a real move.
+        self.assertFalse(self._stat(play.classify_input("@evie !I walk to the door")))
+
+    def test_compound_stationary_when_no_block_moves(self):
+        import play
+
+        self.assertTrue(self._stat(play.classify_input("@evie !pick up the key")))
+
+    def test_reply_length_marker_is_neutral_for_mobility(self):
+        import play
+
+        # A [REPLY LENGTH …] block must not fail-open a genuine move to stationary.
+        self.assertFalse(self._stat(play.classify_input("!I walk to the door +++")))
+
+    # --- nudge fires when ANY block is nudge-worthy, not just the first ---
+    def test_nudge_fires_on_a_later_action_block(self):
+        import play
+        from rpjot import ComplianceStep
+
+        classified = play.classify_input("@evie !opens the chest")
+        self.assertTrue(ComplianceStep._should_nudge_zero_canonical(classified))
+
+
+# ---------------------------------------------------------------------------
+# 12f-ter. Alias jot — where mc_aliases comes from
+# ---------------------------------------------------------------------------
+
+
+class TestAliasJot(unittest.TestCase):
+    """The alias set is loaded from a jot, not the environment.
+
+    It has to survive a restart the way the rest of the save does, so the
+    contract is: set_mc_aliases writes it, a fresh engine on the same notefile
+    reads it back, and the newest jot is the WHOLE set (last write wins, since
+    an append-only notefile has no delete verb).
+    """
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def test_no_jot_is_legacy_mc_slug_only(self):
+        self.assertEqual(_make_engine().mc_aliases, frozenset({"mc"}))
+
+    def test_set_then_reload_round_trips(self):
+        _make_engine().set_mc_aliases(["Bartholomew", "Bart"])
+        self.assertEqual(
+            _make_engine().mc_aliases, frozenset({"mc", "bartholomew", "bart"})
+        )
+
+    def test_mc_slug_is_always_included(self):
+        eng = _make_engine()
+        self.assertIn("mc", eng.set_mc_aliases(["bartholomew"]))
+
+    def test_names_are_slugified(self):
+        eng = _make_engine()
+        self.assertEqual(
+            eng.set_mc_aliases(["Mr. Wentworth"]), frozenset({"mc", "mr-wentworth"})
+        )
+
+    def test_rewrite_drops_an_alias(self):
+        # Same-second writes are the common case (two /alias calls in a row);
+        # the reader must still take the LAST one appended, not the first.
+        _make_engine().set_mc_aliases(["bartholomew", "bart"])
+        _make_engine().set_mc_aliases(["bartholomew"])
+        self.assertEqual(_make_engine().mc_aliases, frozenset({"mc", "bartholomew"}))
+
+    def test_set_applies_live_without_restart(self):
+        eng = _make_engine()
+        eng.set_mc_aliases(["bartholomew"])
+        self.assertEqual(eng.mc_aliases, frozenset({"mc", "bartholomew"}))
+
+    def test_alias_collapses_cast_name_to_mc(self):
+        eng = _make_engine()
+        eng.set_mc_aliases(["bartholomew"])
+        self.assertEqual(eng._normalize_person_slug("Bartholomew"), "mc")
+
+    def test_alias_opens_the_record_event_mc_gate(self):
+        # The live 2026-08-04 [LOCDRIFT] "(no MC tag — session unmoved)": an
+        # exp:bartholomew event at a new room left the session behind.
+        eng = _make_engine(location="manor/exterior")
+        eng.set_mc_aliases(["bartholomew"])
+        eng._tool_record_event(
+            "Bartholomew arrives and questions the housekeeper.",
+            "exp:bartholomew exp:mrs-halloway",
+            location="manor/exterior/front-door",
+        )
+        self.assertEqual(eng._pending_loc_hint, "manor/exterior/front-door")
+
 
 # ---------------------------------------------------------------------------
 # 12f-bis. Third-person self-movement (mc_aliases branch)
@@ -4976,7 +5374,7 @@ class TestThirdPersonMovement(unittest.TestCase):
     def test_nudge_omitted_for_third_person_move(self):
         from rpjot import ComplianceStep
 
-        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng = _make_engine(location="manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
         step = eng._compliance_step
@@ -4990,7 +5388,7 @@ class TestThirdPersonMovement(unittest.TestCase):
         # once fired here ("an invitation is not movement") is RETIRED — an NPC's
         # invitation is now allowed to lead the scene, so no DIRECTOR NOTE is
         # injected and the symmetric AGENCY RULE is present instead.
-        eng = _make_engine(location="ravenwood-manor", people={"mc"})
+        eng = _make_engine(location="manor", people={"mc"})
         eng.mc_aliases = frozenset({"mc", "bartholomew", "bart"})
         eng.init_pipeline()
         step = eng._compliance_step
@@ -5018,7 +5416,7 @@ class TestProductionActivation(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "evie"}
+            location="manor", people={"player", "evie"}
         )
 
     def _passes(self, fn, n=3, need=2):
@@ -5171,7 +5569,7 @@ class TestSynthesisSeams(unittest.TestCase):
     """Tool results must never leak raw dicts (braces) into the prose synthesis."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def test_record_bond_summary_has_no_braces(self):
         result = json.dumps(
@@ -5243,7 +5641,7 @@ class TestSynthesisSeams(unittest.TestCase):
             calls["i"] += 1
             return r
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         # Force the dispatched result to carry a followup instruction.
         eng._dispatch_step2 = lambda name, args: json.dumps(
@@ -5285,7 +5683,7 @@ class TestSynthesisSeams(unittest.TestCase):
             calls["i"] += 1
             return r
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         eng.init_pipeline()
         n = {"i": 0}
 
@@ -5374,7 +5772,7 @@ class TestHygiene(unittest.TestCase):
     def test_query_cache_fifo_eviction(self):
         from rpjot import _QUERY_CACHE_MAX
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         for i in range(_QUERY_CACHE_MAX + 25):
             eng._cache_put(f"k{i}", "value")
         cache = eng.session._query_cache
@@ -5385,7 +5783,7 @@ class TestHygiene(unittest.TestCase):
     def test_query_cache_update_existing_does_not_grow(self):
         from rpjot import _QUERY_CACHE_MAX
 
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         for i in range(_QUERY_CACHE_MAX):
             eng._cache_put(f"k{i}", "v")
         self.assertEqual(len(eng.session._query_cache), _QUERY_CACHE_MAX)
@@ -5396,13 +5794,14 @@ class TestHygiene(unittest.TestCase):
     def _user_msg_at_pct(self, low_pct):
         cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         low = low_pct * cap
-        reps = int(low / 12)
+        reps = _reps_under(int(low))
+        # step by one chunk: +5 could overshoot the 90-99% band into a trim
         while _msg_toks({"role": "user", "content": _CHUNK * reps}) < low:
-            reps += 5
+            reps += 1
         return {"role": "user", "content": _CHUNK * reps}
 
     def test_guard_90pct_history_only_logs_no_trimmable(self):
-        eng = _make_engine(location="ravenwood-manor", people={"player"})
+        eng = _make_engine(location="manor", people={"player"})
         cap = MODEL_CONTEXT_LIMIT_TOKS - _RESPONSE_RESERVE_TOKS
         big = self._user_msg_at_pct(0.92)
         msgs = [big, {"role": "user", "content": "the active prompt"}]
@@ -5425,7 +5824,7 @@ class TestHistoryReport(unittest.TestCase):
     """The REPL token panel exposes the number that actually grows: history."""
 
     def setUp(self):
-        self.engine = _make_engine(location="ravenwood-manor", people={"player"})
+        self.engine = _make_engine(location="manor", people={"player"})
 
     def test_report_contains_expected_fields(self):
         step2 = [
@@ -5494,7 +5893,7 @@ class TestResumeDigestSeeding(unittest.TestCase):
             pass
 
     def _engine(self):
-        engine = _make_engine(location="ravenwood-manor", people={"player"})
+        engine = _make_engine(location="manor", people={"player"})
         engine._condense_context = lambda raw, focus_hint="": "distilled recap here"
         return engine
 
@@ -6533,14 +6932,14 @@ class TestPrivateConversationKnowledge(unittest.TestCase):
 class TestLocationPrecision(unittest.TestCase):
     """Notes file under the correct, precise room at write time (LOCATION_MARKING).
 
-    Seeds a ravenwood-manor hierarchy plus a couple of sub-room events, then
+    Seeds a manor hierarchy plus a couple of sub-room events, then
     exercises the early location re-mark (both the step-1 CURRENT ROOM path and
     the gated lexical led-move fallback) and the down-walk event recall. world_doc
     is stubbed so no live LLM is needed.
     """
 
-    ROOT = "ravenwood-manor"
-    FOYER = "ravenwood-manor/foyer"
+    ROOT = "manor"
+    FOYER = "manor/foyer"
 
     def setUp(self):
         Note.NOTEFILE = TMP_CATNOTE
@@ -6553,29 +6952,29 @@ class TestLocationPrecision(unittest.TestCase):
             )
 
         for room in (
-            "ravenwood-manor",
-            "ravenwood-manor/foyer",
-            "ravenwood-manor/cottage",
-            "ravenwood-manor/garage",
-            "ravenwood-manor/secret-garden",
-            "ravenwood-manor/garden",
-            "ravenwood-manor/garden-east",
+            "manor",
+            "manor/foyer",
+            "manor/cottage",
+            "manor/garage",
+            "manor/secret-garden",
+            "manor/garden",
+            "manor/garden-east",
         ):
             seed(f"/story/location/{room}", "", room.split("/")[-1])
 
         # Events for the down-walk / TREE-boundary tests.
         seed(
-            "/story/events/ravenwood-manor/garden",
+            "/story/events/manor/garden",
             "exp:evie",
             "Gardeners prune the roses.",
         )
         seed(
-            "/story/events/ravenwood-manor/garden/shed",
+            "/story/events/manor/garden/shed",
             "exp:evie",
             "A rake leans in the garden shed.",
         )
         seed(
-            "/story/events/ravenwood-manor/garden-east",
+            "/story/events/manor/garden-east",
             "exp:evie",
             "The east beds are freshly turned.",
         )
@@ -6603,13 +7002,13 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._engine(self.FOYER)
         wd = eng._remark_location(
             "[MC action]: Evie leads me into the cottage",
-            "CURRENT ROOM: ravenwood-manor/cottage\nWORLD STATE: ...",
+            "CURRENT ROOM: manor/cottage\nWORLD STATE: ...",
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
         self.assertNotIn("CURRENT ROOM:", wd)  # stripped before step 2/3
         # a subsequent record_event with no location stamps the precise room
         eng._tool_record_event("They sit by the fire.", "exp:evie")
-        self.assertEqual(len(self._events_at("ravenwood-manor/cottage")), 1)
+        self.assertEqual(len(self._events_at("manor/cottage")), 1)
 
     # --- KEY acceptance: self-move defers to navigate_to (no double move) ---
 
@@ -6620,7 +7019,7 @@ class TestLocationPrecision(unittest.TestCase):
         )
         self.assertEqual(eng.session.location, self.FOYER)  # deferred to navigate_to
         eng._tool_navigate_to("cottage")
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
 
     # --- fail-safe: nothing confident → location untouched ---
 
@@ -6650,7 +7049,7 @@ class TestLocationPrecision(unittest.TestCase):
         eng._remark_location(
             "[MC action]: the car pulls into the garage", "CURRENT ROOM: UNCHANGED"
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     def test_lexical_fallback_ignores_unknown_room(self):
         eng = self._engine(self.ROOT)
@@ -6663,13 +7062,13 @@ class TestLocationPrecision(unittest.TestCase):
         self.assertEqual(eng.session.location, self.ROOT)
 
     def test_lexical_led_fallback_sibling_room(self):
-        # garage is a SIBLING of foyer (both children of ravenwood-manor) —
+        # garage is a SIBLING of foyer (both children of manor) —
         # the quarters→gallery class the child/root candidate set missed.
         eng = self._engine(self.FOYER)
         eng._remark_location(
             "[MC action]: she pulls me into the garage", "CURRENT ROOM: UNCHANGED"
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     # --- record_event explicit-location handling (LM §3.7 two-gate rule) ---
 
@@ -6684,9 +7083,38 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._mc_engine(self.FOYER)
         eng._tool_record_event(
             "Dust motes swirl.", "exp:evie",
-            location="ravenwood-manor/secret_garden",
+            location="manor/secret_garden",
         )
-        self.assertEqual(len(self._events_at("ravenwood-manor/secret-garden")), 1)
+        self.assertEqual(len(self._events_at("manor/secret-garden")), 1)
+
+    def test_navigate_to_canonicalizes_underscore(self):
+        # navigate_to must slug-normalize its raw destination before it becomes
+        # session.location — otherwise an underscore spelling seeds a non-canonical
+        # room key that later trips [LOCDRIFT] against hyphenated record_event.
+        eng = self._engine(self.FOYER)
+        eng._tool_navigate_to("manor/upper_hallways")
+        self.assertEqual(eng.session.location, "manor/upper-hallways")
+
+    def test_save_location_canonicalizes_underscore(self):
+        # A saved node must key identically to a navigated/record_event one.
+        eng = self._engine(self.FOYER)
+        eng._tool_save_location("manor/drawing_room", "A quiet drawing room.")
+        self.assertTrue(eng._location_node_exists("manor/drawing-room"))
+        self.assertFalse(eng._location_node_exists("manor/drawing_room"))
+
+    def test_navigate_underscore_then_record_event_no_locdrift(self):
+        # Regression for the reported bug: navigate to an underscore-spelled room,
+        # then file an MC-tagged event there — session and filed location now agree,
+        # so no "filed at ... but session is ..." drift warning is emitted.
+        eng = self._mc_engine(self.FOYER)
+        eng._tool_navigate_to("manor/upper_hallways")
+        eng._tool_record_event(
+            "Bartholomew pauses on the landing.",
+            "exp:bartholomew",
+            location="manor/upper-hallways",
+        )
+        drift = [w for w in eng._loc_warnings if "but session is" in w]
+        self.assertEqual(drift, [])
 
     def test_record_event_mc_stationary_auto_moves(self):
         eng = self._mc_engine(self.FOYER)
@@ -6699,15 +7127,15 @@ class TestLocationPrecision(unittest.TestCase):
         # stationary verdict) and committed by reconcile when navigate_to did
         # not fire — never immediately, so it can't collide with a real
         # navigate_to traversal on any turn.
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        self.assertEqual(eng._pending_loc_hint, "manor/garage")
         eng._reconcile_loc_hint([])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
         # NPC last-seen follows the committed move.
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
-        self.assertEqual(rec.location_last_seen, "ravenwood-manor/garage")
+        self.assertEqual(rec.location_last_seen, "manor/garage")
         # subsequent bare record_event files in the new room
         eng._tool_record_event("He leans on the workbench.", "exp:bartholomew")
-        self.assertEqual(len(self._events_at("ravenwood-manor/garage")), 2)
+        self.assertEqual(len(self._events_at("manor/garage")), 2)
 
     def test_record_event_compound_exp_tag_detects_mc(self):
         eng = self._mc_engine(self.FOYER)
@@ -6717,9 +7145,9 @@ class TestLocationPrecision(unittest.TestCase):
             location="cottage",
         )
         # Compound exp tag detects MC → move deferred, committed at reconcile.
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/cottage")
+        self.assertEqual(eng._pending_loc_hint, "manor/cottage")
         eng._reconcile_loc_hint([])
-        self.assertEqual(eng.session.location, "ravenwood-manor/cottage")
+        self.assertEqual(eng.session.location, "manor/cottage")
 
     def test_record_event_non_mc_divergent_warns_only(self):
         eng = self._mc_engine(self.FOYER)
@@ -6729,7 +7157,7 @@ class TestLocationPrecision(unittest.TestCase):
         self.assertEqual(eng.session.location, self.FOYER)  # session unmoved
         self.assertTrue(eng._loc_warnings)
         # the note itself still files at the (canonicalized) explicit room
-        self.assertEqual(len(self._events_at("ravenwood-manor/garden")), 2)
+        self.assertEqual(len(self._events_at("manor/garden")), 2)
 
     def test_record_event_mobile_defers_then_reconciles(self):
         eng = self._mc_engine(self.FOYER)
@@ -6740,10 +7168,10 @@ class TestLocationPrecision(unittest.TestCase):
             location="garage",
         )
         self.assertEqual(eng.session.location, self.FOYER)  # not during step 2
-        self.assertEqual(eng._pending_loc_hint, "ravenwood-manor/garage")
+        self.assertEqual(eng._pending_loc_hint, "manor/garage")
         # step 2 ends without navigate_to → the hint commits
         eng._reconcile_loc_hint([("record_event", "ok")])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
         self.assertIsNone(eng._pending_loc_hint)
 
     def test_record_event_hint_dropped_when_navigate_fired(self):
@@ -6756,7 +7184,7 @@ class TestLocationPrecision(unittest.TestCase):
         )
         eng._tool_navigate_to("garage")  # the real traversal wins
         eng._reconcile_loc_hint([("record_event", "ok"), ("navigate_to", "ok")])
-        self.assertEqual(eng.session.location, "ravenwood-manor/garage")
+        self.assertEqual(eng.session.location, "manor/garage")
 
     def test_record_event_same_room_no_gate(self):
         eng = self._mc_engine(self.FOYER)
@@ -6771,10 +7199,10 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._engine(self.FOYER)
         eng._remark_location(
             "[MC action]: Evie leads me into the cottage",
-            "CURRENT ROOM: ravenwood-manor/cottage",
+            "CURRENT ROOM: manor/cottage",
         )
         rec = next(r for r in eng.npc_tracker.all() if r.slug == "evie")
-        self.assertEqual(rec.location_last_seen, "ravenwood-manor/cottage")
+        self.assertEqual(rec.location_last_seen, "manor/cottage")
 
     # --- scene hint on location change (minimal rotation pressure) ---
 
@@ -6782,7 +7210,7 @@ class TestLocationPrecision(unittest.TestCase):
         eng = self._mc_engine(self.FOYER)
         eng.init_pipeline()
         eng.session.current_scene = "arrival"
-        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        eng._commit_location("manor/garage", source="record_event")
         self.assertTrue(eng._scene_hint_pending)
         step = eng._compliance_step
         first = step._compose_step2_user_content("[MC action]: I wait", "WS: x")
@@ -6793,7 +7221,7 @@ class TestLocationPrecision(unittest.TestCase):
 
     def test_scene_hint_not_set_without_active_scene(self):
         eng = self._mc_engine(self.FOYER)
-        eng._commit_location("ravenwood-manor/garage", source="remark")
+        eng._commit_location("manor/garage", source="remark")
         self.assertFalse(eng._scene_hint_pending)
 
     def test_scene_hint_set_by_navigate_to(self):
@@ -6805,7 +7233,7 @@ class TestLocationPrecision(unittest.TestCase):
     def test_begin_scene_clears_pending_hint(self):
         eng = self._mc_engine(self.FOYER)
         eng.session.current_scene = "arrival"
-        eng._commit_location("ravenwood-manor/garage", source="record_event")
+        eng._commit_location("manor/garage", source="record_event")
         eng._tool_begin_scene("garage-tinkering", "A new beat in the garage.")
         self.assertFalse(eng._scene_hint_pending)
 
@@ -6832,26 +7260,26 @@ class TestLocationPrecision(unittest.TestCase):
         # turn 2: step-1 now sees the move and names the room → re-mark lands
         eng._remark_location(
             "[MC action]: I look around the new place",
-            "CURRENT ROOM: ravenwood-manor/secret-garden",
+            "CURRENT ROOM: manor/secret-garden",
         )
-        self.assertEqual(eng.session.location, "ravenwood-manor/secret-garden")
+        self.assertEqual(eng.session.location, "manor/secret-garden")
 
     # --- gather_location_events: down-walk + TREE boundary (§3.6) ---
 
     def test_location_events_includes_subrooms(self):
         eng = self._engine(self.ROOT)
-        events = eng.gather_location_events("ravenwood-manor/garden")
+        events = eng.gather_location_events("manor/garden")
         self.assertIn("prune the roses", events)  # this room
         self.assertIn("rake leans", events)  # sub-room garden/shed
 
     def test_location_events_tree_boundary_excludes_prefix_sibling(self):
         eng = self._engine(self.ROOT)
-        events = eng.gather_location_events("ravenwood-manor/garden")
+        events = eng.gather_location_events("manor/garden")
         self.assertNotIn("east beds", events)  # garden-east must not leak in
 
     def test_location_events_empty_room_is_blank(self):
         eng = self._engine(self.ROOT)
-        self.assertEqual(eng.gather_location_events("ravenwood-manor/cottage"), "")
+        self.assertEqual(eng.gather_location_events("manor/cottage"), "")
 
 
 # ---------------------------------------------------------------------------
@@ -6862,7 +7290,7 @@ class TestLocationPrecision(unittest.TestCase):
 class TestObjectPermanence(unittest.TestCase):
     """Deterministic recall of whatever was written; stale-never-wrong-place.
 
-    A tarnished locket travels ravenwood-manor: it is introduced in the foyer,
+    A tarnished locket travels manor: it is introduced in the foyer,
     restated in place, moved to the secret garden, pocketed by Evie, cracks in
     her keeping, has its canonical description re-saved, and is finally merely
     *talked about* back in the foyer. Each phase is seeded with an exact Note.now
@@ -6872,8 +7300,8 @@ class TestObjectPermanence(unittest.TestCase):
     """
 
     SLUG = "tarnished-locket"
-    ROOM_A = "ravenwood-manor/foyer"
-    ROOM_B = "ravenwood-manor/secret-garden"
+    ROOM_A = "manor/foyer"
+    ROOM_B = "manor/secret-garden"
     HOLDER = "evie"
     T = 1_750_000_000  # base epoch; phases step by 100
 
@@ -6892,8 +7320,8 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 0,
                 message="A tarnished silver locket, clasp worn, holding a faded portrait.",
                 tag="obj:tarnished-locket",
-                context="object sighting: tarnished-locket at ravenwood-manor/foyer",
-                pwd="/story/location/ravenwood-manor/foyer",
+                context="object sighting: tarnished-locket at manor/foyer",
+                pwd="/story/location/manor/foyer",
             ),
         ],
         # P1 — restate in place (place_object, no destination)
@@ -6902,7 +7330,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 100,
                 message="tarnished-locket is here.",
                 tag="obj:tarnished-locket",
-                pwd="/story/location/ravenwood-manor/foyer",
+                pwd="/story/location/manor/foyer",
             )
         ],
         # P2 — moved to room B
@@ -6911,7 +7339,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 200,
                 message="The locket lies on the garden bench.",
                 tag="obj:tarnished-locket",
-                pwd="/story/location/ravenwood-manor/secret-garden",
+                pwd="/story/location/manor/secret-garden",
             )
         ],
         # P3 — picked up by NPC (possession is a residence)
@@ -6948,7 +7376,7 @@ class TestObjectPermanence(unittest.TestCase):
                 now=T + 600,
                 message="Evie talks about the locket she lost years ago.",
                 tag="exp:evie obj:tarnished-locket",
-                pwd="/story/events/ravenwood-manor/foyer",
+                pwd="/story/events/manor/foyer",
             )
         ],
     ]
@@ -7101,13 +7529,13 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 50,
             message="iron key on the sill.",
             tag="obj:iron-key",
-            pwd="/story/location/ravenwood-manor/foyer",
+            pwd="/story/location/manor/foyer",
         )
         self._seed(
             now=self.T + 50,
             message="iron key on the bench.",
             tag="obj:iron-key",
-            pwd="/story/location/ravenwood-manor/secret-garden",
+            pwd="/story/location/manor/secret-garden",
         )
         eng = self._engine()
         self.assertEqual(self._residence(eng, "iron-key"), {"room": self.ROOM_B})
@@ -7118,7 +7546,7 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 10,
             message="A wax-sealed letter changes hands by the hearth.",
             tag="exp:evie obj:sealed-letter",
-            pwd="/story/events/ravenwood-manor/foyer",
+            pwd="/story/events/manor/foyer",
         )
         eng = self._engine()
         self.assertEqual(self._residence(eng, "sealed-letter"), {"room": self.ROOM_A})
@@ -7130,8 +7558,8 @@ class TestObjectPermanence(unittest.TestCase):
             now=self.T + 20,
             message="A tall silver mirror in a tarnished frame.",
             tag="obj:silver-mirror",
-            context="object: silver-mirror at ravenwood-manor/foyer",
-            pwd="/story/location/ravenwood-manor/foyer",
+            context="object: silver-mirror at manor/foyer",
+            pwd="/story/location/manor/foyer",
         )
         eng = self._engine()
         data = self._get_object(eng, "silver-mirror")
@@ -7319,7 +7747,7 @@ class TestObjectActivationLive(unittest.TestCase):
 
     def setUp(self):
         self.engine = _make_engine(
-            location="ravenwood-manor", people={"player", "evie"}
+            location="manor", people={"player", "evie"}
         )
 
     def _step2_calls_for(self, phrase, world_doc=None):

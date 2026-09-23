@@ -407,6 +407,7 @@ TAG_SCENE = "scene:"  # scene:escort-to-bedroom
 TAG_CONS = "cons:"  # cons:aversion-to-water
 TAG_OBJ = "obj:"  # obj:iron-key    (object identity; OBJECT_TOOLING §2)
 TAG_ADJ = "adj:"  # adj:manor.foyer.drawing-room  (MOVEMENT_TREE §3.0: room edge)
+TAG_ALIAS = "alias:"  # alias:bartholomew — a name the player uses for a cast slug
 
 PWD_RULES = "/system/rules"
 PWD_WORLD = "/story/location"
@@ -439,6 +440,18 @@ _REF_DEREF_CAP = 12
 
 # MOVEMENT_TREE §3.0 — locale-graph edge encoding. An edge endpoint is a full
 # canonical room path; the tag value is that path with "/"→"." so it is a single
+def _slug_path(s: str) -> str:
+    """Canonicalize a location path to kebab-case per segment.
+
+    Lowercases and maps spaces/underscores/punctuation to '-', leaving '/'
+    separators intact (so `manor/upper_hallways` → `manor/upper-hallways`). This
+    is the ONE source of truth for the slug regex that _canonicalize_room and the
+    resume recovery both rely on; every seam that stores a location must funnel
+    through it so two spellings of one room can never split into two keys.
+    """
+    return re.sub(r"[^a-z0-9/-]+", "-", (s or "").strip().lower()).strip("-/")
+
+
 # whitespace-safe, "/"-free tag word (catjot tags split on whitespace).
 def _edge_tag(path: str) -> str:
     """Encode a canonical room path as an adj: tag word (manor/foyer → adj:manor.foyer)."""
@@ -683,18 +696,25 @@ SYSTEM_REFRESH_INTERVAL = 8
 # scene (no movement, no new beat) and the near-duplicate event guard.
 SCENE_STALE_TURNS = 6  # elapsed turns in one scene → inject an advance suggestion
 SCENE_HARD_ADVANCE_STREAK = 3  # consecutive SHOWN-and-ignored suggestions → engine forces begin_scene
+MC_REL_MIN_TURNS = 3  # turns an NPC must have been in play before the MC-relationship nudge fires
 RECORD_EVENT_DEDUP_RATIO = 0.90  # skip a record_event ≥ this similar to a recent same-scene/loc event
 RECORD_EVENT_DEDUP_WINDOW = 8  # compare against at most this many recent same-loc notes
 _DEDUP_SKIP_PREFIX = "[dedup-skip] "  # marks a near-duplicate record_event that was NOT written
 
-# System prompt for Step 1: World State Resolution
-_STEP1_SYSTEM = (
+# System prompt for Step 1: World State Resolution. The capability list in the
+# first sentence is assembled per-turn by _build_step1_system() from the ENABLED
+# families, so a disabled family (RPJOT_DISABLE) never advertises a lookup the
+# schema doesn't carry — the same family_enabled() gate ProseStep uses for the
+# yomi injection. Order below = reading order in the sentence; family None is the
+# always-on core.
+_STEP1_SYSTEM_PREFIX = (
     "You are a scene intelligence system for a text-based RPG. "
     "Your only job is to retrieve facts — not to narrate or decide what happens. "
     "Read the player's input (note the [MC ...] directive prefix and who is "
-    "acting) and call lookup tools to gather everything relevant: character "
-    "profiles, relationships, location details, story context, yomi, and "
-    "conscience constraints. Then output a structured WORLD STATE document "
+    "acting) and call lookup tools to gather everything relevant: "
+)
+_STEP1_SYSTEM_SUFFIX = (
+    ". Then output a structured WORLD STATE document "
     "summarizing what you found. Be comprehensive — it feeds both the "
     "compliance and prose steps.\n"
     "The VERY FIRST line of your output must be `CURRENT ROOM: <path>` naming "
@@ -703,6 +723,43 @@ _STEP1_SYSTEM = (
     "the room has not changed since the current location, write "
     "`CURRENT ROOM: UNCHANGED`. Base this on scene understanding (who moved whom, "
     "where), not on places merely mentioned, offered, or thought about."
+)
+_STEP1_CAPABILITIES = [
+    ("character profiles", None),
+    ("relationships", "relationships"),
+    ("location details", None),
+    ("story context", None),
+    ("yomi", "yomi"),
+    ("conscience constraints", "conscience"),
+]
+
+
+def _join_oxford(phrases: list) -> str:
+    """Join with commas and a final 'and' (Oxford comma for 3+)."""
+    if len(phrases) <= 1:
+        return phrases[0] if phrases else ""
+    if len(phrases) == 2:
+        return f"{phrases[0]} and {phrases[1]}"
+    return ", ".join(phrases[:-1]) + ", and " + phrases[-1]
+
+
+def _build_step1_system(engine) -> str:
+    """Step 1 system prompt with the capability list filtered to enabled families."""
+    phrases = [
+        phrase
+        for phrase, family in _STEP1_CAPABILITIES
+        if family is None or engine.family_enabled(family)
+    ]
+    return _STEP1_SYSTEM_PREFIX + _join_oxford(phrases) + _STEP1_SYSTEM_SUFFIX
+
+
+# Canonical all-families-enabled form. Production goes through
+# _build_step1_system(engine); this constant is the static baseline the LLM-gated
+# step-1 selection test imports.
+_STEP1_SYSTEM = (
+    _STEP1_SYSTEM_PREFIX
+    + _join_oxford([phrase for phrase, _ in _STEP1_CAPABILITIES])
+    + _STEP1_SYSTEM_SUFFIX
 )
 
 # Placeholder input for the idle-window speculative step-1 run. Explicit
@@ -741,14 +798,40 @@ _STEP3_SYSTEM = (
     "Use the World State for atmospheric detail, sensory imagery, and character voice. "
     "Use the Narrative Facts as the factual skeleton: these things happened this turn and "
     "must appear in your prose. Do not call tools. Do not plan. Only narrate. "
-    "Write prose that is immersive, sensory, and character-voiced. "
     "Vary sentence structure and rhythm. Show, do not tell."
 )
 
 MAX_TOKENS_STEP1 = 4_096  # encyclopedic lookup — needs room to gather
 MAX_ITER_STEP1_DELTA = 3  # seeded delta run — most lookups already in the seed
 MAX_TOKENS_STEP3 = 3_072  # prose — invest output budget here
+# Reply-length ladder (++ / +++ sigils → [REPLY LENGTH …] marker in the classified
+# input). ProseStep raises its output cap so a longer-reply request has room.
+MAX_TOKENS_STEP3_LONG = 4_608  # `++`  — ~1.5x base
+MAX_TOKENS_STEP3_XLONG = 6_144  # `+++` — ~2x base
+# Marker substring (emitted by play.classify_input) → prose token budget.
+_REPLY_LENGTH_BUDGETS = (
+    ("[REPLY LENGTH — much longer]", MAX_TOKENS_STEP3_XLONG),
+    ("[REPLY LENGTH — longer]", MAX_TOKENS_STEP3_LONG),
+)
+
+
+def _prose_max_tokens(classified_input: str) -> int:
+    """Step-3 output cap for this turn, raised by a [REPLY LENGTH …] marker."""
+    text = classified_input or ""
+    for marker, budget in _REPLY_LENGTH_BUDGETS:
+        if marker in text:
+            return budget
+    return MAX_TOKENS_STEP3
 STEP3_TEMPERATURE = 1.2  # higher than legacy NARRATIVE_TEMPERATURE for richer variance
+# Prose is the one step whose LLM failure is fatal, not degradable: steps 1-2
+# fall back (deterministic world doc / partial canon) and still yield a turn,
+# but a blip here raises LLMError and discards a fully-computed turn's narrative.
+# So step 3 alone opts into call_llm's transient retry (connection reset / timeout
+# / 429 / 5xx). Steps 1-2 stay at the retries=0 default — they degrade gracefully
+# and must not pay a retry wait on the common failure path. call_llm never retries
+# the streaming path, so this is a no-op while streaming and only rescues the
+# non-streaming prose call (RPJOT_STREAM off, non-interactive, tests).
+PROSE_RETRY_ATTEMPTS = 1
 
 # ---------------------------------------------------------------------------
 # Tool decorator
@@ -1217,7 +1300,7 @@ class WorldStateStep:
 
         if seed_doc is not None:
             messages = [
-                {"role": "system", "content": _STEP1_SYSTEM},
+                {"role": "system", "content": _build_step1_system(self.engine)},
                 {
                     "role": "user",
                     "content": self._build_seeded_message(classified_input, seed_doc),
@@ -1260,7 +1343,7 @@ class WorldStateStep:
     def _run_full(self, classified_input: str) -> str:
         """The full (unseeded) Step 1 path — behavior identical to legacy run()."""
         messages = [
-            {"role": "system", "content": _STEP1_SYSTEM},
+            {"role": "system", "content": _build_step1_system(self.engine)},
             {"role": "user", "content": self._build_initial_message(classified_input)},
         ]
         tool_results_collected: list[str] = []
@@ -1483,39 +1566,57 @@ class ComplianceStep:
         # [TIMING] line. Set on every exit path.
         self.last_rounds = 0
 
+    # Directive-block prefixes classify_input can emit. A classified string may
+    # now carry SEVERAL blocks (one per thought segment); a line starting with one
+    # of these opens a block, other lines are continuations (§SIGILS multi-segment).
+    _DIRECTIVE_BLOCK_PREFIXES = (
+        "[MC action]",
+        "[MC speaks aloud]",
+        "[MC — likely spoken aloud",
+        "[MC inner monologue",
+        "[MC attention",
+        "[MC intent",
+        "[NARRATIVE INJECTION",
+        "[REPLY LENGTH",
+    )
+
+    @classmethod
+    def _directive_blocks(cls, classified_input: str) -> list:
+        """Split a classified string into directive blocks (one per thought).
+
+        A line beginning with a known directive prefix opens a block; any other
+        line is a continuation of the current block. Single-segment input yields a
+        single block, so every downstream check reduces to its legacy form.
+        """
+        blocks: list = []
+        for line in (classified_input or "").split("\n"):
+            if line.lstrip().startswith(cls._DIRECTIVE_BLOCK_PREFIXES) or not blocks:
+                blocks.append(line)
+            else:
+                blocks[-1] += "\n" + line
+        return blocks
+
     @classmethod
     def _should_nudge_zero_canonical(cls, classified_input: str) -> bool:
-        """True when an empty-canonical turn should get one corrective round."""
-        s = (classified_input or "").lstrip()
-        return s.startswith(cls._NUDGE_PREFIXES)
+        """True when an empty-canonical turn should get one corrective round.
+
+        Fires if ANY thought block is nudge-worthy, not just the leading one.
+        """
+        return any(
+            b.lstrip().startswith(cls._NUDGE_PREFIXES)
+            for b in cls._directive_blocks(classified_input)
+        )
 
     @classmethod
-    def _is_stationary_turn(
-        cls, classified_input: str, mc_aliases: frozenset = frozenset()
-    ) -> bool:
-        """True when the MC did not physically move this turn (→ inject the nudge).
+    def _action_body_is_move(cls, action_block: str, mc_aliases: frozenset) -> bool:
+        """True when an [MC action] block's body is a physical MC move (§3.5).
 
-        Implements the sigil→mobility table (§3.5). Speech, likely-speech, inner
-        monologue and attention prefixes are stationary unconditionally. Only
-        [MC action] is ambiguous: it is *mobile* iff its content is a first-person
-        movement — an unquoted line beginning "I ..." carrying a _MOVE_VERBS verb
-        — mirroring classify_heuristic exactly, including the "I follow her down
-        the corridor" collision and the quoted-dialogue guard. Any UNRECOGNIZED
-        prefix fails OPEN to not-stationary (no injection = baseline behavior),
-        so a future sigil can never silently suppress navigate_to.
-
-        mc_aliases (lowercase) adds a third-person branch for players who write
-        "Bartholomew enters the gallery": mobile iff the first body token is an
-        MC alias AND a movement verb (either conjugation set) is present AND the
-        body is unquoted. Empty alias set = legacy behavior exactly; the same
-        "wants to go" collision class as first person is accepted (§3.5 note).
+        Mobile iff the unquoted body is a first-person movement ("I ..." + a
+        _MOVE_VERBS verb) OR a third-person MC-alias movement — mirroring
+        classify_heuristic exactly, including the "I follow her" collision and the
+        quoted-dialogue guard.
         """
-        s = (classified_input or "").lstrip()
-        if s.startswith(cls._STATIONARY_PREFIXES):
-            return True
-        if not s.startswith("[MC action]"):
-            return False  # unrecognized prefix → fail open (treat as mobile)
-        body = s.split("]", 1)[-1].lstrip(": ").strip()
+        body = action_block.split("]", 1)[-1].lstrip(": ").strip()
         low = body.lower()
         quoted = body[:1] in {'"', "'"}
         words = low.split()
@@ -1527,7 +1628,34 @@ class ComplianceStep:
             w.strip('.,;:"') in cls._MOVE_VERBS or w.strip('.,;:"') in cls._MOVE_VERBS_3P
             for w in words
         )
-        return not ((first_person_move or third_person_move) and not quoted)
+        return (first_person_move or third_person_move) and not quoted
+
+    @classmethod
+    def _is_stationary_turn(
+        cls, classified_input: str, mc_aliases: frozenset = frozenset()
+    ) -> bool:
+        """True when the MC did not physically move this turn (→ inject the nudge).
+
+        Implements the sigil→mobility table (§3.5) across ALL thought blocks: the
+        turn is *mobile* iff any [MC action] block is a physical move (see
+        _action_body_is_move). Speech, likely-speech, inner monologue and attention
+        blocks are stationary. Neutral blocks ([REPLY LENGTH], [MC intent], bare
+        text) are ignored. If NO block is recognized (stationary or action), the
+        turn fails OPEN to not-stationary so a stray prefix never suppresses
+        navigate_to. Single-segment input reduces exactly to the legacy behavior.
+        """
+        saw_recognized = False
+        for block in cls._directive_blocks(classified_input):
+            s = block.lstrip()
+            if s.startswith(cls._STATIONARY_PREFIXES):
+                saw_recognized = True
+            elif s.startswith("[MC action]"):
+                saw_recognized = True
+                if cls._action_body_is_move(s, mc_aliases):
+                    return False  # any real move → mobile
+        if not saw_recognized:
+            return False  # unrecognized-only → fail open (treat as mobile)
+        return True
 
     def _compose_step2_user_content(
         self, classified_input: str, world_doc: str
@@ -1557,6 +1685,21 @@ class ComplianceStep:
         # player input it qualifies; scene hints keep the last-block slot.
         if self._should_nudge_zero_canonical(classified_input):
             parts.append(self._CANON_FIRST_DIRECTIVE)
+        # MC-relationship nudge (MC_REL): ask the model to record the MC's own
+        # evolving relationships, which it otherwise only ever writes for NPC↔NPC
+        # pairs. One pair per turn; guarded to once per pair per scene.
+        mc_rel_npc = engine._pending_mc_rel_nudge()
+        if mc_rel_npc:
+            engine._mc_rel_nudge_shown.add(
+                engine._rel_key(engine.main_character, mc_rel_npc)
+            )
+            parts.append(
+                f"[DIRECTIVE] The main character and {mc_rel_npc} have shared this "
+                "scene, but their relationship is unrecorded. If a bond, impression, "
+                "or dynamic has formed or shifted, call record_relationship("
+                f"char_a='{engine.main_character}', char_b='{mc_rel_npc}', kind=…) "
+                "now to capture it. If nothing durable has developed yet, ignore this."
+            )
         if engine._scene_hint_pending:
             # One-shot scene-rotation pressure: consumed here so the hint
             # appears exactly once after a location move (begin_scene also
@@ -1826,9 +1969,11 @@ class ProseStep:
             else ""
         )
 
+        # tool_choice="none" (below) hard-blocks tools and _STEP3_SYSTEM already
+        # says "Do not call tools. Do not plan." — so this per-turn header only
+        # needs the phase cue, not a third restatement of the no-tools rule.
         injection_parts = [
-            "PROSE PHASE — write the narrative response now. "
-            "Do not plan or invoke any tools; this is the final prose generation step."
+            "PROSE PHASE — write the narrative response now."
         ]
         if world_doc.strip():
             injection_parts.append(
@@ -1857,7 +2002,9 @@ class ProseStep:
         # still the strip_think_tags result of the FULL accumulated text —
         # streaming shapes only what is shown live. On a mid-stream
         # RequestException, partial prose may already be on screen; the
-        # LLMError surfaces after it, same contract as today.
+        # LLMError surfaces after it, same contract as today. call_llm never
+        # retries the streaming branch (a partial stream can't be replayed), so
+        # PROSE_RETRY_ATTEMPTS only takes effect on the non-streaming path below.
         engine._prose_streamed = False
         on_token = None
         if engine.prose_stream_cb is not None:
@@ -1883,8 +2030,9 @@ class ProseStep:
                 tools=engine._bare_tool_schemas,
                 tool_choice="none",
                 temperature=STEP3_TEMPERATURE,
-                max_tokens=MAX_TOKENS_STEP3,
+                max_tokens=_prose_max_tokens(classified_input),
                 on_token=on_token,
+                retries=PROSE_RETRY_ATTEMPTS,
             )
         except requests.exceptions.RequestException as exc:
             raise LLMError(str(exc)) from None
@@ -1909,7 +2057,7 @@ class RPJotEngine:
     and JSON parsing. Does not contain any gameplay logic.
 
     Usage:
-        engine = RPJotEngine(location="ravenwood-manor", people={"mc"})
+        engine = RPJotEngine(location="manor", people={"mc"})
         engine.register_all_tools()
         narrative = engine.run_turn(classified_input, step2_messages, step3_messages)
     """
@@ -2001,6 +2149,15 @@ class RPJotEngine:
         self._scene_stale_streak: int = 0
         self._scene_advance_shown: bool = False
         self.scene_mover_enabled: bool = True
+        # MC-relationship nudge (MC_REL): the model records NPC↔NPC relationships
+        # but never the MC's own, so get_relationship_arc('mc', X) stays empty. A
+        # turn-scoped DIRECTOR NOTE asks it to record an mc↔present-NPC bond once
+        # they have shared the scene a few turns and no note exists yet.
+        # _mc_rel_nudge_shown guards to one nudge per pair per scene (re-armed at
+        # begin_scene). mc_rel_nudge_enabled mirrors RPJOT_MC_REL_NUDGE (default
+        # on), set by the play loop.
+        self._mc_rel_nudge_shown: set = set()
+        self.mc_rel_nudge_enabled: bool = True
         # Idle-window precompute (background seed). seed_enabled is set by the
         # play loop from RPJOT_BG_SEED; the engine never reads env. _seed holds
         # the speculative step-1 result {doc, refs, state, turn, rounds,
@@ -2029,11 +2186,15 @@ class RPJotEngine:
         self._prose_streamed: bool = False
         self.main_character = main_character
         # MC alias set (lowercase) for third-person self-movement detection
-        # and the record_event MC-present gate. The play loop extends it from
-        # RPJOT_MC_ALIASES; it always contains the mc slug itself. Empty env =
-        # legacy behavior (first-person only, exp:mc only) — safe but
+        # and the record_event MC-present gate. Loaded from the alias jot at
+        # PWD_CHARS/{mc} (see _load_aliases_from_notes) so the set travels with
+        # the save instead of the shell; it always contains the mc slug itself.
+        # No jot = legacy behavior (first-person only, exp:mc only) — safe but
         # under-fires on third-person players.
-        self.mc_aliases: frozenset = frozenset({main_character.lower()})
+        self.mc_aliases: frozenset = frozenset(
+            {main_character.lower()}
+        ) | self._load_aliases_from_notes(main_character)
+        logger.info("[MC] alias set: %s", sorted(self.mc_aliases))
         self.session = SessionState(
             location=location,
             people_present=people_present or set(),
@@ -2053,6 +2214,68 @@ class RPJotEngine:
             self.main_character,
             len(self.npc_tracker.all()),
         )
+
+    @staticmethod
+    def _load_aliases_from_notes(slug: str) -> frozenset:
+        """Read a character's player-facing aliases from their alias jot.
+
+        The jot lives at PWD_CHARS/{slug} and carries the full alias set as
+        `alias:` tag words (`alias:bartholomew alias:bart`). Last write wins —
+        the newest alias-bearing note under that pwd is the whole set, so
+        rewriting it is also how an alias is removed (an append-only notefile
+        has no delete verb). Returns an empty set when no such jot exists,
+        which is the legacy mc-slug-only behavior.
+
+        Static and note-only: it runs from __init__ before session/npc_tracker
+        exist, so it must not touch engine state.
+        """
+        newest = None
+        with NoteContext(
+            Note.NOTEFILE, (SearchType.DIRECTORY, f"{PWD_CHARS}/{slug}")
+        ) as nc:
+            for note in nc:
+                if not any(w.startswith(TAG_ALIAS) for w in note.tag.split()):
+                    continue
+                if newest is None or note.now >= newest.now:
+                    newest = note
+        if newest is None:
+            return frozenset()
+        return frozenset(
+            body
+            for w in newest.tag.split()
+            if w.startswith(TAG_ALIAS) and (body := w[len(TAG_ALIAS):].lower())
+        )
+
+    def set_mc_aliases(self, aliases) -> frozenset:
+        """Persist the MC's alias set as a jot and apply it to this session.
+
+        Writes the complete set (mc slug included) so the note is self-contained
+        for _load_aliases_from_notes, then updates the live engine so the change
+        takes effect on the next turn without a restart. Returns the new set.
+        """
+        clean = frozenset(
+            s
+            for s in (
+                re.sub(r"[^a-z0-9-]+", "-", a.strip().lower()).strip("-")
+                for a in aliases
+            )
+            if s
+        ) | {self.main_character.lower()}
+        Note.append(
+            Note.NOTEFILE,
+            Note.jot(
+                message=(
+                    "Player-facing names for the main character: "
+                    + ", ".join(sorted(clean))
+                ),
+                tag=" ".join(f"{TAG_ALIAS}{a}" for a in sorted(clean)),
+                context="mc aliases",
+                pwd=f"{PWD_CHARS}/{self.main_character}",
+            ),
+        )
+        self.mc_aliases = clean
+        logger.info("[MC] alias set rewritten: %s", sorted(clean))
+        return clean
 
     def _preload_npc_tracker_from_notes(self, location: str) -> None:
         """Scan PWD_CHARS in the notes file and register every established character.
@@ -2886,6 +3109,9 @@ class RPJotEngine:
         plain re-mark used to strand) — but does NOT reset attention/mood:
         scene-move semantics stay owned by navigate_to.
         """
+        # Defense-in-depth: callers already canonicalize, but a raw path here
+        # would store a non-canonical session.location and split the room's data.
+        path = _slug_path(path)
         if self._ensure_location_node(path):
             # Stub minting is worth surfacing (LM §5 audit advisory) — and the
             # header line doubles as a save_location prompt for the model.
@@ -2929,6 +3155,32 @@ class RPJotEngine:
         if not self.scene_mover_enabled or not self.session.current_scene:
             return False
         return self._turn_count - self._scene_start_turn >= SCENE_STALE_TURNS
+
+    def _pending_mc_rel_nudge(self) -> str | None:
+        """The present NPC (if any) whose mc↔NPC relationship should be recorded.
+
+        Eligible (MC_REL): the NPC is co-present, has been in play at least
+        MC_REL_MIN_TURNS turns, has no mc↔NPC relationship note yet, and has not
+        already been nudged this scene. Returns the first such slug, or None.
+        Uses only live signals — NPCRecord.interacted is dead code. The dwell
+        gate also keeps this silent on turn 0 (production-shape selection tests).
+        """
+        if not self.mc_rel_nudge_enabled:
+            return None
+        mc = self.main_character
+        for slug in sorted(self.session.people_present):
+            if slug == mc:
+                continue
+            pair = self._rel_key(mc, slug)
+            if pair in self._mc_rel_nudge_shown:
+                continue
+            rec = self.npc_tracker.get(slug)
+            if rec is None or self._turn_count - rec.turn_introduced < MC_REL_MIN_TURNS:
+                continue
+            if len(ContextBundle(f"{PWD_REL}/{pair}")) > 0:
+                continue  # relationship already recorded
+            return slug
+        return None
 
     def _auto_scene_slug(self) -> tuple[str, str]:
         """Deterministic (no-LLM) slug + description for a forced scene advance.
@@ -3858,8 +4110,8 @@ class RPJotEngine:
         nothing and the output is byte-identical to the pre-graph tree walk (I8).
 
         Examples:
-            "manor/foyer/kitchen" → "manor/foyer/drawing_room"
-            ⟹ ["manor/foyer/kitchen", "manor/foyer", "manor/foyer/drawing_room"]
+            "manor/foyer/kitchen" → "manor/foyer/drawing-room"
+            ⟹ ["manor/foyer/kitchen", "manor/foyer", "manor/foyer/drawing-room"]
 
             "manor/foyer/staircase/elevator" → "manor/foyer"
             ⟹ ["manor/foyer/staircase/elevator", "manor/foyer/staircase", "manor/foyer"]
@@ -4034,8 +4286,7 @@ class RPJotEngine:
         """
         if not proposed:
             return None
-        slug = proposed.strip().lower()
-        slug = re.sub(r"[^a-z0-9/-]+", "-", slug).strip("-/")
+        slug = _slug_path(proposed)
         if not slug:
             return None
         leaf = slug.split("/")[-1]
@@ -4151,6 +4402,7 @@ class RPJotEngine:
         existing edges ∪ {the other endpoint}. Re-adding an existing edge writes
         nothing (union unchanged → skip). A self-edge is a no-op.
         """
+        a, b = _slug_path(a), _slug_path(b)
         if not a or not b or a == b:
             return
         self._ensure_location_node(a)
@@ -4888,17 +5140,13 @@ class RPJotEngine:
             _tok(ctx_rendered),
         )
         prompt = (
-            "You are analyzing scene context. Extract information and respond "
-            "ONLY with valid JSON, no other text.\n\n"
+            "Analyze the scene context and reply with ONLY the JSON object "
+            "below — no prose, no markdown.\n\n"
             "Context:\n%s\n\n"
             "Rules:\n"
             "- noteworthy_objects: physical objects explicitly mentioned or strongly implied\n"
             "- established_props: objects with confirmed narrative/story significance\n"
-            "- Use empty lists if nothing qualifies\n"
-            "- No explanation, no markdown, only the JSON object\n"
-            "- Each list must contain only plain strings, not objects\n"
-            "- Do not include any keys other than "
-            '"noteworthy_objects" and "established_props"\n\n'
+            "- Use empty lists if nothing qualifies\n\n"
             "Respond with this exact JSON structure:\n"
             "{\n"
             '  "noteworthy_objects": ["object name and brief detail"],\n'
@@ -4956,7 +5204,7 @@ class RPJotEngine:
                 },
                 "location": {
                     "type": "string",
-                    "description": "Where the event took place (e.g. 'ravenwood-manor/foyer'). Omit to use current session location.",
+                    "description": "Where the event took place (e.g. 'manor/foyer'). Omit to use current session location.",
                 },
             },
             "required": ["description", "tags"],
@@ -5185,7 +5433,11 @@ class RPJotEngine:
         """Compute traversal path and move to a new location."""
         logger.info("ENTER _tool_navigate_to: location_name=%r", location_name)
 
-        raw_dest = location_name
+        # Slug-normalize the LLM's raw destination BEFORE resolve_destination:
+        # resolve_destination does pure path logic and returns its input verbatim,
+        # so an underscore/space spelling here would seed session.location (and the
+        # adj: edges) with a non-canonical variant that later trips [LOCDRIFT].
+        raw_dest = _slug_path(location_name)
         from_loc = self.session.location
 
         resolved_dest, nav_type = self.resolve_destination(
@@ -5440,6 +5692,12 @@ class RPJotEngine:
     def _tool_save_location(self, name: str, description: str, tags: str = ""):
         """Persist a location's description to notes."""
         logger.info("ENTER _tool_save_location: name=%r", name)
+
+        # Canonicalize the name to kebab-case so a saved node keys identically to
+        # a navigated/record_event one (no underscore/hyphen split of one room).
+        name = _slug_path(name)
+        if not name:
+            return "Location not saved: empty or invalid name."
 
         tag_str = tags.strip() if tags else ""
 
@@ -6056,6 +6314,8 @@ class RPJotEngine:
         # bootstrap, or the hard auto-advance) rebaselines staleness here.
         self._scene_start_turn = self._turn_count
         self._scene_stale_streak = 0
+        # MC_REL: re-arm one MC-relationship nudge per pair for the new scene.
+        self._mc_rel_nudge_shown.clear()
 
         note = Note.jot(
             message=description,
@@ -7448,7 +7708,9 @@ class RPJotEngine:
             "debtor, liar, inflicter, or observer; char_b is the target or "
             "recipient. description carries the main content; label is a short "
             "kebab-case type tag (bond type / pattern / power basis); detail is "
-            "the second layer (significance, stakes, origin, the concealed truth)."
+            "the second layer (significance, stakes, origin, the concealed truth). "
+            "This applies to the main character's relationships too, not only "
+            "NPC↔NPC pairs — record how the MC and an NPC come to stand."
         ),
         parameters={
             "type": "object",

@@ -39,7 +39,7 @@ Note.NOTEFILE = OUTPUT
 _rpjot_module.NOTEFILE = OUTPUT
 
 # Engine whose location is used as the pwd root for record_knowledge notes.
-engine = RPJotEngine(location="ravenwood-manor", people_present=set())
+engine = RPJotEngine(location="manor", people_present=set())
 engine.register_all_tools()
 
 
@@ -174,9 +174,13 @@ watching every development carefully.""",
 # ════════════════════════════════════════════════════════════════
 print("Writing character profiles…")
 
-# Bartholomew / mc — the player character
+# The player character. Filed under the engine's own slug — every MC lookup
+# (POV context, exp:/know: tags, relationship pairs, people_present={"mc"})
+# keys on "mc", so a profile filed under the display name is a second identity
+# the engine cannot see. The names the player and the model actually use reach
+# it through the alias jot below.
 engine._tool_save_character(
-    name="bartholomew",
+    name="mc",
     description="""\
 Bartholomew Wentworth (Bart), 35, is the player character.  He arrived at
 Ravenswood Manor as the son of a servant in his early childhood and was
@@ -185,14 +189,11 @@ His memories of the manor and its people are warm but vague.""",
     tags="backstory mc player",
 )
 
-# Also index him under "mc" so session state (people_present={"mc"}) resolves.
-engine._tool_save_character(
-    name="mc",
-    description="""\
-"mc" is the engine identifier for the player character, Bartholomew Wentworth.
-See character profile for "bartholomew" for full details.""",
-    tags="backstory mc player bartholomew",
-)
+# Alias jot (rpjot.TAG_ALIAS): the whole set, newest such note wins. Read at
+# engine init into mc_aliases, which gates third-person self-movement, the
+# record_event MC location gate, and set_people_present normalization — so
+# "Bartholomew strides to the door" moves the session and exp:bart lands on mc.
+engine.set_mc_aliases(["bartholomew", "bart", "wentworth", "bartholomew-wentworth"])
 
 # Aurora
 engine._tool_save_character(
@@ -252,7 +253,7 @@ she wears cynicism as armour.""",
 engine._tool_save_character(
     name="cassidy",
     description="""\
-Cassidy Lemon — the Bellvues' personal assistant.
+Cassidy Thorne — the Bellvues' personal assistant.
 
 Personality: sharp-tongued, alluring, and perceptive.  She has been the
 family's right-hand woman for years and is fiercely protective of their
@@ -273,7 +274,7 @@ secret garden.""",
 engine._tool_save_character(
     name="winnie",
     description="""\
-Winifred "Winnie" Belmonte — the youngest Bellvue daughter, a grieving widow.
+Winifred "Winnie" Marsh — the youngest Bellvue daughter, a grieving widow.
 
 Personality: emotionally closed off, suspicious of strangers, fearful that
 anyone new will exploit her grief.  Her warmth has been buried under years of
@@ -290,7 +291,7 @@ and has not left since.""",
 engine._tool_save_character(
     name="sam",
     description="""\
-Samantha "Sam" — the Bellvue family's illegitimate daughter.
+Samantha "Sam" Croft — the Bellvue family's illegitimate daughter.
 
 Personality: outwardly humbled and overlooked; inwardly bitter, resentful, and
 dangerously ambitious.  She sees Bartholomew as yet another obstacle to the
@@ -368,7 +369,7 @@ remembers Evie as the most powerful person he had ever seen as a child.
 
 He does not remember any of the daughters as individuals.  His memories of
 other staff and of his own parents at the manor are warm but fragmentary.""",
-    witnesses=["bartholomew"],
+    witnesses=["mc"],  # the MC's own memory — must tag exp:mc to reach their POV
     context="Bartholomew's personal memories of Ravenswood from childhood",
 )
 
@@ -378,7 +379,7 @@ other staff and of his own parents at the manor are warm but fragmentary.""",
 print("Writing location notes…")
 
 engine._tool_save_location(
-    name="ravenwood-manor",
+    name="manor",
     description="""\
 Ravenswood Manor is a towering relic of Gothic architecture — dark stone
 facade, both grand and foreboding.  A central spire is flanked by two smaller
@@ -394,7 +395,7 @@ waitstaff, mechanics, servants, butlers, and drivers are women.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/cottage",
+    name="manor/cottage",
     description="""\
 A tiny detached cottage in the far depths of Ravenswood Manor's backyard.
 It contains a bedroom, a kitchenette, and a bathroom — everything needed for
@@ -405,7 +406,7 @@ It feels cozy, remote, and private.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/secret-garden",
+    name="manor/secret-garden",
     description="""\
 Deep in the backyard of Ravenswood Manor is a secret garden enclosed by high,
 dense hedges.  There is only one entryway.  The space feels utterly remote and
@@ -418,7 +419,7 @@ Visitors experience the garden as a place of complete privacy.""",
 )
 
 engine._tool_save_location(
-    name="ravenwood-manor/car-garage",
+    name="manor/car-garage",
     description="""\
 The car garage is enormous — as much a showroom as a working garage.  It is
 spotlessly maintained and spacious, with each of the Bellvues' vintage cars

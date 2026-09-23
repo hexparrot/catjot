@@ -9,7 +9,7 @@ import re
 import shutil
 import threading
 import time
-from collections import deque
+from collections import deque, namedtuple
 from datetime import datetime
 
 import rpjot as _rpjot_module
@@ -30,6 +30,7 @@ from rpjot import (
     MODEL_CONTEXT_LIMIT_TOKS,
     _RESPONSE_RESERVE_TOKS,
     _msg_toks,
+    _slug_path,
 )
 from catjot import Note, ContextBundle, NoteContext, SearchType, call_llm
 
@@ -61,9 +62,11 @@ _SLASH_EXACT = frozenset(
     ["/quit", "/mood", "/attn", "/prompt", "/timing"]
 )
 # /location, /people, /stats take an optional `full` sub-arg; /construct/objects/
-# yomi take a name arg — all prefix-matched by the unknown-command guard.
+# yomi take a name arg; /alias takes an optional name list — all prefix-matched
+# by the unknown-command guard.
 _SLASH_PREFIX = (
-    "/objects", "/yomi", "/construct", "/location", "/people", "/stats", "/debug"
+    "/objects", "/yomi", "/construct", "/location", "/people", "/stats", "/debug",
+    "/alias",
 )
 
 _SYSTEM_REFRESH_TEMPERATURE = 0.9
@@ -74,13 +77,6 @@ _SYSTEM_REFRESH_TEMPERATURE = 0.9
 # step-1 prompt shape and wants its own A/B.
 _BG_SEED = os.environ.get("RPJOT_BG_SEED", "") == "1"
 _BG_REFRESH = os.environ.get("RPJOT_BG_REFRESH", "") == "1"
-# MC aliases for third-person self-movement + the record_event MC gate
-# (e.g. RPJOT_MC_ALIASES=bartholomew,bart). Unset = first-person/mc-slug only.
-_MC_ALIASES = frozenset(
-    a.strip().lower()
-    for a in os.environ.get("RPJOT_MC_ALIASES", "").split(",")
-    if a.strip()
-)
 # Stream step-3 prose to the console token-by-token (perceived latency:
 # reading starts ~1s after step 2 instead of after the full generation).
 _STREAM = os.environ.get("RPJOT_STREAM", "") == "1"
@@ -101,6 +97,9 @@ _GRANULAR = os.environ.get("RPJOT_GRANULAR", "") == "1"
 # RPJOT_SCENE_MOVER=0 to silence both the staleness suggestion and the hard
 # auto-advance (e.g. for the legacy-control arm of bakeoff_agency.py).
 _SCENE_MOVER = os.environ.get("RPJOT_SCENE_MOVER", "1") == "1"
+# MC-relationship nudge. Default ON; RPJOT_MC_REL_NUDGE=0 silences the DIRECTOR
+# NOTE that asks the model to record the MC's own relationships.
+_MC_REL_NUDGE = os.environ.get("RPJOT_MC_REL_NUDGE", "1") == "1"
 
 
 def _apply_family_config(engine):
@@ -121,35 +120,101 @@ _PARAPHRASE_INSTRUCTION = (
 # Input classification
 # ---------------------------------------------------------------------------
 
-_SIGILS = ('"', "*", "@", "^")
+# Thought sigils: recognized ONLY when attached to the start of a whitespace-
+# delimited token (line start or right after whitespace, immediately followed by
+# content) — so `!draws`/`@evie`/`^thought`/`|aurora:` are sigils but a trailing
+# `go!` or an interior apostrophe/quote is literal. `*`, `"`, `'` are deliberately
+# NOT sigils (too common as emphasis/quoting); quotes are left for the LLM to read
+# in-segment. One line can carry several sigils; each becomes a discrete directive.
+_THOUGHT_SIGILS = {
+    "!": "action",
+    "@": "attention",
+    "^": "monologue",
+    "|": "injection",
+}
+
+# Standalone meta-tokens (whole token exactly two/three '+') that raise the reply
+# length — max wins. `2+2` / `a++b` never match; only a bare `++` / `+++` token.
+_LENGTH_TOKENS = {"++": 1, "+++": 2}
+
+_LENGTH_DIRECTIVES = {
+    1: "[REPLY LENGTH — longer]: Write a fuller, more detailed reply than usual.",
+    2: "[REPLY LENGTH — much longer]: Write a much longer, richly detailed reply.",
+}
+
+# A parsed input line: ordered thought segments + a reply-length level (0/1/2).
+# Segment.speaker is set only for a `|name: ...` injection.
+Segment = namedtuple("Segment", "kind text speaker")
+ParsedInput = namedtuple("ParsedInput", "segments length_level")
+
+# Back-compat alias for the recognized sigil characters.
+_SIGILS = tuple(_THOUGHT_SIGILS)
 
 _HELP_TEXT = (
-    "Input sigils:\n"
-    '  "text   — MC speaks aloud (default if no sigil)\n'
-    "  *text   — MC performs an action\n"
-    "  @name   — shift MC focus to person/object; tail is intent toward it\n"
-    "  ^text   — MC inner monologue (can seed backstory)\n"
+    "Input sigils (attach to the start of a word; combine freely in one line):\n"
+    "  !text        — MC performs an action\n"
+    "  @name tail   — shift MC focus to person/object; tail is intent toward it\n"
+    "  ^text        — MC inner monologue (can seed backstory)\n"
+    "  |name: text  — inject narrative/dialogue as canon (speaker optional)\n"
+    '  text         — MC speaks aloud (default); " and \' are read by the AI\n'
+    "  ++ / +++     — ask for a longer / much longer reply (standalone token)\n"
     "Commands: /quit, /people [full], /location [full], /objects [name], "
     "/construct <name>, /stats [full], /timing, /debug <description>, /mood, "
-    "/attn, /yomi <name>, /prompt [text]"
+    "/attn, /yomi <name>, /prompt [text], /alias [names...]"
 )
 
 
-def classify_input(raw: str) -> str:
-    """Translate player sigils into explicit LLM directives."""
-    if raw.startswith('"'):
-        return f"[MC speaks aloud]: {raw}"
+def segment_input(raw: str) -> ParsedInput:
+    """Mechanically split one input line into ordered, typed thought segments.
 
-    if raw.startswith("*"):
-        content = raw[1:].strip()
-        return f"[MC action]: {content}"
+    A thought sigil (! @ ^ |) delimits a segment only when it is the first
+    character of a whitespace-delimited token AND has content attached (len > 1);
+    a lone sigil token or a mid/end-word sigil ("go!") is literal. Standalone
+    `++`/`+++` tokens are pulled out as a reply-length level and never appear in a
+    segment. Text before the first sigil (or a line with no sigil) becomes one
+    default `speech` segment. Returns ParsedInput(segments, length_level).
+    """
+    length_level = 0
+    segments: list = []
+    cur_kind = "speech"  # leading, pre-sigil content defaults to speech
+    cur_tokens: list = []
 
-    if raw.startswith("@"):
-        rest = raw[1:]
-        tokens = rest.split(maxsplit=1)
-        target = tokens[0]
-        tail = tokens[1].strip() if len(tokens) > 1 else ""
-        lines = [
+    def flush():
+        text = " ".join(cur_tokens).strip()
+        if not text:
+            return  # nothing accumulated (e.g. line opened directly with a sigil)
+        speaker = None
+        seg_text = text
+        if cur_kind == "injection":
+            m = re.match(r"(\w[\w-]*):\s*(.*)$", text, re.DOTALL)
+            if m:
+                speaker, seg_text = m.group(1), m.group(2)
+        segments.append(Segment(cur_kind, seg_text, speaker))
+
+    for tok in (raw or "").split():
+        if tok in _LENGTH_TOKENS:
+            length_level = max(length_level, _LENGTH_TOKENS[tok])
+            continue
+        if len(tok) > 1 and tok[0] in _THOUGHT_SIGILS:
+            flush()
+            cur_kind = _THOUGHT_SIGILS[tok[0]]
+            cur_tokens = [tok[1:]]
+        else:
+            cur_tokens.append(tok)
+    flush()
+    return ParsedInput(segments, length_level)
+
+
+def _directive_for(seg: Segment) -> list:
+    """Map one parsed segment to its LLM directive line(s)."""
+    if seg.kind == "action":
+        return [f"[MC action]: {seg.text}"]
+
+    if seg.kind == "attention":
+        toks = seg.text.split(maxsplit=1)
+        target = toks[0] if toks else ""
+        tail = toks[1].strip() if len(toks) > 1 else ""
+        out = [
             f'[MC attention → "{target}"]: '
             f"Shift MC's focus to '{target}'. "
             f"If '{target}' is not yet in the scene but could plausibly exist here, "
@@ -158,21 +223,56 @@ def classify_input(raw: str) -> str:
             f"narrate the absence or redirect naturally."
         ]
         if tail:
-            lines.append(f'[MC intent regarding "{target}"]: {tail}')
-        return "\n".join(lines)
+            out.append(f'[MC intent regarding "{target}"]: {tail}')
+        return out
 
-    if raw.startswith("^"):
-        content = raw[1:].strip()
-        return (
-            f"[MC inner monologue — private, unspoken]: {content}\n"
+    if seg.kind == "monologue":
+        return [
+            f"[MC inner monologue — private, unspoken]: {seg.text}\n"
             "Narrate this as interior experience only, never as spoken dialogue. "
             "If it reveals a meaningful feeling, preference, aversion, memory, or "
             "developing emotional arc, use record_knowledge (witnessed by the MC "
             "alone) to preserve it as MC backstory."
-        )
+        ]
 
-    # Default: treat as spoken dialogue; note inference is acceptable
-    return f"[MC — likely spoken aloud, interpret as dialogue unless clearly an action]: {raw}"
+    if seg.kind == "injection":
+        head = (
+            f"[NARRATIVE INJECTION — {seg.speaker}]"
+            if seg.speaker
+            else "[NARRATIVE INJECTION]"
+        )
+        return [
+            f"{head}: {seg.text}\n"
+            "Treat this as canon this turn: narrate it as actually happening."
+        ]
+
+    # speech (default)
+    return [
+        "[MC — likely spoken aloud, interpret as dialogue unless clearly an "
+        f"action]: {seg.text}"
+    ]
+
+
+def classify_input(raw: str) -> str:
+    """Translate player sigils into explicit LLM directives.
+
+    Splits the line into discrete thought segments (segment_input) and joins each
+    one's directive with newlines, prefixed by a reply-length marker when `++`/
+    `+++` was present. Returns the legacy string contract (one block per thought).
+    """
+    parsed = segment_input(raw)
+    lines: list = []
+    if parsed.length_level:
+        lines.append(_LENGTH_DIRECTIVES[parsed.length_level])
+    for seg in parsed.segments:
+        lines.extend(_directive_for(seg))
+    if not lines:
+        # Empty / whitespace-only input: preserve a benign default directive.
+        return (
+            "[MC — likely spoken aloud, interpret as dialogue unless clearly an "
+            f"action]: {raw}"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -781,10 +881,10 @@ def recover_deterministic_state():
     ev = _newest_under((SearchType.TREE, PWD_EVENTS))
     if ev and ev.pwd.startswith(PWD_EVENTS + "/"):
         raw_loc = ev.pwd.removeprefix(PWD_EVENTS + "/").strip("/")
-        # Slug-normalize (same regex as _canonicalize_room): a historically
-        # fragmented pwd (manor/evie_quarters) must not seed session.location
-        # with a non-canonical variant on resume.
-        location = re.sub(r"[^a-z0-9/-]+", "-", raw_loc.lower()).strip("-/") or None
+        # Slug-normalize (shared _slug_path): a historically fragmented pwd
+        # (manor/evie_quarters) must not seed session.location with a
+        # non-canonical variant on resume.
+        location = _slug_path(raw_loc) or None
 
     scene = None
     sc = _newest_under((SearchType.TREE, PWD_SCENES))
@@ -902,6 +1002,8 @@ def apply_resume_state(engine, det_location, det_scene, inferred):
     # scene would look stale from turn 1 and could hard-advance mid-play.
     engine._scene_start_turn = engine._turn_count
     engine._scene_stale_streak = 0
+    # MC_REL: fresh scene on resume → re-arm the MC-relationship nudge.
+    engine._mc_rel_nudge_shown.clear()
 
     # First turn must rebuild the system doc for the restored scene/location.
     engine._system_refresh_pending = True
@@ -924,10 +1026,7 @@ def game_loop(engine, seed_summaries=False):
     # Idle-window background worker (RPJOT_BG_SEED / RPJOT_BG_REFRESH).
     engine.seed_enabled = _BG_SEED
     engine.scene_mover_enabled = _SCENE_MOVER
-    engine.mc_aliases = engine.mc_aliases | _MC_ALIASES
-    # rpjot's logger, not play's: the alias set must land in the session
-    # debug file so an under-firing gate is diagnosable from the log alone.
-    _rpjot_module.logger.info("[MC] alias set: %s", sorted(engine.mc_aliases))
+    engine.mc_rel_nudge_enabled = _MC_REL_NUDGE
     bg_thread = None
     if _STREAM:
         engine.prose_stream_cb = make_stream_printer(engine)
@@ -968,6 +1067,20 @@ def game_loop(engine, seed_summaries=False):
                 if _is_full
                 else summarize_location(engine)
             )
+            continue
+
+        if _cmd0 == "/alias":
+            # No args reads the live set; args rewrite it wholesale (the jot is
+            # last-write-wins, so restating without a name is how you drop one).
+            if not _cmd_args:
+                print(
+                    "MC aliases: "
+                    + ", ".join(sorted(engine.mc_aliases))
+                    + "\nUsage: /alias <name> [name ...]  (replaces the set)"
+                )
+                continue
+            names = [n.strip(",") for n in user_input.split()[1:]]
+            print("MC aliases: " + ", ".join(sorted(engine.set_mc_aliases(names))))
             continue
 
         if _cmd0 == "/construct":
@@ -1208,7 +1321,7 @@ def _resume_engine():
     """
     det_location, det_scene = recover_deterministic_state()
     engine = RPJotEngine(
-        location=det_location or "ravenwood-manor",
+        location=det_location or "manor",
         people_present={"mc"},
     )
     _apply_family_config(engine)
@@ -1285,7 +1398,7 @@ def main():
         engine = _resume_engine()
     else:
         engine = RPJotEngine(
-            location="ravenwood-manor",
+            location="manor",
             people_present={"mc"},
         )
         _apply_family_config(engine)
