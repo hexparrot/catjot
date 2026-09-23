@@ -7589,6 +7589,54 @@ class TestObjectPermanence(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestNoteIdAllocation(unittest.TestCase):
+    """Every rpjot write gets a distinct ``now`` id, even inside one second."""
+
+    def setUp(self):
+        Note.NOTEFILE = TMP_CATNOTE
+        open(TMP_CATNOTE, "w").close()
+        Note.append(
+            TMP_CATNOTE,
+            Note.jot(message="foyer", tag="", context="seed",
+                     pwd="/story/location/manor/foyer"),
+        )
+        self.engine = _make_engine(location="manor/foyer", people={"player"})
+
+    def tearDown(self):
+        try:
+            os.remove(TMP_CATNOTE)
+        except FileNotFoundError:
+            pass
+        Note.NOTEFILE = FIXED_CATNOTE
+
+    def _all(self):
+        from catjot import NoteContext, SearchType
+
+        with NoteContext(TMP_CATNOTE, (SearchType.ALL, "")) as nc:
+            return list(nc)
+
+    def test_burst_is_strictly_increasing(self):
+        ids = [rpjot.next_note_now() for _ in range(50)]
+        self.assertEqual(ids, sorted(set(ids)))
+
+    def test_ids_never_run_behind_the_clock(self):
+        import time as _t
+
+        self.assertGreaterEqual(rpjot.next_note_now(), int(_t.time()))
+
+    def test_explicit_now_is_respected(self):
+        self.assertEqual(rpjot._jot("x", pwd="/t", now=1234).now, 1234)
+
+    def test_multi_note_tool_calls_get_distinct_ids(self):
+        # save_object writes canon + sighting in one call; several calls in a row
+        # used to share the wall-clock second and collide.
+        for name in ("iron-key", "locket", "candle"):
+            self.engine._tool_save_object(name=name, description=f"A {name}.")
+        written = [n.now for n in self._all() if n.context != "seed"]
+        self.assertGreaterEqual(len(written), 6)
+        self.assertEqual(len(written), len(set(written)))
+
+
 class TestObjectWriteSide(unittest.TestCase):
     """save_object dual-write, place_object residence changes, and I4 stamping."""
 

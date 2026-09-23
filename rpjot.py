@@ -36,6 +36,36 @@ from catjot import (
 )
 
 
+# ── Note ids ────────────────────────────────────────────────────────────────
+# A note's identity is its one-second ``now`` stamp: ``ref:<ts>`` citations,
+# ``_newest_by_now`` ties and ``get_note``-style lookups all key off it.  A
+# single tool call often writes two notes (save_object, _add_edge, knowledge +
+# public act), and the seed script writes dozens in one second, so the bare
+# clock hands several notes the same id.  Every rpjot write therefore takes
+# its ``now`` from this allocator: the wall clock, bumped past the last id this
+# process issued.  Ids stay strictly increasing within a run; a burst drifts a
+# few seconds ahead of the clock and is re-absorbed by the next LLM round-trip.
+# (catjot_mcp._unique_now solves the same problem for MCP writers by re-reading
+# the whole notefile per call; rpjot is the sole writer of its session file, so
+# an in-process high-water mark is enough and costs nothing.)
+_LAST_NOTE_NOW = 0
+
+
+def next_note_now() -> int:
+    """Return a fresh, strictly increasing note id (epoch seconds)."""
+    global _LAST_NOTE_NOW
+    now = max(int(time.time()), _LAST_NOTE_NOW + 1)
+    _LAST_NOTE_NOW = now
+    return now
+
+
+def _jot(*args, **kwargs) -> Note:
+    """``Note.jot`` with a collision-free ``now`` unless the caller pins one."""
+    if kwargs.get("now") is None:
+        kwargs["now"] = next_note_now()
+    return Note.jot(*args, **kwargs)
+
+
 class LLMError(RuntimeError):
     """Raised when the LLM endpoint returns an error or is unreachable."""
 
@@ -2263,7 +2293,7 @@ class RPJotEngine:
         ) | {self.main_character.lower()}
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=(
                     "Player-facing names for the main character: "
                     + ", ".join(sorted(clean))
@@ -4348,7 +4378,7 @@ class RPJotEngine:
         leaf = path.rstrip("/").split("/")[-1]
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=(
                     f"{leaf.capitalize()}. "
                     "(Auto-created location node; awaiting description.)"
@@ -4415,7 +4445,7 @@ class RPJotEngine:
             tag = " ".join(sorted(_edge_tag(p) for p in union))
             Note.append(
                 Note.NOTEFILE,
-                Note.jot(
+                _jot(
                     # catjot forbids an empty message; a terse marker keeps the
                     # adjacency note distinct from (and harmless beside) the
                     # description note. Reads key off context/tags, not this text.
@@ -4483,7 +4513,7 @@ class RPJotEngine:
                 return False
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=f"{slug} (awaiting description).",
                 tag=f"{TAG_OBJ}{slug}",
                 context=f"object node (auto): {slug}",
@@ -5278,7 +5308,7 @@ class RPJotEngine:
             tag_str = f"{tag_str} {TAG_SCENE}{self.session.current_scene}"
         tag_str = self._stamp_refs(tag_str)
 
-        note = Note.jot(
+        note = _jot(
             message=description,
             tag=tag_str,
             context=context,
@@ -5492,7 +5522,7 @@ class RPJotEngine:
         if self.session.current_scene:
             nav_tag += f" {TAG_SCENE}{self.session.current_scene}"
 
-        note = Note.jot(
+        note = _jot(
             message=f"Traveled from {from_loc} to {to_loc} via: {' → '.join(traversal)}",
             tag=nav_tag,
             context=f"navigation event ({nav_type})",
@@ -5639,7 +5669,7 @@ class RPJotEngine:
         if tags:
             tag_str = f"{tag_str} {tags.strip()}"
 
-        note = Note.jot(
+        note = _jot(
             message=description,
             tag=tag_str,
             context=f"character profile: {name}",
@@ -5701,7 +5731,7 @@ class RPJotEngine:
 
         tag_str = tags.strip() if tags else ""
 
-        note = Note.jot(
+        note = _jot(
             message=description,
             tag=tag_str,
             context=f"location profile: {name}",
@@ -5765,7 +5795,7 @@ class RPJotEngine:
         # Canonical node (identity) — its own pwd namespace, never shadowed.
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=description,
                 tag=tag_str,
                 context=f"object canon: {slug}",
@@ -5775,7 +5805,7 @@ class RPJotEngine:
         # Genesis sighting (residence) — the room, byte-for-byte the old write.
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=description,
                 tag=tag_str,
                 context=f"object sighting: {slug} at {room}",
@@ -5874,7 +5904,7 @@ class RPJotEngine:
 
         Note.append(
             Note.NOTEFILE,
-            Note.jot(
+            _jot(
                 message=state or f"{slug} is here.",
                 tag=f"{TAG_OBJ}{slug}",
                 context=f"object sighting: {slug} at {residence}",
@@ -6219,7 +6249,7 @@ class RPJotEngine:
         if self.session.current_scene:
             witness_tags += f" {TAG_SCENE}{self.session.current_scene}"
 
-        private_note = Note.jot(
+        private_note = _jot(
             message=content,
             tag=self._stamp_refs(witness_tags),
             context=context or f"private knowledge: {', '.join(clean_witnesses)}",
@@ -6245,7 +6275,7 @@ class RPJotEngine:
                 public_tags += f" {TAG_SCENE}{self.session.current_scene}"
             non_witnesses = sorted(set(all_present) - set(clean_witnesses))
 
-            public_note = Note.jot(
+            public_note = _jot(
                 message=observable_act,
                 tag=self._stamp_refs(public_tags),
                 context=(
@@ -6317,7 +6347,7 @@ class RPJotEngine:
         # MC_REL: re-arm one MC-relationship nudge per pair for the new scene.
         self._mc_rel_nudge_shown.clear()
 
-        note = Note.jot(
+        note = _jot(
             message=description,
             tag=f"{TAG_SCENE}{name}",
             context=f"scene: {name}",
@@ -6461,7 +6491,7 @@ class RPJotEngine:
         )
 
         tag_str = f"{TAG_CONS}{trait}"
-        note = Note.jot(
+        note = _jot(
             message=f"{description}\n\nBehavioral guidance: {behavioral_guidance}",
             tag=self._stamp_refs(tag_str),
             context=f"conscience: {character} — {trait}",
@@ -6599,7 +6629,7 @@ class RPJotEngine:
         """Persist the MC's yomi insight about another character."""
         logger.info("ENTER _tool_save_yomi: character=%r", character)
 
-        note = Note.jot(
+        note = _jot(
             message=insight,
             tag=self._stamp_refs(f"{TAG_YOMI}{character}"),
             context=f"yomi: {self.main_character} → {character}",
@@ -6831,7 +6861,7 @@ class RPJotEngine:
     ) -> str:
         logger.info("ENTER _tool_record_bond: %r ↔ %r [%s]", char_a, char_b, bond_type)
         pair = self._rel_key(char_a, char_b)
-        note = Note.jot(
+        note = _jot(
             message=f"Bond type: {bond_type}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_REL}bond {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"bond: {char_a} ↔ {char_b} ({bond_type})",
@@ -6879,7 +6909,7 @@ class RPJotEngine:
     ) -> str:
         logger.info("ENTER _tool_record_history: %r ↔ %r", char_a, char_b)
         pair = self._rel_key(char_a, char_b)
-        note = Note.jot(
+        note = _jot(
             message=f"{event}\n\nSignificance: {significance}",
             tag=self._stamp_refs(f"{TAG_REL}history {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"shared history: {char_a} ↔ {char_b}",
@@ -6920,7 +6950,7 @@ class RPJotEngine:
     ) -> str:
         logger.info("ENTER _tool_record_dynamic: %r ↔ %r [%s]", char_a, char_b, pattern)
         pair = self._rel_key(char_a, char_b)
-        note = Note.jot(
+        note = _jot(
             message=f"Pattern: {pattern}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_REL}dynamic {TAG_CHAR}{char_a} {TAG_CHAR}{char_b}"),
             context=f"dynamic: {char_a} ↔ {char_b} ({pattern})",
@@ -6976,7 +7006,7 @@ class RPJotEngine:
             "ENTER _tool_record_power_dynamic: %r over %r [%s]", holder, subject, basis
         )
         pair = self._rel_key(holder, subject)
-        note = Note.jot(
+        note = _jot(
             message=f"Holder: {holder} | Subject: {subject} | Basis: {basis}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_REL}power {TAG_CHAR}{holder} {TAG_CHAR}{subject}"),
             context=f"power dynamic: {holder} over {subject} ({basis})",
@@ -7026,7 +7056,7 @@ class RPJotEngine:
         logger.info("ENTER _tool_record_wound: %r → %r", inflicter, wounded)
         pair = self._rel_key(inflicter, wounded)
         awareness = "known to inflicter" if known_to_inflicter else "inflicter unaware"
-        note = Note.jot(
+        note = _jot(
             message=f"Inflicter: {inflicter} | Wounded: {wounded} | {awareness}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_REL}wound {TAG_CHAR}{inflicter} {TAG_CHAR}{wounded}"),
             context=f"wound: {inflicter} → {wounded}",
@@ -7084,7 +7114,7 @@ class RPJotEngine:
         )
         if stakes:
             body += f"\n\nStakes: {stakes}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_REL}promise {TAG_CHAR}{promiser} {TAG_CHAR}{recipient}"),
             context=f"promise: {promiser} → {recipient}",
@@ -7127,7 +7157,7 @@ class RPJotEngine:
     ) -> str:
         logger.info("ENTER _tool_record_debt: %r owes %r", debtor, creditor)
         pair = self._rel_key(debtor, creditor)
-        note = Note.jot(
+        note = _jot(
             message=f"Debtor: {debtor} | Creditor: {creditor}\n\nOwed: {what_is_owed}\n\nOrigin: {origin}",
             tag=self._stamp_refs(f"{TAG_REL}debt {TAG_CHAR}{debtor} {TAG_CHAR}{creditor}"),
             context=f"debt: {debtor} owes {creditor}",
@@ -7170,7 +7200,7 @@ class RPJotEngine:
     ) -> str:
         logger.info("ENTER _tool_record_lie: %r → %r", liar, target)
         pair = self._rel_key(liar, target)
-        note = Note.jot(
+        note = _jot(
             message=f"Liar: {liar} | Target: {target}\n\nStatement: {statement}\n\nTruth: {truth}",
             tag=self._stamp_refs(f"{TAG_REL}lie {TAG_CHAR}{liar} {TAG_CHAR}{target}"),
             context=f"lie: {liar} → {target}",
@@ -7208,7 +7238,7 @@ class RPJotEngine:
     def _tool_record_leverage(self, holder: str, subject: str, description: str) -> str:
         logger.info("ENTER _tool_record_leverage: %r over %r", holder, subject)
         pair = self._rel_key(holder, subject)
-        note = Note.jot(
+        note = _jot(
             message=f"Holder: {holder} | Subject: {subject}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_REL}leverage {TAG_CHAR}{holder} {TAG_CHAR}{subject}"),
             context=f"leverage: {holder} over {subject}",
@@ -7256,7 +7286,7 @@ class RPJotEngine:
         body = f"Observer: {observer} | Subject: {subject}\n\nImpression: {impression}"
         if trigger:
             body += f"\n\nTriggered by: {trigger}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_REL}impression {TAG_CHAR}{observer} {TAG_CHAR}{subject}"),
             context=f"impression: {observer} of {subject}",
@@ -7303,7 +7333,7 @@ class RPJotEngine:
         body = secret
         if concealed_from:
             body += f"\n\nConcealed from: {concealed_from}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_INT}secret {TAG_CHAR}{character}"),
             context=f"secret: {character}",
@@ -7351,7 +7381,7 @@ class RPJotEngine:
             body = f"Directed at: {target}\n\n{body}"
         if subtext:
             body += f"\n\nSubtext: {subtext}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_INT}desire {TAG_CHAR}{character}"),
             context=f"desire: {character}",
@@ -7392,7 +7422,7 @@ class RPJotEngine:
         self, character: str, subject: str, description: str
     ) -> str:
         logger.info("ENTER _tool_record_longing: %r for %r", character, subject)
-        note = Note.jot(
+        note = _jot(
             message=f"Longing for: {subject}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_INT}longing {TAG_CHAR}{character}"),
             context=f"longing: {character} for {subject}",
@@ -7441,7 +7471,7 @@ class RPJotEngine:
         self, character: str, target: str, subject_of_competition: str, description: str
     ) -> str:
         logger.info("ENTER _tool_record_jealousy: %r of %r", character, target)
-        note = Note.jot(
+        note = _jot(
             message=f"Envious of: {target} | Over: {subject_of_competition}\n\n{description}",
             tag=self._stamp_refs(f"{TAG_INT}jealousy {TAG_CHAR}{character}"),
             context=f"jealousy: {character} of {target}",
@@ -7482,7 +7512,7 @@ class RPJotEngine:
         self, character: str, public_persona: str, private_self: str
     ) -> str:
         logger.info("ENTER _tool_record_mask: character=%r", character)
-        note = Note.jot(
+        note = _jot(
             message=f"Public persona: {public_persona}\n\nPrivate self: {private_self}",
             tag=self._stamp_refs(f"{TAG_INT}mask {TAG_CHAR}{character}"),
             context=f"mask: {character}",
@@ -7527,7 +7557,7 @@ class RPJotEngine:
         body = f'Said: "{statement}"\n\nMeant: {actual_meaning}'
         if audience:
             body += f"\n\nAimed at: {audience}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_INT}subtext {TAG_CHAR}{speaker}"),
             context=f"subtext: {speaker}",
@@ -7572,7 +7602,7 @@ class RPJotEngine:
         body = f"Perceived as: {perceived_as}\n\nReality: {reality}"
         if in_context:
             body += f"\n\nContext: {in_context}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_INT}reputation {TAG_CHAR}{character}"),
             context=f"reputation: {character}",
@@ -7620,7 +7650,7 @@ class RPJotEngine:
         body = f"Trigger: {trigger}\n\nReaction: {reaction}"
         if origin:
             body += f"\n\nOrigin: {origin}"
-        note = Note.jot(
+        note = _jot(
             message=body,
             tag=self._stamp_refs(f"{TAG_INT}trigger {TAG_CHAR}{character}"),
             context=f"trigger: {character}",
@@ -7664,7 +7694,7 @@ class RPJotEngine:
         self, character: str, target: str, what_they_want_to_say: str, why_unsaid: str
     ) -> str:
         logger.info("ENTER _tool_record_unspoken: %r → %r", character, target)
-        note = Note.jot(
+        note = _jot(
             message=f"To: {target}\n\nUnsaid: {what_they_want_to_say}\n\nWhy unsaid: {why_unsaid}",
             tag=self._stamp_refs(f"{TAG_INT}unspoken {TAG_CHAR}{character}"),
             context=f"unspoken: {character} → {target}",
@@ -8115,7 +8145,7 @@ class RPJotEngine:
 
             tags = f"tool:{fn_name}"
 
-            note = Note.jot(
+            note = _jot(
                 message=note_body,
                 tag=tags,
                 context=f"tool call log at {loc}",

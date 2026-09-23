@@ -1272,6 +1272,7 @@ def game_loop(engine, seed_summaries=False):
             tag="summary",
             context=user_input,
             pwd=PWD_SUMMARIES,
+            now=_rpjot_module.next_note_now(),
         )
         Note.append(Note.NOTEFILE, note)
 

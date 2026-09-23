@@ -44,7 +44,10 @@ engine.register_all_tools()
 
 
 def raw_jot(message, tag, context, pwd):
-    note = Note.jot(message=message, tag=tag, context=context, pwd=pwd)
+    note = Note.jot(
+        message=message, tag=tag, context=context, pwd=pwd,
+        now=_rpjot_module.next_note_now(),
+    )
     Note.append(OUTPUT, note)
 
 
