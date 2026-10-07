@@ -1734,5 +1734,101 @@ class TestCliBadInput(unittest.TestCase):
         self.assertNotIn("jot:", result.stderr)
 
 
+def _durable_writer(path, worker, count, size):
+    """One process appending ``count`` big notes durably (TestDurableAppend)."""
+    for i in range(count):
+        body = f"w{worker} n{i} " + ("x" * size)
+        Note.append(path, Note.jot(body, tag=f"w{worker}", pwd="/durable", now=1700000000 + i),
+                    durable=True)
+
+
+class TestDurableAppend(unittest.TestCase):
+    """append(durable=True): one locked write, then fsync; the format is
+    append()'s own, byte for byte."""
+
+    def setUp(self):
+        import tempfile
+
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "log.jot")
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_same_bytes_as_a_plain_append(self):
+        note = Note.jot("line one\nline two", tag="a b", context="ctx", pwd="/x", now=1700000000)
+        plain = os.path.join(self.dir, "plain.jot")
+        Note.append(plain, note)
+        Note.append(self.path, note, durable=True)
+        with open(plain, "rb") as a, open(self.path, "rb") as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_round_trips_through_iterate(self):
+        for i in range(3):
+            Note.append(self.path, Note.jot(f"msg {i}", tag="t", context=f"c{i}", pwd="/r",
+                                            now=1700000000 + i), durable=True)
+        notes = list(Note.iterate(self.path))
+        self.assertEqual([n.message for n in notes], ["msg 0\n", "msg 1\n", "msg 2\n"])
+        self.assertEqual([n.context for n in notes], ["c0", "c1", "c2"])
+
+    def test_a_file_it_creates_is_0600(self):
+        import stat
+
+        Note.append(self.path, Note.jot("m", pwd="/r"), durable=True)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+
+    def test_locks_and_fsyncs(self):
+        import fcntl
+
+        with patch("fcntl.flock", wraps=fcntl.flock) as flock, \
+                patch("os.fsync", wraps=os.fsync) as fsync:
+            Note.append(self.path, Note.jot("m", pwd="/r"), durable=True)
+        self.assertEqual(flock.call_args[0][1], fcntl.LOCK_EX)
+        fsync.assert_called_once()
+
+    def test_without_the_flag_nothing_changes(self):
+        with patch("os.fsync") as fsync:
+            Note.append(self.path, Note.jot("m", pwd="/r"))
+        fsync.assert_not_called()
+
+    def test_concurrent_durable_writers_never_interleave(self):
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("fork")
+        procs = [ctx.Process(target=_durable_writer, args=(self.path, w, 25, 70000))
+                 for w in range(6)]
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join()
+            self.assertEqual(proc.exitcode, 0)
+        notes = list(Note.iterate(self.path))
+        self.assertEqual(len(notes), 6 * 25)
+        for n in notes:
+            worker, index = n.message.split()[:2]
+            self.assertEqual(n.tag, worker)
+            self.assertEqual(n.message, f"{worker} {index} " + "x" * 70000 + "\n")
+
+
+class TestLazyRequests(unittest.TestCase):
+    """Reading and writing notes pulls in no network code."""
+
+    def test_import_catjot_does_not_import_requests(self):
+        import subprocess
+
+        out = subprocess.run(
+            [sys.executable, "-c", "import sys, catjot; print('requests' in sys.modules)"],
+            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)))
+        self.assertEqual(out.stdout.strip(), "False", out.stderr)
+
+    def test_the_attribute_still_resolves(self):
+        import catjot
+        import requests
+
+        self.assertIs(catjot.requests, requests)
+
+
 if __name__ == "__main__":
     unittest.main()
