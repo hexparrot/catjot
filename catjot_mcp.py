@@ -30,9 +30,9 @@ failure mode into an error string instead of raising.  MCP's ``tools/list`` and
   * a newline-delimited JSON-RPC 2.0 loop over stdin/stdout.
 
 Transport is pure stdlib (no ``mcp`` SDK, no new dependency) — matching the
-project's zero-dependency, stdlib+requests ethos.  Note that ``import catjot``
-transitively pulls in ``requests`` (catjot needs it for the LLM endpoint) even
-though this server never touches the network.
+project's zero-dependency ethos.  ``import catjot`` doesn't pull in
+``requests`` either: catjot imports it on first use, and only the LLM endpoint
+uses it, which this server never touches.
 
 Run it
 ──────

@@ -35,7 +35,6 @@ Architecture at a glance
   main()          — the CLI; all user-facing commands land here
 """
 
-import requests
 import json
 import sys
 from functools import partial
@@ -452,7 +451,7 @@ class Note(object):
         )
 
     @classmethod
-    def append(cls, src, note):
+    def append(cls, src, note, durable=False):
         """Serialise a Note and append it to the note file.
 
         Writes one complete record — separator, all four header fields, and
@@ -460,15 +459,30 @@ class Note(object):
         opened in append mode ("at") so concurrent writers don't clobber each
         other's notes (though concurrent *deletes* are not safe).
 
+        ``durable=True`` is for a program that keeps its log in a note file:
+        the whole record goes out in one ``write()`` (looping only on a short
+        write) under an exclusive ``flock``, then ``fsync``, so a record is
+        on disk when this returns and another durable writer can't land in
+        the middle of it.  A file it creates is 0600, and its directory is
+        fsynced too so the new entry survives a crash.  The lock blocks with
+        no timeout: a writer stopped mid-append (SIGSTOP, a debugger) holds
+        up every other durable writer until it resumes or exits.  Without
+        the flag, nothing changes.
+
         Args:
-            src:  path to the .catjot file (created if it doesn't exist).
-            note: a Note object; its message must be non-empty.
+            src:     path to the .catjot file (created if it doesn't exist).
+            note:    a Note object; its message must be non-empty.
+            durable: one locked, fsynced write (see above).
 
         Raises:
             ValueError: if note.message is falsy (empty string).
         """
         if not note.message:
             raise ValueError("Cannot append a note with an empty message")
+
+        if durable:
+            cls._append_durable(src, cls._record(note))
+            return
 
         # tag and context each occupy a single line in the record format;
         # collapse any embedded newlines defensively so a Note built outside
@@ -480,6 +494,49 @@ class Note(object):
             file.write(f"{Note.LABEL_TAG}{Note._single_line(note.tag)}\n")
             file.write(f"{Note.LABEL_CTX}{Note._single_line(note.context)}\n")
             file.write(f"{Note.LABEL_ARG}{note.message}\n\n")
+
+    @staticmethod
+    def _record(note):
+        """One note in the on-disk format, exactly as append() writes it."""
+        return (
+            f"{Note.LABEL_SEP}\n"
+            f"{Note.LABEL_PWD}{note.pwd}\n"
+            f"{Note.LABEL_NOW}{note.now}\n"
+            f"{Note.LABEL_TAG}{Note._single_line(note.tag)}\n"
+            f"{Note.LABEL_CTX}{Note._single_line(note.context)}\n"
+            f"{Note.LABEL_ARG}{note.message}\n\n"
+        )
+
+    @staticmethod
+    def _append_durable(src, record):
+        """Append ``record`` in one locked write, then fsync (append's
+        ``durable=True``).  Closing the descriptor releases the lock."""
+        import fcntl
+        import os
+
+        data = memoryview(record.encode("utf-8"))
+        flags = os.O_WRONLY | os.O_APPEND
+        try:
+            fd = os.open(src, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            fd = os.open(src, flags)
+            created = False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        # a new file's directory entry isn't durable until the directory is
+        if created:
+            dfd = os.open(os.path.dirname(src) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
     @classmethod
     def delete(cls, src, timestamp):
@@ -1373,6 +1430,27 @@ class catjot_graphql(object):
 # START: LLM/MCP FUNCTIONS
 
 
+def _requests():
+    """``requests``, imported on first use: only the LLM endpoint needs it, so
+    reading and writing notes (``import catjot`` as a library) pulls in no
+    network code.  Cached as the module attribute ``catjot.requests``, where
+    tests patch it."""
+    module = globals().get("requests")
+    if module is None:
+        import requests as module
+
+        globals()["requests"] = module
+    return module
+
+
+def __getattr__(name):
+    """``catjot.requests`` from outside (tests patch ``requests.post`` on it)
+    imports it on first access, as :func:`_requests` does."""
+    if name == "requests":
+        return _requests()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # Endpoint transport tuning (env-overridable). requests.Timeout subclasses
 # RequestException, so every existing endpoint error handler already covers a
 # timeout. Kept as read-at-import constants so slow local-model setups can raise
@@ -1415,6 +1493,7 @@ def _is_retryable(exc):
     asking us to back off.  A 4xx other than 429 is a request bug — never
     retried, since replaying it would only fail the same way.
     """
+    requests = _requests()
     if isinstance(
         exc,
         (requests.exceptions.ConnectionError, requests.exceptions.Timeout),
@@ -1469,6 +1548,7 @@ def call_llm(
     Returns the ``message`` dict from ``choices[0]``.  Raises
     ``requests.HTTPError`` on a non-2xx response.
     """
+    requests = _requests()
     api_url, api_model, headers = _endpoint_config()
 
     payload = {
@@ -2001,6 +2081,7 @@ def send_prompt_to_endpoint(messages, model_name, mode):
         for a typewriter effect.  On network failure the generator yields
         ``"[Error]"`` rather than raising.
     """
+    requests = _requests()
     api_url, api_model, headers = _endpoint_config(model_name)
 
     if mode == "full":
