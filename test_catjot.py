@@ -1786,6 +1786,12 @@ class TestDurableAppend(unittest.TestCase):
                 patch("os.fsync", wraps=os.fsync) as fsync:
             Note.append(self.path, Note.jot("m", pwd="/r"), durable=True)
         self.assertEqual(flock.call_args[0][1], fcntl.LOCK_EX)
+        # creating the file: the file, then its directory entry
+        self.assertEqual(fsync.call_count, 2)
+
+        with patch("os.fsync", wraps=os.fsync) as fsync:
+            Note.append(self.path, Note.jot("n", pwd="/r"), durable=True)
+        # appending to it: the file alone
         fsync.assert_called_once()
 
     def test_without_the_flag_nothing_changes(self):

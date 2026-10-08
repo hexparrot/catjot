@@ -463,8 +463,11 @@ class Note(object):
         the whole record goes out in one ``write()`` (looping only on a short
         write) under an exclusive ``flock``, then ``fsync``, so a record is
         on disk when this returns and another durable writer can't land in
-        the middle of it.  A file it creates is 0600.  Without the flag,
-        nothing changes.
+        the middle of it.  A file it creates is 0600, and its directory is
+        fsynced too so the new entry survives a crash.  The lock blocks with
+        no timeout: a writer stopped mid-append (SIGSTOP, a debugger) holds
+        up every other durable writer until it resumes or exits.  Without
+        the flag, nothing changes.
 
         Args:
             src:     path to the .catjot file (created if it doesn't exist).
@@ -512,7 +515,13 @@ class Note(object):
         import os
 
         data = memoryview(record.encode("utf-8"))
-        fd = os.open(src, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        flags = os.O_WRONLY | os.O_APPEND
+        try:
+            fd = os.open(src, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            fd = os.open(src, flags)
+            created = False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             while data:
@@ -520,6 +529,14 @@ class Note(object):
             os.fsync(fd)
         finally:
             os.close(fd)
+
+        # a new file's directory entry isn't durable until the directory is
+        if created:
+            dfd = os.open(os.path.dirname(src) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
     @classmethod
     def delete(cls, src, timestamp):
